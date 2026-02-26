@@ -1,1 +1,130 @@
-"""Config tests — implemented in Task 2."""
+"""Config loading and validation tests."""
+
+import pytest
+import yaml
+from pathlib import Path
+from scad.config import ScadConfig, load_config
+
+
+@pytest.fixture
+def tmp_config_dir(tmp_path):
+    """Create a temporary config directory with a sample config."""
+    templates_dir = tmp_path / "templates"
+    templates_dir.mkdir()
+    return tmp_path
+
+
+@pytest.fixture
+def sample_config_dict():
+    """Minimal valid config as a Python dict."""
+    return {
+        "name": "test-project",
+        "repos": {
+            "code": {
+                "path": "/tmp/fake-repo",
+                "workdir": True,
+                "branch_from": "main",
+            }
+        },
+    }
+
+
+@pytest.fixture
+def sample_config_file(tmp_config_dir, sample_config_dict):
+    """Write a sample config YAML file and return its path."""
+    config_path = tmp_config_dir / "templates" / "test-project.yml"
+    config_path.write_text(yaml.dump(sample_config_dict))
+    return config_path
+
+
+class TestScadConfig:
+    def test_minimal_valid_config(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.name == "test-project"
+        assert config.repos["code"].path == "/tmp/fake-repo"
+        assert config.repos["code"].workdir is True
+
+    def test_defaults(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.base_image == "python:3.11-slim"
+        assert config.apt_packages == []
+        assert config.mounts == []
+        assert config.claude.dangerously_skip_permissions is False
+
+    def test_workdir_key(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.workdir_key == "code"
+
+    def test_no_workdir_raises(self):
+        with pytest.raises(Exception):
+            ScadConfig(
+                name="bad",
+                repos={"code": {"path": "/tmp/fake"}},
+            )
+
+    def test_multiple_workdir_raises(self):
+        with pytest.raises(Exception):
+            ScadConfig(
+                name="bad",
+                repos={
+                    "a": {"path": "/tmp/a", "workdir": True},
+                    "b": {"path": "/tmp/b", "workdir": True},
+                },
+            )
+
+    def test_repo_defaults(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        repo = config.repos["code"]
+        assert repo.branch_from == "main"
+        assert repo.add_dir is False
+
+    def test_with_mounts(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            mounts=[{"host": "/data", "container": "/mnt/data"}],
+        )
+        assert len(config.mounts) == 1
+        assert config.mounts[0].host == "/data"
+
+    def test_with_python_config(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            python={"version": "3.11", "requirements": "requirements.txt"},
+        )
+        assert config.python.version == "3.11"
+        assert config.python.requirements == "requirements.txt"
+
+    def test_with_claude_config(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"dangerously_skip_permissions": True, "additional_flags": "--verbose"},
+        )
+        assert config.claude.dangerously_skip_permissions is True
+        assert config.claude.additional_flags == "--verbose"
+
+    def test_with_apt_packages(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            apt_packages=["build-essential", "ffmpeg"],
+        )
+        assert config.apt_packages == ["build-essential", "ffmpeg"]
+
+
+class TestLoadConfig:
+    def test_load_from_file(self, tmp_config_dir, sample_config_file):
+        config = load_config("test-project", config_dir=tmp_config_dir)
+        assert config.name == "test-project"
+
+    def test_config_not_found(self, tmp_config_dir):
+        with pytest.raises(FileNotFoundError):
+            load_config("nonexistent", config_dir=tmp_config_dir)
+
+    def test_invalid_yaml(self, tmp_config_dir):
+        bad_file = tmp_config_dir / "templates" / "bad.yml"
+        bad_file.write_text("name: [invalid\n")
+        with pytest.raises(Exception):
+            load_config("bad", config_dir=tmp_config_dir)
