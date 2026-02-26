@@ -125,12 +125,28 @@ class TestScadBuild:
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
-        mock_build.return_value = "scad-test"
+        mock_build.return_value = iter(["Step 1/5 : FROM python:3.11-slim"])
 
         result = runner.invoke(main, ["build", "test"])
         assert result.exit_code == 0
         assert "Image built" in result.output
         mock_build.assert_called_once()
+
+    @patch("scad.cli.build_image")
+    @patch("scad.cli.load_config")
+    def test_build_streams_output(self, mock_load, mock_build, runner):
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_build.return_value = iter([
+            "Step 1/5 : FROM python:3.11-slim",
+            "Step 2/5 : RUN apt-get update",
+        ])
+
+        result = runner.invoke(main, ["build", "test"])
+        assert result.exit_code == 0
+        assert "Step 1/5" in result.output
+        assert "Step 2/5" in result.output
 
     @patch("scad.cli.load_config")
     def test_build_config_not_found(self, mock_load, runner):
@@ -171,9 +187,8 @@ class TestScadRun:
         )
         assert result.exit_code == 0
         mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        assert call_kwargs[1]["branch"] == "plan-01"
-        assert call_kwargs[1]["prompt"] == "do stuff"
+        assert mock_run.call_args[1]["branch"] == "plan-01"
+        assert mock_run.call_args[1]["prompt"] == "do stuff"
 
 
 class TestShellCompletion:

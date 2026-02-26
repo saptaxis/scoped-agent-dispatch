@@ -78,9 +78,11 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
 
     # Build image if needed
     if rebuild or not image_exists(config):
-        click.echo(f"[scad] Building image scad-{config.name}...")
+        tag = f"scad-{config.name}"
+        click.echo(f"[scad] Building image {tag}...")
         with tempfile.TemporaryDirectory() as build_dir:
-            tag = build_image(config, Path(build_dir))
+            for line in build_image(config, Path(build_dir)):
+                click.echo(f"  {line}")
         click.echo(f"[scad] Image built: {tag}")
     else:
         click.echo(f"[scad] Using cached image scad-{config.name}")
@@ -212,10 +214,12 @@ def build(config_name: str):
         click.echo(f"[scad] Config validation error: {e}", err=True)
         sys.exit(2)
 
-    click.echo(f"[scad] Building image scad-{config.name}...")
+    tag = f"scad-{config.name}"
+    click.echo(f"[scad] Building image {tag}...")
     try:
         with tempfile.TemporaryDirectory() as build_dir:
-            tag = build_image(config, Path(build_dir))
+            for line in build_image(config, Path(build_dir)):
+                click.echo(f"  {line}")
         click.echo(f"[scad] Image built: {tag}")
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)

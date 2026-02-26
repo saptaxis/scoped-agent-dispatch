@@ -150,14 +150,19 @@ def get_image_info(config_name: str) -> Optional[dict]:
         return None
 
 
-def build_image(config: ScadConfig, build_dir: Path) -> str:
-    """Build a Docker image for the given config. Returns the image tag."""
+def build_image(config: ScadConfig, build_dir: Path):
+    """Build a Docker image for the given config. Yields build log lines."""
     tag = f"scad-{config.name}"
     render_build_context(config, build_dir)
 
     client = docker.from_env()
-    client.images.build(path=str(build_dir), tag=tag, rm=True)
-    return tag
+    for chunk in client.api.build(path=str(build_dir), tag=tag, rm=True, decode=True):
+        if "stream" in chunk:
+            line = chunk["stream"].rstrip()
+            if line:
+                yield line
+        elif "error" in chunk:
+            raise docker.errors.BuildError(chunk["error"], [])
 
 
 def image_exists(config: ScadConfig) -> bool:

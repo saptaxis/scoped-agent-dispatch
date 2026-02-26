@@ -10,6 +10,7 @@ import docker
 from scad.container import (
     render_build_context,
     generate_run_id,
+    build_image,
     list_scad_containers,
     list_completed_runs,
     stop_container,
@@ -76,6 +77,50 @@ class TestGenerateRunId:
     def test_contains_branch(self):
         run_id = generate_run_id("my-feature")
         assert "my-feature" in run_id
+
+
+class TestBuildImage:
+    @patch("scad.container.docker.from_env")
+    def test_build_streams_output(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        mock_client.api.build.return_value = iter([
+            {"stream": "Step 1/5 : FROM python:3.11-slim\n"},
+            {"stream": "Step 2/5 : RUN apt-get update\n"},
+        ])
+
+        lines = list(build_image(sample_config, tmp_path))
+        assert len(lines) == 2
+        assert "Step 1/5" in lines[0]
+        mock_client.api.build.assert_called_once()
+
+    @patch("scad.container.docker.from_env")
+    def test_build_raises_on_error(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        mock_client.api.build.return_value = iter([
+            {"stream": "Step 1/5 : FROM python:3.11-slim\n"},
+            {"error": "something went wrong"},
+        ])
+
+        with pytest.raises(docker.errors.BuildError):
+            list(build_image(sample_config, tmp_path))
+
+    @patch("scad.container.docker.from_env")
+    def test_build_skips_empty_lines(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        mock_client.api.build.return_value = iter([
+            {"stream": "Step 1/5\n"},
+            {"stream": "\n"},
+            {"stream": "Step 2/5\n"},
+        ])
+
+        lines = list(build_image(sample_config, tmp_path))
+        assert len(lines) == 2
 
 
 class TestListScadContainers:
