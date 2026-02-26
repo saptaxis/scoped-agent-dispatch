@@ -4,7 +4,40 @@ import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
-from scad.cli import main, _complete_run_ids, _complete_config_names
+from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time
+
+
+@pytest.fixture
+def runner():
+    return CliRunner()
+
+
+class TestRelativeTime:
+    def test_just_now(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        assert _relative_time(now) == "just now"
+
+    def test_minutes_ago(self):
+        from datetime import datetime, timezone, timedelta
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        assert "min ago" in _relative_time(past)
+
+    def test_garbage_input(self):
+        result = _relative_time("not-a-date")
+        assert result == "not-a-date"
+
+    def test_empty_string(self):
+        assert _relative_time("") == "?"
+
+    def test_none_input(self):
+        assert _relative_time(None) == "?"
+
+    def test_future_timestamp(self):
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        result = _relative_time(future)
+        assert result == "just now"  # max(0, ...) clamps to 0
 
 
 class TestScadConfigs:
@@ -28,11 +61,6 @@ class TestScadConfigs:
         result = runner.invoke(main, ["configs"])
         assert result.exit_code == 0
         assert "No configs" in result.output
-
-
-@pytest.fixture
-def runner():
-    return CliRunner()
 
 
 class TestScadStop:
@@ -84,9 +112,11 @@ class TestScadLogs:
 
 
 class TestScadStatus:
+    @patch("scad.cli.fetch_pending_bundles")
     @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
-    def test_status_shows_running_and_completed(self, mock_running, mock_completed, runner):
+    def test_status_shows_running_and_completed(self, mock_running, mock_completed, mock_fetch, runner):
+        mock_fetch.return_value = []
         mock_running.return_value = [{
             "run_id": "test-Feb26-1430",
             "config": "myconfig",
@@ -108,14 +138,28 @@ class TestScadStatus:
         assert "running" in result.output
         assert "exited(0)" in result.output
 
+    @patch("scad.cli.fetch_pending_bundles")
     @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
-    def test_status_empty(self, mock_running, mock_completed, runner):
+    def test_status_empty(self, mock_running, mock_completed, mock_fetch, runner):
+        mock_fetch.return_value = []
         mock_running.return_value = []
         mock_completed.return_value = []
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         assert "No agents" in result.output
+
+    @patch("scad.cli.fetch_pending_bundles")
+    @patch("scad.cli.list_completed_runs")
+    @patch("scad.cli.list_scad_containers")
+    def test_status_auto_fetches_bundles(self, mock_running, mock_completed, mock_fetch, runner):
+        mock_fetch.return_value = [{"run_id": "test-Feb26-1430", "fetched": {"code": True}}]
+        mock_running.return_value = []
+        mock_completed.return_value = []
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "Auto-fetched" in result.output
+        assert "test-Feb26-1430" in result.output
 
 
 class TestScadBuild:
@@ -125,12 +169,28 @@ class TestScadBuild:
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
-        mock_build.return_value = "scad-test"
+        mock_build.return_value = iter(["Step 1/5 : FROM python:3.11-slim"])
 
         result = runner.invoke(main, ["build", "test"])
         assert result.exit_code == 0
         assert "Image built" in result.output
         mock_build.assert_called_once()
+
+    @patch("scad.cli.build_image")
+    @patch("scad.cli.load_config")
+    def test_build_streams_output(self, mock_load, mock_build, runner):
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_build.return_value = iter([
+            "Step 1/5 : FROM python:3.11-slim",
+            "Step 2/5 : RUN apt-get update",
+        ])
+
+        result = runner.invoke(main, ["build", "test"])
+        assert result.exit_code == 0
+        assert "Step 1/5" in result.output
+        assert "Step 2/5" in result.output
 
     @patch("scad.cli.load_config")
     def test_build_config_not_found(self, mock_load, runner):
@@ -171,9 +231,8 @@ class TestScadRun:
         )
         assert result.exit_code == 0
         mock_run.assert_called_once()
-        call_kwargs = mock_run.call_args
-        assert call_kwargs[1]["branch"] == "plan-01"
-        assert call_kwargs[1]["prompt"] == "do stuff"
+        assert mock_run.call_args[1]["branch"] == "plan-01"
+        assert mock_run.call_args[1]["prompt"] == "do stuff"
 
 
 class TestShellCompletion:

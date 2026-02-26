@@ -11,7 +11,7 @@ from typing import Optional
 import docker
 from jinja2 import Environment, PackageLoader
 
-from scad.config import ScadConfig
+from scad.config import ScadConfig, load_config
 
 
 def _get_jinja_env() -> Environment:
@@ -150,14 +150,19 @@ def get_image_info(config_name: str) -> Optional[dict]:
         return None
 
 
-def build_image(config: ScadConfig, build_dir: Path) -> str:
-    """Build a Docker image for the given config. Returns the image tag."""
+def build_image(config: ScadConfig, build_dir: Path):
+    """Build a Docker image for the given config. Yields build log lines."""
     tag = f"scad-{config.name}"
     render_build_context(config, build_dir)
 
     client = docker.from_env()
-    client.images.build(path=str(build_dir), tag=tag, rm=True)
-    return tag
+    for chunk in client.api.build(path=str(build_dir), tag=tag, rm=True, decode=True):
+        if "stream" in chunk:
+            line = chunk["stream"].rstrip()
+            if line:
+                yield line
+        elif "error" in chunk:
+            raise docker.errors.BuildError(chunk["error"], [])
 
 
 def image_exists(config: ScadConfig) -> bool:
@@ -215,6 +220,20 @@ def run_container(
     if claude_json.exists():
         volumes[str(claude_json)] = {"bind": "/home/scad/.claude.json", "mode": "rw"}
 
+    # CLAUDE.md — global instructions for Claude Code
+    if config.claude.claude_md is False:
+        pass  # explicitly disabled
+    elif config.claude.claude_md is not None:
+        # Custom path specified
+        claude_md_path = Path(config.claude.claude_md).expanduser().resolve()
+        if claude_md_path.exists():
+            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+    else:
+        # Auto-detect ~/CLAUDE.md
+        claude_md_path = Path.home() / "CLAUDE.md"
+        if claude_md_path.exists():
+            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+
     # Environment variables
     environment = {
         "BRANCH_NAME": branch,
@@ -247,9 +266,10 @@ def run_container(
     return container.id
 
 
-def fetch_bundles(config: ScadConfig, run_id: str, branch: str) -> dict[str, bool]:
+def fetch_bundles(config: ScadConfig, run_id: str, branch: str, logs_dir: Optional[Path] = None) -> dict[str, bool]:
     """Fetch git bundles from a completed run into host repos."""
-    logs_dir = Path.home() / ".scad" / "logs"
+    if logs_dir is None:
+        logs_dir = Path.home() / ".scad" / "logs"
     results = {}
 
     for key, repo in config.repos.items():
@@ -290,5 +310,54 @@ def fetch_bundles(config: ScadConfig, run_id: str, branch: str) -> dict[str, boo
         else:
             print(f"[scad] Fetched branch '{branch}' into {repo_path}")
             results[key] = True
+
+    return results
+
+
+def fetch_pending_bundles(logs_dir: Optional[Path] = None) -> list[dict]:
+    """Auto-fetch bundles for completed runs that haven't been fetched yet.
+
+    Returns a list of dicts with run_id and fetch results for each run processed.
+    """
+    if logs_dir is None:
+        logs_dir = Path.home() / ".scad" / "logs"
+    if not logs_dir.exists():
+        return []
+
+    results = []
+    for status_file in sorted(logs_dir.glob("*.status.json")):
+        run_id = status_file.name.replace(".status.json", "")
+
+        # Skip if already fetched
+        fetched_marker = logs_dir / f"{run_id}.fetched"
+        if fetched_marker.exists():
+            continue
+
+        # Check if any bundle files exist for this run
+        bundles = list(logs_dir.glob(f"{run_id}-*.bundle"))
+        if not bundles:
+            continue
+
+        # Read status to get config name and branch
+        try:
+            data = json.loads(status_file.read_text())
+        except (json.JSONDecodeError, KeyError):
+            continue
+
+        config_name = data.get("config")
+        branch = data.get("branch")
+        if not config_name or not branch:
+            continue
+
+        # Load config and fetch
+        try:
+            config = load_config(config_name)
+        except Exception:
+            continue
+
+        fetch_results = fetch_bundles(config, run_id, branch, logs_dir=logs_dir)
+        if fetch_results:
+            fetched_marker.write_text("")
+            results.append({"run_id": run_id, "fetched": fetch_results})
 
     return results

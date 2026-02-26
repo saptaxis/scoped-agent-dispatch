@@ -10,6 +10,9 @@ import docker
 from scad.container import (
     render_build_context,
     generate_run_id,
+    build_image,
+    run_container,
+    fetch_pending_bundles,
     list_scad_containers,
     list_completed_runs,
     stop_container,
@@ -76,6 +79,50 @@ class TestGenerateRunId:
     def test_contains_branch(self):
         run_id = generate_run_id("my-feature")
         assert "my-feature" in run_id
+
+
+class TestBuildImage:
+    @patch("scad.container.docker.from_env")
+    def test_build_streams_output(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        mock_client.api.build.return_value = iter([
+            {"stream": "Step 1/5 : FROM python:3.11-slim\n"},
+            {"stream": "Step 2/5 : RUN apt-get update\n"},
+        ])
+
+        lines = list(build_image(sample_config, tmp_path))
+        assert len(lines) == 2
+        assert "Step 1/5" in lines[0]
+        mock_client.api.build.assert_called_once()
+
+    @patch("scad.container.docker.from_env")
+    def test_build_raises_on_error(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        mock_client.api.build.return_value = iter([
+            {"stream": "Step 1/5 : FROM python:3.11-slim\n"},
+            {"error": "something went wrong"},
+        ])
+
+        with pytest.raises(docker.errors.BuildError):
+            list(build_image(sample_config, tmp_path))
+
+    @patch("scad.container.docker.from_env")
+    def test_build_skips_empty_lines(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_docker.return_value = mock_client
+
+        mock_client.api.build.return_value = iter([
+            {"stream": "Step 1/5\n"},
+            {"stream": "\n"},
+            {"stream": "Step 2/5\n"},
+        ])
+
+        lines = list(build_image(sample_config, tmp_path))
+        assert len(lines) == 2
 
 
 class TestListScadContainers:
@@ -157,3 +204,159 @@ class TestStopContainer:
 
         result = stop_container("nonexistent")
         assert result is False
+
+
+class TestRunContainerClaudeMd:
+    @patch("scad.container.docker.from_env")
+    def test_auto_mounts_claude_md(self, mock_docker, sample_config, tmp_path):
+        """Default: auto-mount ~/CLAUDE.md if it exists."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Instructions")
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        claude_md_mount = volumes.get(str(claude_md))
+        assert claude_md_mount is not None
+        assert claude_md_mount["mode"] == "ro"
+        assert claude_md_mount["bind"] == "/home/scad/CLAUDE.md"
+
+    @patch("scad.container.docker.from_env")
+    def test_skips_claude_md_if_missing(self, mock_docker, sample_config, tmp_path):
+        """Default: no mount if ~/CLAUDE.md doesn't exist."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        for path in volumes:
+            assert "CLAUDE.md" not in path
+
+    @patch("scad.container.docker.from_env")
+    def test_claude_md_disabled(self, mock_docker, tmp_path):
+        """claude_md: false disables auto-mount even if file exists."""
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+            claude={"claude_md": False},
+        )
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Instructions")
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        for path in volumes:
+            assert "CLAUDE.md" not in path
+
+    @patch("scad.container.docker.from_env")
+    def test_claude_md_custom_path(self, mock_docker, tmp_path):
+        """claude_md: ~/custom/file.md mounts that file instead."""
+        custom_md = tmp_path / "custom" / "instructions.md"
+        custom_md.parent.mkdir(parents=True)
+        custom_md.write_text("# Custom")
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+            claude={"claude_md": str(custom_md)},
+        )
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        custom_mount = volumes.get(str(custom_md))
+        assert custom_mount is not None
+        assert custom_mount["mode"] == "ro"
+        assert custom_mount["bind"] == "/home/scad/CLAUDE.md"
+
+
+class TestFetchPendingBundles:
+    def test_finds_and_fetches_unfetched_bundles(self, tmp_path):
+        status = {
+            "run_id": "test-Feb26-1430",
+            "config": "myconfig",
+            "branch": "test-branch",
+            "exit_code": 0,
+            "bundles": {"code": True},
+        }
+        (tmp_path / "test-Feb26-1430.status.json").write_text(json.dumps(status))
+        (tmp_path / "test-Feb26-1430-code.bundle").write_bytes(b"fake bundle")
+
+        with patch("scad.container.fetch_bundles") as mock_fetch:
+            mock_fetch.return_value = {"code": True}
+            with patch("scad.container.load_config") as mock_load:
+                mock_load.return_value = MagicMock()
+                results = fetch_pending_bundles(logs_dir=tmp_path)
+
+        assert len(results) == 1
+        assert results[0]["run_id"] == "test-Feb26-1430"
+        # Should create .fetched marker
+        assert (tmp_path / "test-Feb26-1430.fetched").exists()
+
+    def test_skips_already_fetched(self, tmp_path):
+        status = {
+            "run_id": "old-Feb25-1000",
+            "config": "myconfig",
+            "branch": "old",
+            "exit_code": 0,
+            "bundles": {"code": True},
+        }
+        (tmp_path / "old-Feb25-1000.status.json").write_text(json.dumps(status))
+        (tmp_path / "old-Feb25-1000-code.bundle").write_bytes(b"fake")
+        (tmp_path / "old-Feb25-1000.fetched").write_text("")
+
+        with patch("scad.container.fetch_bundles") as mock_fetch:
+            results = fetch_pending_bundles(logs_dir=tmp_path)
+
+        mock_fetch.assert_not_called()
+        assert results == []
+
+    def test_skips_runs_without_bundles(self, tmp_path):
+        status = {
+            "run_id": "no-bundles-Feb26-1430",
+            "config": "myconfig",
+            "branch": "test",
+            "exit_code": 0,
+            "bundles": {},
+        }
+        (tmp_path / "no-bundles-Feb26-1430.status.json").write_text(json.dumps(status))
+
+        with patch("scad.container.fetch_bundles") as mock_fetch:
+            results = fetch_pending_bundles(logs_dir=tmp_path)
+
+        mock_fetch.assert_not_called()
+        assert results == []
+
+    def test_returns_empty_for_missing_dir(self, tmp_path):
+        results = fetch_pending_bundles(logs_dir=tmp_path / "nonexistent")
+        assert results == []

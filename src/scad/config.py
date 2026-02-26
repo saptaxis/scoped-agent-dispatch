@@ -27,6 +27,7 @@ class PythonConfig(BaseModel):
 class ClaudeConfig(BaseModel):
     dangerously_skip_permissions: bool = False
     additional_flags: Optional[str] = None
+    claude_md: str | bool | None = None  # None=auto ~/CLAUDE.md, False=disabled, str=custom path
 
 
 class ScadConfig(BaseModel):
