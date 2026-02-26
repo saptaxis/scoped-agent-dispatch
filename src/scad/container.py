@@ -79,7 +79,10 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
 
 def list_scad_containers() -> list[dict]:
     """List running scad containers from Docker."""
-    client = docker.from_env()
+    try:
+        client = docker.from_env()
+    except docker.errors.DockerException:
+        return []
     containers = client.containers.list(filters={"label": "scad.managed=true"})
     results = []
     for c in containers:
