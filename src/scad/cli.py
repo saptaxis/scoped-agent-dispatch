@@ -4,19 +4,39 @@ import json
 import sys
 import tempfile
 import threading
+from datetime import datetime, timezone
 from pathlib import Path
 
 import click
 import docker
 
-from scad.config import load_config
+from scad.config import load_config, list_configs
 from scad.container import (
     build_image,
     fetch_bundles,
     generate_run_id,
+    get_image_info,
     image_exists,
     run_container,
 )
+
+
+def _relative_time(iso_str: str) -> str:
+    """Format an ISO timestamp as relative time."""
+    try:
+        dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
+        delta = datetime.now(timezone.utc) - dt
+        seconds = int(delta.total_seconds())
+        if seconds < 60:
+            return "just now"
+        elif seconds < 3600:
+            return f"{seconds // 60} min ago"
+        elif seconds < 86400:
+            return f"{seconds // 3600}h ago"
+        else:
+            return f"{seconds // 86400}d ago"
+    except (ValueError, TypeError):
+        return iso_str or "?"
 
 
 @click.group()
@@ -130,3 +150,23 @@ def run(config_name: str, branch: str, prompt: str, rebuild: bool):
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)
+
+
+@main.command()
+def configs():
+    """List available project configs."""
+    names = list_configs()
+    if not names:
+        click.echo("[scad] No configs found in ~/.scad/templates/")
+        return
+
+    click.echo(f"{'CONFIG':<20} {'IMAGE':<25} {'BUILT'}")
+    for name in names:
+        info = get_image_info(name)
+        if info:
+            built = _relative_time(info["created"])
+            image = info["tag"]
+        else:
+            built = "never (not built)"
+            image = f"scad-{name}"
+        click.echo(f"{name:<20} {image:<25} {built}")

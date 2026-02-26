@@ -60,6 +60,16 @@ class ScadConfig(BaseModel):
         return self
 
 
+def list_configs(config_dir: Optional[Path] = None) -> list[str]:
+    """List available config names from ~/.scad/templates/."""
+    if config_dir is None:
+        config_dir = Path.home() / ".scad"
+    templates_dir = config_dir / "templates"
+    if not templates_dir.exists():
+        return []
+    return sorted(p.stem for p in templates_dir.glob("*.yml"))
+
+
 def load_config(name: str, config_dir: Optional[Path] = None) -> ScadConfig:
     """Load a config from ~/.scad/templates/<name>.yml."""
     if config_dir is None:

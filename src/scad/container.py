@@ -76,6 +76,18 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     (build_dir / "entrypoint.sh").write_text(entrypoint_content)
 
 
+def get_image_info(config_name: str) -> Optional[dict]:
+    """Get Docker image info for a config. Returns None if not built."""
+    tag = f"scad-{config_name}"
+    client = docker.from_env()
+    try:
+        image = client.images.get(tag)
+        created = image.attrs.get("Created", "")
+        return {"tag": tag, "created": created}
+    except docker.errors.ImageNotFound:
+        return None
+
+
 def build_image(config: ScadConfig, build_dir: Path) -> str:
     """Build a Docker image for the given config. Returns the image tag."""
     tag = f"scad-{config.name}"

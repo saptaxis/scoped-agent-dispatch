@@ -7,6 +7,29 @@ from unittest.mock import patch, MagicMock
 from scad.cli import main
 
 
+class TestScadConfigs:
+    @patch("scad.cli.get_image_info")
+    @patch("scad.cli.list_configs")
+    def test_configs_shows_table(self, mock_list, mock_info, runner):
+        mock_list.return_value = ["alpha", "beta"]
+        mock_info.side_effect = [
+            {"tag": "scad-alpha", "created": "2026-02-26T10:00:00Z"},
+            None,
+        ]
+        result = runner.invoke(main, ["configs"])
+        assert result.exit_code == 0
+        assert "alpha" in result.output
+        assert "beta" in result.output
+        assert "never" in result.output
+
+    @patch("scad.cli.list_configs")
+    def test_configs_empty(self, mock_list, runner):
+        mock_list.return_value = []
+        result = runner.invoke(main, ["configs"])
+        assert result.exit_code == 0
+        assert "No configs" in result.output
+
+
 @pytest.fixture
 def runner():
     return CliRunner()

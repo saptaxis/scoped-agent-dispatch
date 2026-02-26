@@ -3,7 +3,7 @@
 import pytest
 import yaml
 from pathlib import Path
-from scad.config import ScadConfig, load_config
+from scad.config import ScadConfig, load_config, list_configs
 
 
 @pytest.fixture
@@ -128,3 +128,24 @@ class TestLoadConfig:
         bad_file.write_text("name: [invalid\n")
         with pytest.raises(Exception):
             load_config("bad", config_dir=tmp_config_dir)
+
+
+class TestListConfigs:
+    def test_lists_yml_files(self, tmp_path):
+        templates = tmp_path / "templates"
+        templates.mkdir()
+        (templates / "alpha.yml").write_text("name: alpha\nrepos:\n  code:\n    path: /x\n    workdir: true")
+        (templates / "beta.yml").write_text("name: beta\nrepos:\n  code:\n    path: /x\n    workdir: true")
+        (templates / "readme.txt").write_text("not a config")
+        result = list_configs(config_dir=tmp_path)
+        assert result == ["alpha", "beta"]
+
+    def test_empty_dir(self, tmp_path):
+        templates = tmp_path / "templates"
+        templates.mkdir()
+        result = list_configs(config_dir=tmp_path)
+        assert result == []
+
+    def test_missing_dir(self, tmp_path):
+        result = list_configs(config_dir=tmp_path / "nonexistent")
+        assert result == []
