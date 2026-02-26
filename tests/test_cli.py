@@ -35,6 +35,38 @@ def runner():
     return CliRunner()
 
 
+class TestScadLogs:
+    def test_logs_shows_file_content(self, runner, tmp_path):
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            # Create the expected directory structure
+            logs_dir = tmp_path / ".scad" / "logs"
+            logs_dir.mkdir(parents=True)
+            (logs_dir / "test-run.log").write_text("line1\nline2\nline3\n")
+
+            result = runner.invoke(main, ["logs", "test-run"])
+        assert result.exit_code == 0
+        assert "line1" in result.output
+        assert "line3" in result.output
+
+    def test_logs_not_found(self, runner, tmp_path):
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, ["logs", "nonexistent"])
+        assert result.exit_code != 0
+        assert "No log file" in result.output
+
+    def test_logs_respects_line_count(self, runner, tmp_path):
+        logs_dir = tmp_path / ".scad" / "logs"
+        logs_dir.mkdir(parents=True)
+        lines = [f"line{i}" for i in range(200)]
+        (logs_dir / "big-run.log").write_text("\n".join(lines))
+
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, ["logs", "big-run", "-n", "5"])
+        assert result.exit_code == 0
+        assert "line199" in result.output
+        assert "line194" not in result.output
+
+
 class TestScadStatus:
     @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")

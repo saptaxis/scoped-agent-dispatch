@@ -219,3 +219,27 @@ def status():
             f"{run['run_id']:<30} {run['config']:<15} {run['branch']:<20} "
             f"{started:<15} {run['status']}"
         )
+
+
+@main.command()
+@click.argument("run_id")
+@click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
+@click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
+def logs(run_id: str, follow: bool, lines: int):
+    """Read agent log output."""
+    log_path = Path.home() / ".scad" / "logs" / f"{run_id}.log"
+    if not log_path.exists():
+        click.echo(f"[scad] No log file found for {run_id}", err=True)
+        sys.exit(1)
+
+    if follow:
+        import subprocess
+        try:
+            subprocess.run(["tail", "-f", str(log_path)])
+        except KeyboardInterrupt:
+            pass
+    else:
+        text = log_path.read_text()
+        output_lines = text.splitlines()
+        for line in output_lines[-lines:]:
+            click.echo(line)
