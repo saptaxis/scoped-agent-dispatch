@@ -35,6 +35,41 @@ def runner():
     return CliRunner()
 
 
+class TestScadStatus:
+    @patch("scad.cli.list_completed_runs")
+    @patch("scad.cli.list_scad_containers")
+    def test_status_shows_running_and_completed(self, mock_running, mock_completed, runner):
+        mock_running.return_value = [{
+            "run_id": "test-Feb26-1430",
+            "config": "myconfig",
+            "branch": "test",
+            "started": "2026-02-26T14:30:00Z",
+            "status": "running",
+        }]
+        mock_completed.return_value = [{
+            "run_id": "old-Feb25-0900",
+            "config": "myconfig",
+            "branch": "old",
+            "started": "2026-02-25T09:00:00Z",
+            "status": "exited(0)",
+        }]
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "test-Feb26-1430" in result.output
+        assert "old-Feb25-0900" in result.output
+        assert "running" in result.output
+        assert "exited(0)" in result.output
+
+    @patch("scad.cli.list_completed_runs")
+    @patch("scad.cli.list_scad_containers")
+    def test_status_empty(self, mock_running, mock_completed, runner):
+        mock_running.return_value = []
+        mock_completed.return_value = []
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "No agents" in result.output
+
+
 class TestScadBuild:
     @patch("scad.cli.build_image")
     @patch("scad.cli.load_config")

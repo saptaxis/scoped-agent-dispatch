@@ -1,5 +1,6 @@
 """Docker container management."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -74,6 +75,45 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
         config_name=config.name,
     )
     (build_dir / "entrypoint.sh").write_text(entrypoint_content)
+
+
+def list_scad_containers() -> list[dict]:
+    """List running scad containers from Docker."""
+    client = docker.from_env()
+    containers = client.containers.list(filters={"label": "scad.managed=true"})
+    results = []
+    for c in containers:
+        labels = c.labels
+        results.append({
+            "run_id": labels.get("scad.run_id", "?"),
+            "config": labels.get("scad.config", "?"),
+            "branch": labels.get("scad.branch", "?"),
+            "started": labels.get("scad.started", ""),
+            "status": "running",
+        })
+    return results
+
+
+def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
+    """List completed runs from status JSON files."""
+    if logs_dir is None:
+        logs_dir = Path.home() / ".scad" / "logs"
+    if not logs_dir.exists():
+        return []
+    results = []
+    for status_file in sorted(logs_dir.glob("*.status.json")):
+        try:
+            data = json.loads(status_file.read_text())
+            results.append({
+                "run_id": data.get("run_id", status_file.stem.replace(".status", "")),
+                "config": data.get("config", "?"),
+                "branch": data.get("branch", "?"),
+                "started": data.get("started", ""),
+                "status": f"exited({data.get('exit_code', '?')})",
+            })
+        except (json.JSONDecodeError, KeyError):
+            continue
+    return results
 
 
 def get_image_info(config_name: str) -> Optional[dict]:

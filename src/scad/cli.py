@@ -17,6 +17,8 @@ from scad.container import (
     generate_run_id,
     get_image_info,
     image_exists,
+    list_completed_runs,
+    list_scad_containers,
     run_container,
 )
 
@@ -193,3 +195,27 @@ def build(config_name: str):
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)
+
+
+@main.command()
+def status():
+    """List running and recently completed agents."""
+    running = list_scad_containers()
+    completed = list_completed_runs()
+
+    # Exclude completed runs that are still showing as running
+    running_ids = {r["run_id"] for r in running}
+    completed = [c for c in completed if c["run_id"] not in running_ids]
+
+    all_runs = running + completed
+    if not all_runs:
+        click.echo("[scad] No agents found.")
+        return
+
+    click.echo(f"{'RUN ID':<30} {'CONFIG':<15} {'BRANCH':<20} {'STARTED':<15} {'STATUS'}")
+    for run in all_runs:
+        started = _relative_time(run["started"]) if run["started"] else "?"
+        click.echo(
+            f"{run['run_id']:<30} {run['config']:<15} {run['branch']:<20} "
+            f"{started:<15} {run['status']}"
+        )
