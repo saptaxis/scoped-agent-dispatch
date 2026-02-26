@@ -42,6 +42,30 @@ def _relative_time(iso_str: str) -> str:
         return iso_str or "?"
 
 
+def _complete_run_ids(ctx, param, incomplete):
+    """Shell completion for run IDs."""
+    run_ids = set()
+    logs_dir = Path.home() / ".scad" / "logs"
+    if logs_dir.exists():
+        for f in logs_dir.glob("*.status.json"):
+            run_id = f.name.replace(".status.json", "")
+            run_ids.add(run_id)
+    try:
+        client = docker.from_env()
+        for c in client.containers.list(filters={"label": "scad.managed=true"}):
+            run_id = c.labels.get("scad.run_id", "")
+            if run_id:
+                run_ids.add(run_id)
+    except Exception:
+        pass
+    return sorted(r for r in run_ids if r.startswith(incomplete))
+
+
+def _complete_config_names(ctx, param, incomplete):
+    """Shell completion for config names."""
+    return sorted(n for n in list_configs() if n.startswith(incomplete))
+
+
 @click.group()
 def main():
     """scad — dispatch Claude Code agents in isolated Docker containers."""
@@ -129,7 +153,7 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
 
 
 @main.command()
-@click.argument("config_name")
+@click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("--branch", required=True, help="Branch name for the agent's work.")
 @click.option("--prompt", default=None, help="Prompt for headless mode.")
 @click.option("--rebuild", is_flag=True, help="Force rebuild the Docker image.")
@@ -176,7 +200,7 @@ def configs():
 
 
 @main.command()
-@click.argument("config_name")
+@click.argument("config_name", shell_complete=_complete_config_names)
 def build(config_name: str):
     """Build or rebuild the Docker image for a config."""
     try:
@@ -223,7 +247,7 @@ def status():
 
 
 @main.command()
-@click.argument("run_id")
+@click.argument("run_id", shell_complete=_complete_run_ids)
 @click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
 @click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
 def logs(run_id: str, follow: bool, lines: int):
@@ -247,7 +271,7 @@ def logs(run_id: str, follow: bool, lines: int):
 
 
 @main.command()
-@click.argument("run_id")
+@click.argument("run_id", shell_complete=_complete_run_ids)
 def stop(run_id: str):
     """Stop a running agent."""
     if stop_container(run_id):

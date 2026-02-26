@@ -4,7 +4,7 @@ import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
-from scad.cli import main
+from scad.cli import main, _complete_run_ids, _complete_config_names
 
 
 class TestScadConfigs:
@@ -174,3 +174,29 @@ class TestScadRun:
         call_kwargs = mock_run.call_args
         assert call_kwargs[1]["branch"] == "plan-01"
         assert call_kwargs[1]["prompt"] == "do stuff"
+
+
+class TestShellCompletion:
+    @patch("scad.cli.docker.from_env")
+    def test_run_id_completion_from_status_files(self, mock_docker, tmp_path):
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_docker.return_value = mock_client
+
+        logs_dir = tmp_path / ".scad" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "plan-22-Feb26-1430.status.json").write_text("{}")
+        (logs_dir / "plan-23-Feb26-1500.status.json").write_text("{}")
+
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            results = _complete_run_ids(None, None, "plan-22")
+        completions = [c.value if hasattr(c, "value") else c for c in results]
+        assert "plan-22-Feb26-1430" in completions
+        assert "plan-23-Feb26-1500" not in completions
+
+    def test_config_name_completion(self, tmp_path):
+        with patch("scad.cli.list_configs", return_value=["alpha", "beta"]):
+            results = _complete_config_names(None, None, "al")
+        completions = [c.value if hasattr(c, "value") else c for c in results]
+        assert "alpha" in completions
+        assert "beta" not in completions
