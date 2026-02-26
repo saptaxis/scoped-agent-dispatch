@@ -1,0 +1,30 @@
+# Multi-repo config — code + docs repos, data mounts, apt packages
+name: my-research-project
+
+repos:
+  code:
+    path: ~/code/my-research-project
+    workdir: true
+    branch_from: main
+  docs:
+    path: ~/code/my-docs
+    add_dir: true           # passed to claude --add-dir
+    branch_from: main
+
+mounts:
+  - host: /data/datasets
+    container: /data/datasets
+  - host: ~/scratch
+    container: /home/scad/scratch
+
+python:
+  version: "3.11"
+  requirements: requirements.txt   # relative to workdir repo root
+
+apt_packages:
+  - build-essential
+  - ffmpeg
+
+claude:
+  dangerously_skip_permissions: true
+  # additional_flags: "--verbose"

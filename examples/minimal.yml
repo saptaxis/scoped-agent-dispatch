@@ -1,0 +1,14 @@
+# Minimal config — single repo, default Python, no data mounts
+name: my-project
+
+repos:
+  code:
+    path: ~/code/my-project
+    workdir: true
+    branch_from: main
+
+python:
+  version: "3.11"
+
+claude:
+  dangerously_skip_permissions: true
