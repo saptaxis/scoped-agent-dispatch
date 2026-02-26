@@ -170,3 +170,26 @@ def configs():
             built = "never (not built)"
             image = f"scad-{name}"
         click.echo(f"{name:<20} {image:<25} {built}")
+
+
+@main.command()
+@click.argument("config_name")
+def build(config_name: str):
+    """Build or rebuild the Docker image for a config."""
+    try:
+        config = load_config(config_name)
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(2)
+    except Exception as e:
+        click.echo(f"[scad] Config validation error: {e}", err=True)
+        sys.exit(2)
+
+    click.echo(f"[scad] Building image scad-{config.name}...")
+    try:
+        with tempfile.TemporaryDirectory() as build_dir:
+            tag = build_image(config, Path(build_dir))
+        click.echo(f"[scad] Image built: {tag}")
+    except docker.errors.DockerException as e:
+        click.echo(f"[scad] Docker error: {e}", err=True)
+        sys.exit(3)

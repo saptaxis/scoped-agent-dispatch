@@ -35,6 +35,28 @@ def runner():
     return CliRunner()
 
 
+class TestScadBuild:
+    @patch("scad.cli.build_image")
+    @patch("scad.cli.load_config")
+    def test_build_calls_build_image(self, mock_load, mock_build, runner):
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_build.return_value = "scad-test"
+
+        result = runner.invoke(main, ["build", "test"])
+        assert result.exit_code == 0
+        assert "Image built" in result.output
+        mock_build.assert_called_once()
+
+    @patch("scad.cli.load_config")
+    def test_build_config_not_found(self, mock_load, runner):
+        mock_load.side_effect = FileNotFoundError("Config 'bad' not found")
+        result = runner.invoke(main, ["build", "bad"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+
 class TestScadRun:
     def test_run_requires_config(self, runner):
         result = runner.invoke(main, ["run"])
