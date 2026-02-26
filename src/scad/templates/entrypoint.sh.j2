@@ -1,1 +1,93 @@
-# Entrypoint template — implemented in Task 4
+#!/bin/bash
+set -euo pipefail
+
+BRANCH="${BRANCH_NAME:?BRANCH_NAME not set}"
+RUN_ID="${RUN_ID:?RUN_ID not set}"
+PROMPT="${AGENT_PROMPT:-}"
+LOG_FILE="/scad-logs/${RUN_ID}.log"
+STATUS_FILE="/scad-logs/${RUN_ID}.status.json"
+START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+echo "[scad] Starting agent on branch: $BRANCH (run: $RUN_ID)"
+
+# Clone repos from read-only mounts
+{% for key, repo in repos.items() %}
+echo "[scad] Cloning {{ key }}..."
+git clone /mnt/repos/{{ key }} /workspace/{{ key }}
+cd /workspace/{{ key }}
+git checkout {{ repo.branch_from }}
+git checkout -b "$BRANCH"
+cd /
+{% endfor %}
+
+# Working directory
+cd /workspace/{{ workdir_key }}
+
+# Activate venv and sync deps from cloned repo's requirements.txt
+# Image has deps baked in; this catches any additions since last build
+source /opt/venv/bin/activate
+{% if requirements_file %}
+echo "[scad] Syncing Python dependencies..."
+pip install --no-cache-dir -q -r {{ requirements_file }} 2>&1
+{% endif %}
+
+# Build claude command
+CLAUDE_CMD="claude"
+{% if claude.dangerously_skip_permissions %}
+CLAUDE_CMD="$CLAUDE_CMD --dangerously-skip-permissions"
+{% endif %}
+{% for key, repo in repos.items() if repo.add_dir %}
+CLAUDE_CMD="$CLAUDE_CMD --add-dir /workspace/{{ key }}"
+{% endfor %}
+{% if claude.additional_flags %}
+CLAUDE_CMD="$CLAUDE_CMD {{ claude.additional_flags }}"
+{% endif %}
+
+# Run claude, piping output to log file and stdout
+if [ -n "$PROMPT" ]; then
+    echo "[scad] Running headless: $PROMPT"
+    $CLAUDE_CMD -p "$PROMPT" 2>&1 | tee "$LOG_FILE"
+    EXIT_CODE=${PIPESTATUS[0]}
+else
+    echo "[scad] Starting interactive session"
+    $CLAUDE_CMD
+    EXIT_CODE=$?
+fi
+
+# Create git bundles for repos with commits
+echo "[scad] Bundling branches..."
+BUNDLE_RESULTS="{}"
+{% for key, repo in repos.items() %}
+cd /workspace/{{ key }}
+if git log {{ repo.branch_from }}.."$BRANCH" --oneline | head -1 | grep -q .; then
+    echo "[scad] Bundling {{ key }} branch $BRANCH"
+    if git bundle create "/scad-logs/${RUN_ID}-{{ key }}.bundle" {{ repo.branch_from }}.."$BRANCH" 2>/dev/null; then
+        BUNDLE_RESULTS=$(echo "$BUNDLE_RESULTS" | python3 -c "import sys,json; d=json.load(sys.stdin); d['{{ key }}']=True; print(json.dumps(d))")
+    else
+        echo "[scad] Warning: bundle failed for {{ key }}"
+        BUNDLE_RESULTS=$(echo "$BUNDLE_RESULTS" | python3 -c "import sys,json; d=json.load(sys.stdin); d['{{ key }}']=False; print(json.dumps(d))")
+    fi
+else
+    echo "[scad] No commits on {{ key }}, skipping bundle"
+fi
+{% endfor %}
+
+# Write structured exit status
+END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+TAIL_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().splitlines()))" 2>/dev/null || echo "[]")
+
+cat > "$STATUS_FILE" <<STATUSEOF
+{
+  "run_id": "$RUN_ID",
+  "branch": "$BRANCH",
+  "config": "{{ config_name }}",
+  "exit_code": $EXIT_CODE,
+  "started": "$START_TIME",
+  "finished": "$END_TIME",
+  "bundles": $BUNDLE_RESULTS,
+  "tail": $TAIL_LINES
+}
+STATUSEOF
+
+echo "[scad] Agent finished with exit code $EXIT_CODE"
+exit $EXIT_CODE
