@@ -52,6 +52,10 @@ CLAUDE_CMD="$CLAUDE_CMD --add-dir /workspace/{{ key }}"
 CLAUDE_CMD="$CLAUDE_CMD {{ claude.additional_flags }}"
 {% endif %}
 
+# Disable set -e so a non-zero Claude exit doesn't kill the script
+# before bundle creation and status file writing
+set +e
+
 # Run claude (output already captured by exec redirect above)
 if [ -n "$PROMPT" ]; then
     echo "[scad] Running headless: $PROMPT"
@@ -63,6 +67,8 @@ else
     $CLAUDE_CMD
     EXIT_CODE=$?
 fi
+
+set -e
 
 # Create git bundles for repos with commits
 echo "[scad] Bundling branches..."

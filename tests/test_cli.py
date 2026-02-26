@@ -4,7 +4,40 @@ import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
-from scad.cli import main, _complete_run_ids, _complete_config_names
+from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time
+
+
+@pytest.fixture
+def runner():
+    return CliRunner()
+
+
+class TestRelativeTime:
+    def test_just_now(self):
+        from datetime import datetime, timezone
+        now = datetime.now(timezone.utc).isoformat()
+        assert _relative_time(now) == "just now"
+
+    def test_minutes_ago(self):
+        from datetime import datetime, timezone, timedelta
+        past = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        assert "min ago" in _relative_time(past)
+
+    def test_garbage_input(self):
+        result = _relative_time("not-a-date")
+        assert result == "not-a-date"
+
+    def test_empty_string(self):
+        assert _relative_time("") == "?"
+
+    def test_none_input(self):
+        assert _relative_time(None) == "?"
+
+    def test_future_timestamp(self):
+        from datetime import datetime, timezone, timedelta
+        future = (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat()
+        result = _relative_time(future)
+        assert result == "just now"  # max(0, ...) clamps to 0
 
 
 class TestScadConfigs:
@@ -28,11 +61,6 @@ class TestScadConfigs:
         result = runner.invoke(main, ["configs"])
         assert result.exit_code == 0
         assert "No configs" in result.output
-
-
-@pytest.fixture
-def runner():
-    return CliRunner()
 
 
 class TestScadStop:

@@ -25,10 +25,12 @@ from scad.container import (
 
 def _relative_time(iso_str: str) -> str:
     """Format an ISO timestamp as relative time."""
+    if not iso_str:
+        return "?"
     try:
         dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00"))
         delta = datetime.now(timezone.utc) - dt
-        seconds = int(delta.total_seconds())
+        seconds = max(0, int(delta.total_seconds()))
         if seconds < 60:
             return "just now"
         elif seconds < 3600:
@@ -95,6 +97,7 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
         # Headless mode — fire and forget
         click.echo(f"[scad] Running headless. Logs: scad logs {run_id}")
         click.echo(f"[scad] Bundles auto-fetch on: scad status")
+        click.echo(f"[scad] Container setup: docker logs -f scad-{run_id}")
     else:
         # Interactive mode — attach
         click.echo("[scad] Attaching to interactive session...")
