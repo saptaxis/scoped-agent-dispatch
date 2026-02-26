@@ -103,3 +103,44 @@ class TestEntrypointTemplate:
             config_name="test",
         )
         assert "--add-dir /workspace/docs" in result
+
+    def test_bundle_uses_rev_list_not_pipe(self, jinja_env):
+        template = jinja_env.get_template("entrypoint.sh.j2")
+        result = template.render(
+            repos={"code": {"branch_from": "main"}},
+            workdir_key="code",
+            requirements_file=None,
+            claude={"dangerously_skip_permissions": True, "additional_flags": None},
+            config_name="test",
+        )
+        # Must use rev-list (no SIGPIPE risk), not git log | head | grep
+        assert "git rev-list --count" in result
+        assert "head -1 | grep" not in result
+
+    def test_log_file_created_early(self, jinja_env):
+        """Log file capture starts before repo cloning, not just at Claude."""
+        template = jinja_env.get_template("entrypoint.sh.j2")
+        result = template.render(
+            repos={"code": {"branch_from": "main"}},
+            workdir_key="code",
+            requirements_file=None,
+            claude={"dangerously_skip_permissions": True, "additional_flags": None},
+            config_name="test",
+        )
+        exec_pos = result.find("exec >")
+        clone_pos = result.find("git clone")
+        assert exec_pos != -1, "exec redirect not found"
+        assert exec_pos < clone_pos, "exec redirect must appear before git clone"
+
+    def test_claude_uses_script_for_tty(self, jinja_env):
+        """Claude runs via script to force TTY output (prevents buffering)."""
+        template = jinja_env.get_template("entrypoint.sh.j2")
+        result = template.render(
+            repos={"code": {"branch_from": "main"}},
+            workdir_key="code",
+            requirements_file=None,
+            claude={"dangerously_skip_permissions": True, "additional_flags": None},
+            config_name="test",
+        )
+        assert "script -qfc" in result
+        assert '| tee "$LOG_FILE"' not in result
