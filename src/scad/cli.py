@@ -20,6 +20,7 @@ from scad.container import (
     list_completed_runs,
     list_scad_containers,
     run_container,
+    stop_container,
 )
 
 
@@ -243,3 +244,14 @@ def logs(run_id: str, follow: bool, lines: int):
         output_lines = text.splitlines()
         for line in output_lines[-lines:]:
             click.echo(line)
+
+
+@main.command()
+@click.argument("run_id")
+def stop(run_id: str):
+    """Stop a running agent."""
+    if stop_container(run_id):
+        click.echo(f"[scad] Stopped and removed: {run_id}")
+    else:
+        click.echo(f"[scad] No running container found for {run_id}", err=True)
+        sys.exit(1)

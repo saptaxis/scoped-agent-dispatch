@@ -116,6 +116,19 @@ def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
     return results
 
 
+def stop_container(run_id: str) -> bool:
+    """Stop and remove a scad container by run ID."""
+    client = docker.from_env()
+    container_name = f"scad-{run_id}"
+    try:
+        container = client.containers.get(container_name)
+        container.stop(timeout=10)
+        container.remove()
+        return True
+    except docker.errors.NotFound:
+        return False
+
+
 def get_image_info(config_name: str) -> Optional[dict]:
     """Get Docker image info for a config. Returns None if not built."""
     tag = f"scad-{config_name}"

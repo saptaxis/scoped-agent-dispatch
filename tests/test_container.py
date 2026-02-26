@@ -6,11 +6,13 @@ from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 from scad.config import ScadConfig
+import docker
 from scad.container import (
     render_build_context,
     generate_run_id,
     list_scad_containers,
     list_completed_runs,
+    stop_container,
 )
 
 
@@ -131,3 +133,27 @@ class TestListCompletedRuns:
         (tmp_path / "bad.status.json").write_text("not json{{{")
         result = list_completed_runs(logs_dir=tmp_path)
         assert result == []
+
+
+class TestStopContainer:
+    @patch("scad.container.docker.from_env")
+    def test_stops_existing_container(self, mock_docker):
+        mock_container = MagicMock()
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = stop_container("test-Feb26-1430")
+        assert result is True
+        mock_client.containers.get.assert_called_with("scad-test-Feb26-1430")
+        mock_container.stop.assert_called_once_with(timeout=10)
+        mock_container.remove.assert_called_once()
+
+    @patch("scad.container.docker.from_env")
+    def test_returns_false_for_missing(self, mock_docker):
+        mock_client = MagicMock()
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+        mock_docker.return_value = mock_client
+
+        result = stop_container("nonexistent")
+        assert result is False

@@ -35,6 +35,22 @@ def runner():
     return CliRunner()
 
 
+class TestScadStop:
+    @patch("scad.cli.stop_container")
+    def test_stop_running(self, mock_stop, runner):
+        mock_stop.return_value = True
+        result = runner.invoke(main, ["stop", "test-Feb26-1430"])
+        assert result.exit_code == 0
+        assert "Stopped" in result.output
+
+    @patch("scad.cli.stop_container")
+    def test_stop_not_found(self, mock_stop, runner):
+        mock_stop.return_value = False
+        result = runner.invoke(main, ["stop", "nonexistent"])
+        assert result.exit_code != 0
+        assert "No running container" in result.output
+
+
 class TestScadLogs:
     def test_logs_shows_file_content(self, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
