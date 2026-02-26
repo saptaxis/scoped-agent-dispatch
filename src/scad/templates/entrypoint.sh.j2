@@ -10,6 +10,12 @@ START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
 echo "[scad] Starting agent on branch: $BRANCH (run: $RUN_ID)"
 
+# Copy host git config if mounted, then add safe.directory for container use
+if [ -f /mnt/host-gitconfig ]; then
+    cp /mnt/host-gitconfig "$HOME/.gitconfig"
+fi
+git config --global --add safe.directory '*'
+
 # Clone repos from read-only mounts
 {% for key, repo in repos.items() %}
 echo "[scad] Cloning {{ key }}..."

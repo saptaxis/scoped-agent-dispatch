@@ -1,6 +1,6 @@
 """Docker container management."""
 
-import json
+import os
 import shutil
 import subprocess
 from datetime import datetime, timezone
@@ -128,10 +128,18 @@ def run_container(
     # Logs directory — read-write
     volumes[str(logs_dir)] = {"bind": "/scad-logs", "mode": "rw"}
 
-    # Claude auth — read-only
-    claude_auth = Path.home() / ".claude"
-    if claude_auth.exists():
-        volumes[str(claude_auth)] = {"bind": "/root/.claude", "mode": "ro"}
+    # Git config — mount as read-only source, entrypoint copies to writable location
+    gitconfig = Path.home() / ".gitconfig"
+    if gitconfig.exists():
+        volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
+
+    # Claude auth — mount .claude dir and .claude.json config
+    claude_dir = Path.home() / ".claude"
+    claude_json = Path.home() / ".claude.json"
+    if claude_dir.exists():
+        volumes[str(claude_dir)] = {"bind": "/home/scad/.claude", "mode": "rw"}
+    if claude_json.exists():
+        volumes[str(claude_json)] = {"bind": "/home/scad/.claude.json", "mode": "rw"}
 
     # Environment variables
     environment = {
@@ -140,6 +148,11 @@ def run_container(
     }
     if prompt:
         environment["AGENT_PROMPT"] = prompt
+
+    # Pass through API key if set
+    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    if api_key:
+        environment["ANTHROPIC_API_KEY"] = api_key
 
     container_name = f"scad-{run_id}"
 

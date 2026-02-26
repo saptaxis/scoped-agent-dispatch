@@ -16,12 +16,25 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 {% endif %}
 
-# Install Claude Code
-RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/root/.claude/bin:$PATH"
+# Install Node.js (required for Claude Code)
+RUN curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
+    && apt-get install -y nodejs \
+    && rm -rf /var/lib/apt/lists/*
 
-# Entrypoint
+# Install Claude Code
+RUN npm install -g @anthropic-ai/claude-code
+
+# Non-root user (Claude Code refuses --dangerously-skip-permissions as root)
+RUN useradd -m -s /bin/bash scad \
+    && chown -R scad:scad /opt/venv \
+    && mkdir -p /workspace /scad-logs \
+    && chown -R scad:scad /workspace /scad-logs
+
+# Entrypoint (must be readable by scad user)
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
+
+USER scad
+WORKDIR /home/scad
 
 ENTRYPOINT ["/entrypoint.sh"]
