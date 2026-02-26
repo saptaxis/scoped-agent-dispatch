@@ -1,0 +1,2 @@
+[console_scripts]
+scad = scad.cli:main

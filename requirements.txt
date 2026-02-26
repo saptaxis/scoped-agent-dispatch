@@ -1,0 +1,2 @@
+# Dev dependencies (runtime deps are in pyproject.toml)
+pytest>=7.0
