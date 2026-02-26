@@ -1,1 +1,27 @@
-# Dockerfile template — implemented in Task 3
+FROM {{ base_image | default('python:3.11-slim') }}
+
+# System packages
+RUN apt-get update && apt-get install -y \
+    curl git bash \
+    {% for pkg in apt_packages %}{{ pkg }} {% endfor %}\
+    && rm -rf /var/lib/apt/lists/*
+
+# Python venv with project dependencies
+RUN python3 -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV VIRTUAL_ENV="/opt/venv"
+
+{% if requirements_content %}
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
+{% endif %}
+
+# Install Claude Code
+RUN curl -fsSL https://claude.ai/install.sh | bash
+ENV PATH="/root/.claude/bin:$PATH"
+
+# Entrypoint
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
