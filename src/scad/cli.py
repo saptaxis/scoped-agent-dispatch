@@ -1,9 +1,7 @@
 """CLI entry point."""
 
-import json
 import sys
 import tempfile
-import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -14,6 +12,7 @@ from scad.config import load_config, list_configs
 from scad.container import (
     build_image,
     fetch_bundles,
+    fetch_pending_bundles,
     generate_run_id,
     get_image_info,
     image_exists,
@@ -93,46 +92,9 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
     click.echo(f"[scad] Container started: {container_id[:12]}")
 
     if prompt:
-        # Headless mode — detach and start background watcher
+        # Headless mode — fire and forget
         click.echo(f"[scad] Running headless. Logs: scad logs {run_id}")
-        click.echo(f"[scad] Status: scad status")
-
-        def _wait_and_fetch():
-            client = docker.from_env()
-            container = client.containers.get(container_id)
-            result = container.wait()
-            exit_code = result.get("StatusCode", -1)
-
-            # Fetch bundles
-            bundle_results = fetch_bundles(config, run_id, branch)
-
-            # Read status file
-            status_path = Path.home() / ".scad" / "logs" / f"{run_id}.status.json"
-            if status_path.exists():
-                status = json.loads(status_path.read_text())
-                click.echo(
-                    f"\n[scad] Agent {run_id} finished "
-                    f"(exit code {status.get('exit_code', '?')})"
-                )
-            else:
-                click.echo(
-                    f"\n[scad] Agent {run_id} exited (code {exit_code}), "
-                    f"no status file found"
-                )
-
-            if bundle_results:
-                for repo, success in bundle_results.items():
-                    status_str = "fetched" if success else "FAILED"
-                    click.echo(f"[scad]   {repo}: {status_str}")
-
-            # Clean up container
-            try:
-                container.remove()
-            except Exception:
-                pass
-
-        watcher = threading.Thread(target=_wait_and_fetch, daemon=True)
-        watcher.start()
+        click.echo(f"[scad] Bundles auto-fetch on: scad status")
     else:
         # Interactive mode — attach
         click.echo("[scad] Attaching to interactive session...")
@@ -229,6 +191,11 @@ def build(config_name: str):
 @main.command()
 def status():
     """List running and recently completed agents."""
+    # Auto-fetch any pending bundles from completed runs
+    fetched = fetch_pending_bundles()
+    for f in fetched:
+        click.echo(f"[scad] Auto-fetched bundles for {f['run_id']}")
+
     running = list_scad_containers()
     completed = list_completed_runs()
 

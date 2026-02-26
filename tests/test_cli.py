@@ -84,9 +84,11 @@ class TestScadLogs:
 
 
 class TestScadStatus:
+    @patch("scad.cli.fetch_pending_bundles")
     @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
-    def test_status_shows_running_and_completed(self, mock_running, mock_completed, runner):
+    def test_status_shows_running_and_completed(self, mock_running, mock_completed, mock_fetch, runner):
+        mock_fetch.return_value = []
         mock_running.return_value = [{
             "run_id": "test-Feb26-1430",
             "config": "myconfig",
@@ -108,14 +110,28 @@ class TestScadStatus:
         assert "running" in result.output
         assert "exited(0)" in result.output
 
+    @patch("scad.cli.fetch_pending_bundles")
     @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
-    def test_status_empty(self, mock_running, mock_completed, runner):
+    def test_status_empty(self, mock_running, mock_completed, mock_fetch, runner):
+        mock_fetch.return_value = []
         mock_running.return_value = []
         mock_completed.return_value = []
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         assert "No agents" in result.output
+
+    @patch("scad.cli.fetch_pending_bundles")
+    @patch("scad.cli.list_completed_runs")
+    @patch("scad.cli.list_scad_containers")
+    def test_status_auto_fetches_bundles(self, mock_running, mock_completed, mock_fetch, runner):
+        mock_fetch.return_value = [{"run_id": "test-Feb26-1430", "fetched": {"code": True}}]
+        mock_running.return_value = []
+        mock_completed.return_value = []
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "Auto-fetched" in result.output
+        assert "test-Feb26-1430" in result.output
 
 
 class TestScadBuild:
