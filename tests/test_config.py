@@ -113,6 +113,26 @@ class TestScadConfig:
         )
         assert config.apt_packages == ["build-essential", "ffmpeg"]
 
+    def test_claude_md_default_is_none(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.claude.claude_md is None
+
+    def test_claude_md_custom_path(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"claude_md": "~/custom/CLAUDE.md"},
+        )
+        assert config.claude.claude_md == "~/custom/CLAUDE.md"
+
+    def test_claude_md_disabled(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"claude_md": False},
+        )
+        assert config.claude.claude_md is False
+
 
 class TestLoadConfig:
     def test_load_from_file(self, tmp_config_dir, sample_config_file):

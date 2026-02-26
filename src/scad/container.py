@@ -220,6 +220,20 @@ def run_container(
     if claude_json.exists():
         volumes[str(claude_json)] = {"bind": "/home/scad/.claude.json", "mode": "rw"}
 
+    # CLAUDE.md — global instructions for Claude Code
+    if config.claude.claude_md is False:
+        pass  # explicitly disabled
+    elif config.claude.claude_md is not None:
+        # Custom path specified
+        claude_md_path = Path(config.claude.claude_md).expanduser().resolve()
+        if claude_md_path.exists():
+            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+    else:
+        # Auto-detect ~/CLAUDE.md
+        claude_md_path = Path.home() / "CLAUDE.md"
+        if claude_md_path.exists():
+            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+
     # Environment variables
     environment = {
         "BRANCH_NAME": branch,

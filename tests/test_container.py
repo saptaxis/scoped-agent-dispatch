@@ -11,6 +11,7 @@ from scad.container import (
     render_build_context,
     generate_run_id,
     build_image,
+    run_container,
     fetch_pending_bundles,
     list_scad_containers,
     list_completed_runs,
@@ -203,6 +204,100 @@ class TestStopContainer:
 
         result = stop_container("nonexistent")
         assert result is False
+
+
+class TestRunContainerClaudeMd:
+    @patch("scad.container.docker.from_env")
+    def test_auto_mounts_claude_md(self, mock_docker, sample_config, tmp_path):
+        """Default: auto-mount ~/CLAUDE.md if it exists."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Instructions")
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        claude_md_mount = volumes.get(str(claude_md))
+        assert claude_md_mount is not None
+        assert claude_md_mount["mode"] == "ro"
+        assert claude_md_mount["bind"] == "/home/scad/CLAUDE.md"
+
+    @patch("scad.container.docker.from_env")
+    def test_skips_claude_md_if_missing(self, mock_docker, sample_config, tmp_path):
+        """Default: no mount if ~/CLAUDE.md doesn't exist."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        for path in volumes:
+            assert "CLAUDE.md" not in path
+
+    @patch("scad.container.docker.from_env")
+    def test_claude_md_disabled(self, mock_docker, tmp_path):
+        """claude_md: false disables auto-mount even if file exists."""
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+            claude={"claude_md": False},
+        )
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Instructions")
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        for path in volumes:
+            assert "CLAUDE.md" not in path
+
+    @patch("scad.container.docker.from_env")
+    def test_claude_md_custom_path(self, mock_docker, tmp_path):
+        """claude_md: ~/custom/file.md mounts that file instead."""
+        custom_md = tmp_path / "custom" / "instructions.md"
+        custom_md.parent.mkdir(parents=True)
+        custom_md.write_text("# Custom")
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+            claude={"claude_md": str(custom_md)},
+        )
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        custom_mount = volumes.get(str(custom_md))
+        assert custom_mount is not None
+        assert custom_mount["mode"] == "ro"
+        assert custom_mount["bind"] == "/home/scad/CLAUDE.md"
 
 
 class TestFetchPendingBundles:
