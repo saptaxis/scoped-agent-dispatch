@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+import click
 import docker
 from jinja2 import Environment, PackageLoader
 
@@ -24,6 +25,49 @@ def generate_run_id(branch: str) -> str:
     date_str = now.strftime("%b%d")  # e.g., Feb26
     time_str = now.strftime("%H%M")  # e.g., 1430
     return f"{branch}-{date_str}-{time_str}"
+
+
+def generate_branch_name() -> str:
+    """Auto-generate branch name: scad-MonDD-HHMM."""
+    now = datetime.now(timezone.utc)
+    return f"scad-{now.strftime('%b%d')}-{now.strftime('%H%M')}"
+
+
+def check_branch_exists(repo_path: Path, branch: str) -> bool:
+    """Check if a branch exists in a git repo."""
+    result = subprocess.run(
+        ["git", "-C", str(repo_path), "branch", "--list", branch],
+        capture_output=True, text=True,
+    )
+    return bool(result.stdout.strip())
+
+
+def resolve_branch(config: ScadConfig, branch: Optional[str]) -> str:
+    """Resolve branch name: validate user-specified or auto-generate.
+
+    User-specified branch that already exists raises ClickException.
+    Auto-generated branches get -2, -3 suffix on collision.
+    """
+    if branch is None:
+        branch = generate_branch_name()
+        base = branch
+        suffix = 2
+        while any(
+            check_branch_exists(repo.resolved_path, branch)
+            for repo in config.repos.values()
+            if repo.worktree
+        ):
+            branch = f"{base}-{suffix}"
+            suffix += 1
+        return branch
+    else:
+        for key, repo in config.repos.items():
+            if repo.worktree and check_branch_exists(repo.resolved_path, branch):
+                raise click.ClickException(
+                    f"Branch '{branch}' already exists in repo '{key}'. "
+                    "Use a different name or delete the existing branch."
+                )
+        return branch
 
 
 def render_build_context(config: ScadConfig, build_dir: Path) -> None:

@@ -5,11 +5,15 @@ import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
+import click
 from scad.config import ScadConfig
 import docker
 from scad.container import (
     render_build_context,
     generate_run_id,
+    generate_branch_name,
+    check_branch_exists,
+    resolve_branch,
     build_image,
     run_container,
     fetch_pending_bundles,
@@ -79,6 +83,57 @@ class TestGenerateRunId:
     def test_contains_branch(self):
         run_id = generate_run_id("my-feature")
         assert "my-feature" in run_id
+
+
+class TestBranchManagement:
+    def test_generate_branch_name_format(self):
+        name = generate_branch_name()
+        assert name.startswith("scad-")
+        # Format: scad-MonDD-HHMM
+        parts = name.split("-")
+        assert len(parts) == 3
+        assert len(parts[1]) == 5  # MonDD like Feb27
+        assert len(parts[2]) == 4  # HHMM like 1430
+
+    @patch("scad.container.subprocess.run")
+    def test_check_branch_exists_true(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="  plan-22\n")
+        assert check_branch_exists(Path("/tmp/repo"), "plan-22") is True
+
+    @patch("scad.container.subprocess.run")
+    def test_check_branch_exists_false(self, mock_run):
+        mock_run.return_value = MagicMock(stdout="")
+        assert check_branch_exists(Path("/tmp/repo"), "plan-22") is False
+
+    @patch("scad.container.check_branch_exists", return_value=None)
+    def test_resolve_branch_auto_generates(self, mock_check):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "worktree": True}},
+        )
+        branch = resolve_branch(config, None)
+        assert branch.startswith("scad-")
+
+    @patch("scad.container.check_branch_exists")
+    def test_resolve_branch_user_collision_raises(self, mock_check):
+        mock_check.return_value = True
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "worktree": True}},
+        )
+        with pytest.raises(click.ClickException, match="already exists"):
+            resolve_branch(config, "plan-22")
+
+    @patch("scad.container.check_branch_exists")
+    def test_resolve_branch_auto_collision_adds_suffix(self, mock_check):
+        # First call: collision. Second call: no collision.
+        mock_check.side_effect = [True, False]
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True, "worktree": True}},
+        )
+        branch = resolve_branch(config, None)
+        assert branch.endswith("-2")
 
 
 class TestBuildImage:
