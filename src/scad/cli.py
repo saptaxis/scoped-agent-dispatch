@@ -13,6 +13,7 @@ from scad.config import load_config, list_configs
 from scad.container import (
     build_image,
     check_claude_auth,
+    cleanup_clones,
     create_clones,
     generate_run_id,
     get_image_info,
@@ -299,3 +300,11 @@ def attach(run_id: str):
         ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
     )
     sys.exit(result.returncode)
+
+
+@main.command()
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def clean(run_id: str):
+    """Remove clones for a completed run."""
+    cleanup_clones(run_id)
+    click.echo(f"[scad] Cleaned up clones for {run_id}")

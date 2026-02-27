@@ -304,6 +304,26 @@ class TestScadAttach:
         assert "headless" in result.output.lower()
 
 
+class TestScadClean:
+    @patch("scad.cli.cleanup_clones")
+    def test_clean_removes_clones(self, mock_cleanup, runner, tmp_path):
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, ["clean", "test-run"])
+
+        assert result.exit_code == 0
+        assert "Cleaned" in result.output
+        mock_cleanup.assert_called_once_with("test-run")
+
+    @patch("scad.cli.cleanup_clones")
+    def test_clean_nonexistent_is_ok(self, mock_cleanup, runner, tmp_path):
+        # cleanup_clones is a no-op if dir doesn't exist, so clean always succeeds
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, ["clean", "nonexistent"])
+
+        assert result.exit_code == 0
+        mock_cleanup.assert_called_once_with("nonexistent")
+
+
 class TestShellCompletion:
     @patch("scad.cli.docker.from_env")
     def test_run_id_completion_from_status_files(self, mock_docker, tmp_path):
