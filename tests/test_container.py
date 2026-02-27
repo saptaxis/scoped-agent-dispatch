@@ -1,12 +1,13 @@
 """Container management tests."""
 
 import json
+import subprocess
 import pytest
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 import click
-from scad.config import ScadConfig
+from scad.config import ScadConfig, RepoConfig, PythonConfig, ClaudeConfig
 import docker
 import time as _time
 
@@ -166,13 +167,14 @@ class TestCloneLifecycle:
         assert "plan-22" in checkout_args
 
     @patch("scad.container.subprocess.run")
-    def test_create_clones_returns_paths(self, mock_run, tmp_path):
+    def test_create_clones_returns_paths(self, mock_run, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / ".scad" / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
         config = ScadConfig(
             name="test",
             repos={"code": {"path": str(tmp_path / "repo"), "workdir": True, "worktree": True}},
         )
-        with patch("scad.container.Path.home", return_value=tmp_path):
-            paths = create_clones(config, "plan-22", "test-run-id")
+        paths = create_clones(config, "plan-22", "test-run-id")
 
         assert "code" in paths
         expected = tmp_path / ".scad" / "worktrees" / "test-run-id" / "code"
@@ -196,18 +198,18 @@ class TestCloneLifecycle:
         assert mock_run.call_count == 2
 
     @patch("scad.container.shutil.rmtree")
-    def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path):
+    def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / ".scad" / "worktrees")
         clone_base = tmp_path / ".scad" / "worktrees" / "test-run-id"
         clone_base.mkdir(parents=True)
 
-        with patch("scad.container.Path.home", return_value=tmp_path):
-            cleanup_clones("test-run-id")
+        cleanup_clones("test-run-id")
 
         mock_rmtree.assert_called_once_with(clone_base)
 
-    def test_cleanup_clones_noop_if_missing(self, tmp_path):
-        with patch("scad.container.Path.home", return_value=tmp_path):
-            cleanup_clones("nonexistent")  # should not raise
+    def test_cleanup_clones_noop_if_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / ".scad" / "worktrees")
+        cleanup_clones("nonexistent")  # should not raise
 
 
 class TestBuildImage:
@@ -611,5 +613,58 @@ class TestCheckClaudeAuth:
         valid, hours = check_claude_auth()
         assert valid is False
         assert hours == 0.0
+
+
+class TestRunDirectory:
+    def test_create_clones_creates_run_dir(self, tmp_path, monkeypatch):
+        """create_clones also creates ~/.scad/runs/<run-id>/claude/."""
+        monkeypatch.setattr("scad.container.SCAD_DIR", tmp_path / ".scad")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / ".scad" / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(tmp_path / "repo"), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+        # Create a real git repo to clone from
+        repo_dir = tmp_path / "repo"
+        repo_dir.mkdir()
+        subprocess.run(["git", "init", str(repo_dir)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(repo_dir), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+
+        create_clones(config, "test-branch", "test-run-1234")
+
+        run_dir = tmp_path / ".scad" / "runs" / "test-run-1234" / "claude"
+        assert run_dir.exists()
+
+    @patch("scad.container.docker")
+    def test_run_container_mounts_run_dir(self, mock_docker, tmp_path, monkeypatch):
+        """run_container mounts ~/.scad/runs/<run-id>/claude/ as /home/scad/.claude/."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
+
+        runs_dir = tmp_path / ".scad" / "runs" / "test-run" / "claude"
+        runs_dir.mkdir(parents=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(tmp_path), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+        worktree_paths = {"code": tmp_path / "clone"}
+        (tmp_path / "clone").mkdir()
+
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_docker.from_env.return_value.containers.run.return_value = mock_container
+
+        run_container(config, "test-branch", "test-run", worktree_paths)
+
+        call_kwargs = mock_docker.from_env.return_value.containers.run.call_args
+        volumes = call_kwargs[1]["volumes"]
+        claude_mount = volumes[str(runs_dir)]
+        assert claude_mount["bind"] == "/home/scad/.claude"
+        assert claude_mount["mode"] == "rw"
 
 

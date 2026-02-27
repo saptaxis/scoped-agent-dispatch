@@ -15,6 +15,10 @@ from jinja2 import Environment, PackageLoader
 
 from scad.config import ScadConfig
 
+SCAD_DIR = Path.home() / ".scad"
+WORKTREE_DIR = SCAD_DIR / "worktrees"
+RUNS_DIR = SCAD_DIR / "runs"
+
 
 def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
@@ -100,7 +104,7 @@ def create_clones(
 
     Returns dict of repo_key -> clone_path (or direct path for non-worktree repos).
     """
-    clone_base = Path.home() / ".scad" / "worktrees" / run_id
+    clone_base = WORKTREE_DIR / run_id
     clone_base.mkdir(parents=True, exist_ok=True)
 
     paths = {}
@@ -120,6 +124,11 @@ def create_clones(
             paths[key] = clone_path
         else:
             paths[key] = repo.resolved_path
+
+    # Create persistent run directory for Claude session data
+    run_dir = RUNS_DIR / run_id / "claude"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
     return paths
 
 
@@ -129,7 +138,7 @@ def cleanup_clones(run_id: str) -> None:
     Does NOT fetch branches back — user does that separately.
     Just deletes the clone directory.
     """
-    clone_base = Path.home() / ".scad" / "worktrees" / run_id
+    clone_base = WORKTREE_DIR / run_id
     if clone_base.exists():
         shutil.rmtree(clone_base)
 
@@ -349,6 +358,11 @@ def run_container(
             "bind": "/mnt/host-claude-credentials.json",
             "mode": "ro",
         }
+
+    # Persistent run directory — Claude session data
+    run_claude_dir = RUNS_DIR / run_id / "claude"
+    if run_claude_dir.exists():
+        volumes[str(run_claude_dir)] = {"bind": "/home/scad/.claude", "mode": "rw"}
 
     # CLAUDE.md — global instructions for Claude Code
     if config.claude.claude_md is False:
