@@ -10,7 +10,6 @@ from pydantic import BaseModel, model_validator
 class RepoConfig(BaseModel):
     path: str
     workdir: bool = False
-    branch_from: str = "main"  # kept until Task 5
     add_dir: bool = False
     worktree: bool = True
     focus: Optional[str] = None

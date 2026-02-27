@@ -35,7 +35,6 @@ def integration_config(integration_repo):
             "code": {
                 "path": str(integration_repo),
                 "workdir": True,
-                "branch_from": "main",
             }
         },
     )
@@ -49,15 +48,18 @@ class TestBuildContext:
 
         assert (build_dir / "Dockerfile").exists()
         assert (build_dir / "entrypoint.sh").exists()
+        assert (build_dir / "bootstrap-claude.sh").exists()
+        assert (build_dir / "bootstrap-claude.conf").exists()
 
         dockerfile = (build_dir / "Dockerfile").read_text()
         assert "FROM python:3.11-slim" in dockerfile
         assert "ENTRYPOINT" in dockerfile
 
         entrypoint = (build_dir / "entrypoint.sh").read_text()
-        assert "git clone /mnt/repos/code" in entrypoint
-        assert "git checkout -b" in entrypoint
-        assert "git bundle create" in entrypoint
+        assert "cd /workspace/code" in entrypoint
+        assert "git clone" not in entrypoint
+        assert "git bundle" not in entrypoint
+        assert "tmux" in entrypoint
 
 
 class TestRunIdGeneration:

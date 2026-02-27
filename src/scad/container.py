@@ -125,7 +125,7 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     # Check if requirements.txt exists in the workdir repo
     requirements_content = False
     if config.python.requirements:
-        req_path = Path(workdir_repo.path).expanduser() / config.python.requirements
+        req_path = workdir_repo.resolved_path / config.python.requirements
         if req_path.exists():
             shutil.copy2(req_path, build_dir / "requirements.txt")
             requirements_content = True
@@ -144,13 +144,19 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     )
     (build_dir / "Dockerfile").write_text(dockerfile_content)
 
+    # Build context prompt from focus fields
+    context_parts = []
+    for key, repo in config.repos.items():
+        if repo.focus:
+            context_parts.append(
+                f"Read /workspace/{key}/{repo.focus}/overview.md for project context"
+            )
+    context_prompt = ". ".join(context_parts) if context_parts else None
+
     # Render entrypoint
     entrypoint_template = env.get_template("entrypoint.sh.j2")
     repos_dict = {
-        k: {
-            "branch_from": v.branch_from,
-            "add_dir": v.add_dir,
-        }
+        k: {"add_dir": v.add_dir}
         for k, v in config.repos.items()
     }
     entrypoint_content = entrypoint_template.render(
@@ -162,8 +168,20 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
             "additional_flags": config.claude.additional_flags,
         },
         config_name=config.name,
+        context_prompt=context_prompt,
     )
     (build_dir / "entrypoint.sh").write_text(entrypoint_content)
+
+    # Render bootstrap config (plugins list from config)
+    bootstrap_conf_template = env.get_template("bootstrap-claude.conf.j2")
+    bootstrap_conf_content = bootstrap_conf_template.render(
+        plugins=config.claude.plugins,
+    )
+    (build_dir / "bootstrap-claude.conf").write_text(bootstrap_conf_content)
+
+    # Copy static bootstrap script
+    bootstrap_script = Path(__file__).parent / "templates" / "bootstrap-claude.sh"
+    shutil.copy2(bootstrap_script, build_dir / "bootstrap-claude.sh")
 
 
 def list_scad_containers() -> list[dict]:

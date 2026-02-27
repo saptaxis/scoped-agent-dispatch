@@ -1,7 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-BRANCH="${BRANCH_NAME:?BRANCH_NAME not set}"
 RUN_ID="${RUN_ID:?RUN_ID not set}"
 PROMPT="${AGENT_PROMPT:-}"
 LOG_FILE="/scad-logs/${RUN_ID}.log"
@@ -9,39 +8,40 @@ STREAM_LOG="/scad-logs/${RUN_ID}.stream.jsonl"
 STATUS_FILE="/scad-logs/${RUN_ID}.status.json"
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Capture all output to log file AND stdout from the start
+# Capture all output to log file AND stdout
 exec > >(tee -a "$LOG_FILE") 2>&1
 
-echo "[scad] Starting agent on branch: $BRANCH (run: $RUN_ID)"
+echo "[scad] Starting session (run: $RUN_ID)"
 
-# Generate minimal Claude config stub (skip onboarding, mark native install)
-# The credentials file is mounted separately at ~/.claude/.credentials.json
+# Claude config stub (skip onboarding, native install)
 mkdir -p "$HOME/.claude"
 cat > "$HOME/.claude.json" <<'CLAUDECFG'
 {"hasCompletedOnboarding": true, "installMethod": "native"}
 CLAUDECFG
 
-# Copy host git config if mounted, then add safe.directory for container use
+# Copy host git config if mounted
 if [ -f /mnt/host-gitconfig ]; then
     cp /mnt/host-gitconfig "$HOME/.gitconfig"
 fi
 git config --global --add safe.directory '*'
 
-# Clone repos from read-only mounts
-{% for key, repo in repos.items() %}
-echo "[scad] Cloning {{ key }}..."
-git clone /mnt/repos/{{ key }} /workspace/{{ key }}
-cd /workspace/{{ key }}
-git checkout {{ repo.branch_from }}
-git checkout -b "$BRANCH"
-cd /
-{% endfor %}
+# Copy host Claude credentials if mounted (staging path avoids stale-inode
+# problem when user runs /login on host — new file = new inode, direct mount
+# would keep showing old content)
+if [ -f /mnt/host-claude-credentials.json ]; then
+    mkdir -p "$HOME/.claude"
+    cp /mnt/host-claude-credentials.json "$HOME/.claude/.credentials.json"
+fi
 
-# Working directory
+# Install Claude plugins (idempotent — skips already-installed)
+if [ -f "$HOME/bootstrap-claude.sh" ]; then
+    bash "$HOME/bootstrap-claude.sh" || echo "[scad] Warning: plugin bootstrap had errors"
+fi
+
+# Working directory (clone already mounted by host)
 cd /workspace/{{ workdir_key }}
 
-# Activate venv and sync deps from cloned repo's requirements.txt
-# Image has deps baked in; this catches any additions since last build
+# Activate venv and sync deps
 source /opt/venv/bin/activate
 {% if requirements_file %}
 echo "[scad] Syncing Python dependencies..."
@@ -60,61 +60,43 @@ CLAUDE_CMD="$CLAUDE_CMD --add-dir /workspace/{{ key }}"
 CLAUDE_CMD="$CLAUDE_CMD {{ claude.additional_flags }}"
 {% endif %}
 
-# Disable set -e so a non-zero Claude exit doesn't kill the script
-# before bundle creation and status file writing
+# Disable set -e so non-zero Claude exit doesn't skip status writing
 set +e
 
-# Run claude
 if [ -n "$PROMPT" ]; then
+    # Headless: fire and forget
     echo "[scad] Running headless: $PROMPT"
-    echo "[scad] Claude stream: $STREAM_LOG"
-    # stream-json gives real-time JSON events (tool calls, edits, etc.)
-    # stdout → .stream.jsonl (separate from entrypoint .log)
+    echo "[scad] Stream log: $STREAM_LOG"
     $CLAUDE_CMD -p --output-format stream-json "$PROMPT" > "$STREAM_LOG" 2>&1
     EXIT_CODE=$?
 else
+    # Interactive: tmux + Claude with context prompt
     echo "[scad] Starting interactive session"
-    $CLAUDE_CMD
-    EXIT_CODE=$?
+    {% if context_prompt %}
+    tmux new-session -d -s scad "$CLAUDE_CMD '{{ context_prompt }}'"
+    {% else %}
+    tmux new-session -d -s scad "$CLAUDE_CMD"
+    {% endif %}
+    # Keep container alive while tmux session exists
+    while tmux has-session -t scad 2>/dev/null; do
+        sleep 2
+    done
+    EXIT_CODE=0
 fi
 
 set -e
 
-# Create git bundles for repos with commits
-echo "[scad] Bundling branches..."
-BUNDLE_RESULTS="{}"
-{% for key, repo in repos.items() %}
-cd /workspace/{{ key }}
-COMMIT_COUNT=$(git rev-list --count {{ repo.branch_from }}.."$BRANCH" 2>/dev/null || echo "0")
-if [ "$COMMIT_COUNT" -gt 0 ]; then
-    echo "[scad] Bundling {{ key }} branch $BRANCH ($COMMIT_COUNT commits)"
-    if git bundle create "/scad-logs/${RUN_ID}-{{ key }}.bundle" {{ repo.branch_from }}.."$BRANCH" 2>/dev/null; then
-        BUNDLE_RESULTS=$(echo "$BUNDLE_RESULTS" | python3 -c "import sys,json; d=json.load(sys.stdin); d['{{ key }}']=True; print(json.dumps(d))")
-    else
-        echo "[scad] Warning: bundle failed for {{ key }}"
-        BUNDLE_RESULTS=$(echo "$BUNDLE_RESULTS" | python3 -c "import sys,json; d=json.load(sys.stdin); d['{{ key }}']=False; print(json.dumps(d))")
-    fi
-else
-    echo "[scad] No commits on {{ key }}, skipping bundle"
-fi
-{% endfor %}
-
 # Write structured exit status
 END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-TAIL_LINES=$(tail -20 "$LOG_FILE" 2>/dev/null | python3 -c "import sys,json; print(json.dumps(sys.stdin.read().splitlines()))" 2>/dev/null || echo "[]")
-
 cat > "$STATUS_FILE" <<STATUSEOF
 {
   "run_id": "$RUN_ID",
-  "branch": "$BRANCH",
   "config": "{{ config_name }}",
   "exit_code": $EXIT_CODE,
   "started": "$START_TIME",
-  "finished": "$END_TIME",
-  "bundles": $BUNDLE_RESULTS,
-  "tail": $TAIL_LINES
+  "finished": "$END_TIME"
 }
 STATUSEOF
 
-echo "[scad] Agent finished with exit code $EXIT_CODE"
+echo "[scad] Session finished with exit code $EXIT_CODE"
 exit $EXIT_CODE

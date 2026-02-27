@@ -29,7 +29,7 @@ from scad.container import (
 def sample_config():
     return ScadConfig(
         name="test",
-        repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+        repos={"code": {"path": "/tmp/fake", "workdir": True}},
         python={"version": "3.11", "requirements": "requirements.txt"},
         apt_packages=["build-essential"],
     )
@@ -48,7 +48,15 @@ class TestRenderBuildContext:
         entrypoint = tmp_path / "entrypoint.sh"
         assert entrypoint.exists()
         content = entrypoint.read_text()
-        assert "git clone" in content
+        assert "cd /workspace/code" in content
+        assert "git clone" not in content
+
+    def test_creates_bootstrap_files(self, sample_config, tmp_path):
+        render_build_context(sample_config, tmp_path)
+        assert (tmp_path / "bootstrap-claude.sh").exists()
+        assert (tmp_path / "bootstrap-claude.conf").exists()
+        conf = (tmp_path / "bootstrap-claude.conf").read_text()
+        assert "superpowers@claude-plugins-official" in conf
 
     def test_copies_requirements(self, sample_config, tmp_path):
         # Create a fake requirements.txt in a fake repo
@@ -373,7 +381,7 @@ class TestRunContainerClaudeMd:
         """claude_md: false disables auto-mount even if file exists."""
         config = ScadConfig(
             name="test",
-            repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
             claude={"claude_md": False},
         )
         mock_client = MagicMock()
@@ -402,7 +410,7 @@ class TestRunContainerClaudeMd:
 
         config = ScadConfig(
             name="test",
-            repos={"code": {"path": "/tmp/fake", "workdir": True, "branch_from": "main"}},
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
             claude={"claude_md": str(custom_md)},
         )
         mock_client = MagicMock()

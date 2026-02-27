@@ -23,7 +23,6 @@ def sample_config_dict():
             "code": {
                 "path": "/tmp/fake-repo",
                 "workdir": True,
-                "branch_from": "main",
             }
         },
     }
@@ -75,8 +74,9 @@ class TestScadConfig:
     def test_repo_defaults(self, sample_config_dict):
         config = ScadConfig(**sample_config_dict)
         repo = config.repos["code"]
-        assert repo.branch_from == "main"
         assert repo.add_dir is False
+        assert repo.worktree is True
+        assert repo.focus is None
 
     def test_with_mounts(self):
         config = ScadConfig(
