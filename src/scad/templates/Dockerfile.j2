@@ -2,7 +2,7 @@ FROM {{ base_image | default('python:3.11-slim') }}
 
 # System packages
 RUN apt-get update && apt-get install -y \
-    curl git bash tmux \
+    curl git bash tmux zsh \
     {% for pkg in apt_packages %}{{ pkg }} {% endfor %}\
     && rm -rf /var/lib/apt/lists/*
 
@@ -16,25 +16,32 @@ COPY requirements.txt /tmp/requirements.txt
 RUN pip install --no-cache-dir -r /tmp/requirements.txt
 {% endif %}
 
-# Non-root user (Claude Code refuses --dangerously-skip-permissions as root)
+# Non-root user
 RUN useradd -m -s /bin/bash scad \
     && chown -R scad:scad /opt/venv \
     && mkdir -p /workspace /scad-logs \
     && chown -R scad:scad /workspace /scad-logs
 
-# Install Claude Code via native installer (as scad user)
+# Set PATH before Claude install (suppresses "~/.local/bin not in PATH" warning)
 USER scad
+ENV PATH="/home/scad/.local/bin:$PATH"
+
+# Install Claude Code via native installer
 WORKDIR /tmp
 RUN curl -fsSL https://claude.ai/install.sh | bash
-ENV PATH="/home/scad/.local/bin:$PATH"
 ENV DISABLE_AUTOUPDATER=1
+
+# Container DX: oh-my-zsh + tmux config
+RUN sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended
+ENV TERM=xterm-256color
+COPY .tmux.conf /home/scad/.tmux.conf
 
 # Bootstrap scripts for Claude plugin installation
 USER root
 COPY bootstrap-claude.sh bootstrap-claude.conf /home/scad/
 RUN chmod +x /home/scad/bootstrap-claude.sh
 
-# Entrypoint (must be readable by scad user)
+# Entrypoint
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
