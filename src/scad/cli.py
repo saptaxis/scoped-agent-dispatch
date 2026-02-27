@@ -11,11 +11,14 @@ import docker
 from scad.config import load_config, list_configs
 from scad.container import (
     build_image,
+    check_claude_auth,
+    create_clones,
     generate_run_id,
     get_image_info,
     image_exists,
     list_completed_runs,
     list_scad_containers,
+    resolve_branch,
     run_container,
     stop_container,
 )
@@ -71,9 +74,23 @@ def main():
     pass
 
 
-def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) -> str:
-    """Orchestrate the full agent lifecycle: build, run."""
-    run_id = generate_run_id(branch)
+def run_agent(
+    config, branch: str, prompt: str = None, rebuild: bool = False
+) -> str:
+    """Orchestrate the full agent lifecycle: resolve branch, build, create clones, run."""
+    # Pre-flight: check Claude auth
+    valid, hours = check_claude_auth()
+    if not valid:
+        raise click.ClickException(
+            "Claude auth expired or missing. Run: claude /login"
+        )
+    if hours < 1.0:
+        click.echo(
+            f"[scad] Warning: Claude auth expires in {hours * 60:.0f} minutes. "
+            f"Consider running: claude /login"
+        )
+
+    run_id = generate_run_id(config.name)
 
     # Build image if needed
     if rebuild or not image_exists(config):
@@ -86,9 +103,13 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
     else:
         click.echo(f"[scad] Using cached image scad-{config.name}")
 
+    # Create host-side local clones
+    click.echo(f"[scad] Creating clones on branch: {branch}")
+    worktree_paths = create_clones(config, branch, run_id)
+
     # Run the container (always detached)
     click.echo(f"[scad] Dispatching agent: {run_id}")
-    container_id = run_container(config, branch, run_id, prompt)
+    container_id = run_container(config, branch, run_id, worktree_paths, prompt)
     click.echo(f"[scad] Container started: {container_id[:12]}")
 
     if prompt:
@@ -104,7 +125,7 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
 
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
-@click.option("--branch", required=True, help="Branch name for the agent's work.")
+@click.option("--branch", default=None, help="Branch name (auto-generated if not specified).")
 @click.option("--prompt", default=None, help="Prompt for headless mode.")
 @click.option("--rebuild", is_flag=True, help="Force rebuild the Docker image.")
 def run(config_name: str, branch: str, prompt: str, rebuild: bool):
@@ -119,11 +140,15 @@ def run(config_name: str, branch: str, prompt: str, rebuild: bool):
         sys.exit(2)
 
     try:
+        branch = resolve_branch(config, branch)
         run_id = run_agent(
             config, branch=branch, prompt=prompt, rebuild=rebuild
         )
         if prompt:
             click.echo(f"[scad] Dispatched: {run_id}")
+    except click.ClickException as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)

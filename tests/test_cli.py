@@ -208,33 +208,44 @@ class TestScadRun:
         assert result.exit_code != 0
         assert "Missing argument" in result.output or "config" in result.output.lower()
 
-    def test_run_requires_branch(self, runner):
-        result = runner.invoke(main, ["run", "myconfig"])
-        assert result.exit_code != 0
-        assert "branch" in result.output.lower()
-
     @patch("scad.cli.load_config")
     def test_run_config_not_found(self, mock_load, runner):
         mock_load.side_effect = FileNotFoundError("Config 'bad' not found")
-        result = runner.invoke(main, ["run", "bad", "--branch", "test"])
+        result = runner.invoke(main, ["run", "bad"])
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
 
     @patch("scad.cli.run_agent")
+    @patch("scad.cli.resolve_branch")
     @patch("scad.cli.load_config")
-    def test_run_dispatches(self, mock_load, mock_run, runner):
+    def test_run_dispatches_headless(self, mock_load, mock_resolve, mock_run, runner):
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
-        mock_run.return_value = "run-id-123"
+        mock_resolve.return_value = "plan-22"
+        mock_run.return_value = "test-Feb27-1430"
 
         result = runner.invoke(
-            main, ["run", "test", "--branch", "plan-01", "--prompt", "do stuff"]
+            main, ["run", "test", "--branch", "plan-22", "--prompt", "do stuff"]
         )
         assert result.exit_code == 0
         mock_run.assert_called_once()
-        assert mock_run.call_args[1]["branch"] == "plan-01"
+        assert mock_run.call_args[1]["branch"] == "plan-22"
         assert mock_run.call_args[1]["prompt"] == "do stuff"
+
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.resolve_branch")
+    @patch("scad.cli.load_config")
+    def test_run_auto_generates_branch(self, mock_load, mock_resolve, mock_run, runner):
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_resolve.return_value = "scad-Feb27-1430"
+        mock_run.return_value = "test-Feb27-1430"
+
+        result = runner.invoke(main, ["run", "test"])
+        assert result.exit_code == 0
+        mock_resolve.assert_called_once_with(mock_config, None)
 
 
 class TestShellCompletion:

@@ -4,6 +4,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -19,12 +20,30 @@ def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
 
 
-def generate_run_id(branch: str) -> str:
-    """Generate a unique run ID from branch name and current timestamp."""
+def generate_run_id(config_name: str) -> str:
+    """Generate a unique run ID from config name and current timestamp."""
     now = datetime.now(timezone.utc)
     date_str = now.strftime("%b%d")  # e.g., Feb26
     time_str = now.strftime("%H%M")  # e.g., 1430
-    return f"{branch}-{date_str}-{time_str}"
+    return f"{config_name}-{date_str}-{time_str}"
+
+
+def check_claude_auth() -> tuple[bool, float]:
+    """Check if Claude credentials exist and are valid.
+
+    Returns (valid, hours_remaining). valid is False if credentials
+    are missing or expired. hours_remaining is 0 if invalid.
+    """
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if not creds_path.exists():
+        return False, 0.0
+    try:
+        data = json.loads(creds_path.read_text())
+        expires_at = data["claudeAiOauth"]["expiresAt"] / 1000  # ms → sec
+        remaining = (expires_at - time.time()) / 3600  # seconds → hours
+        return remaining > 0, max(remaining, 0.0)
+    except (json.JSONDecodeError, KeyError):
+        return False, 0.0
 
 
 def generate_branch_name() -> str:

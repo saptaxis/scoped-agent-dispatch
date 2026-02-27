@@ -8,11 +8,14 @@ from pathlib import Path
 import click
 from scad.config import ScadConfig
 import docker
+import time as _time
+
 from scad.container import (
     render_build_context,
     generate_run_id,
     generate_branch_name,
     check_branch_exists,
+    check_claude_auth,
     resolve_branch,
     create_clones,
     cleanup_clones,
@@ -79,19 +82,16 @@ class TestRenderBuildContext:
 
 class TestGenerateRunId:
     def test_format(self):
-        run_id = generate_run_id("plan-22")
-        # Should be like plan-22-Feb26-1430
-        assert run_id.startswith("plan-22-")
+        run_id = generate_run_id("lwg")
+        assert run_id.startswith("lwg-")
         parts = run_id.split("-")
-        # branch-parts-MonDD-HHMM
-        assert len(parts) >= 3
-        # Last two parts are the date and time
+        assert len(parts) == 3
         assert len(parts[-1]) == 4  # HHMM
-        assert len(parts[-2]) == 5  # MonDD like Feb26
+        assert len(parts[-2]) == 5  # MonDD
 
-    def test_contains_branch(self):
-        run_id = generate_run_id("my-feature")
-        assert "my-feature" in run_id
+    def test_contains_config_name(self):
+        run_id = generate_run_id("my-project")
+        assert run_id.startswith("my-project-")
 
 
 class TestBranchManagement:
@@ -563,5 +563,58 @@ class TestRunContainerWorktreeMounts:
         env = mock_client.containers.run.call_args[1]["environment"]
         assert "BRANCH_NAME" not in env
         assert "RUN_ID" in env
+
+
+class TestCheckClaudeAuth:
+    def test_missing_credentials(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        valid, hours = check_claude_auth()
+        assert valid is False
+        assert hours == 0.0
+
+    def test_expired_credentials(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        expired_ms = (_time.time() - 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": expired_ms}})
+        )
+        valid, hours = check_claude_auth()
+        assert valid is False
+        assert hours == 0.0
+
+    def test_valid_credentials(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": future_ms}})
+        )
+        valid, hours = check_claude_auth()
+        assert valid is True
+        assert 3.9 < hours < 4.1
+
+    def test_warns_under_one_hour(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        soon_ms = (_time.time() + 1800) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": soon_ms}})
+        )
+        valid, hours = check_claude_auth()
+        assert valid is True
+        assert hours < 1.0
+
+    def test_malformed_json(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        (creds_dir / ".credentials.json").write_text("not json")
+        valid, hours = check_claude_auth()
+        assert valid is False
+        assert hours == 0.0
 
 
