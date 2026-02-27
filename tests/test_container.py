@@ -26,6 +26,7 @@ from scad.container import (
     list_scad_containers,
     list_completed_runs,
     stop_container,
+    fetch_to_host,
 )
 
 
@@ -709,5 +710,121 @@ class TestCleanRun:
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
         clean_run("nonexistent")  # Should not raise
+
+
+class TestFetchToHost:
+    def test_fetches_branch_to_source(self, tmp_path, monkeypatch):
+        """fetch_to_host copies branch from clone to source repo."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+
+        # Create source repo
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+
+        # Create clone with a branch and commit
+        clone_dir = tmp_path / "worktrees" / "test-run" / "code"
+        subprocess.run(["git", "clone", "--local", str(source), str(clone_dir)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "test-branch"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "commit", "--allow-empty", "-m", "work"], check=True, capture_output=True)
+
+        # Create run dir for fetches.log
+        run_dir = tmp_path / "runs" / "test-run"
+        run_dir.mkdir(parents=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(source), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        results = fetch_to_host("test-run", config)
+
+        # Branch should now exist in source
+        branches = subprocess.run(
+            ["git", "-C", str(source), "branch", "--list", "test-branch"],
+            capture_output=True, text=True
+        )
+        assert "test-branch" in branches.stdout
+        assert len(results) == 1
+        assert results[0]["repo"] == "code"
+
+    def test_fetches_multiple_repos(self, tmp_path, monkeypatch):
+        """fetch_to_host handles multiple repos."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+
+        sources = {}
+        for name in ["code", "docs"]:
+            src = tmp_path / f"source-{name}"
+            src.mkdir()
+            subprocess.run(["git", "init", str(src)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(src), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+            clone = tmp_path / "worktrees" / "test-run" / name
+            subprocess.run(["git", "clone", "--local", str(src), str(clone)], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(clone), "checkout", "-b", "feat"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(clone), "commit", "--allow-empty", "-m", "work"], check=True, capture_output=True)
+            sources[name] = src
+
+        (tmp_path / "runs" / "test-run").mkdir(parents=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={
+                "code": RepoConfig(path=str(sources["code"]), workdir=True),
+                "docs": RepoConfig(path=str(sources["docs"]), add_dir=True),
+            },
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        results = fetch_to_host("test-run", config)
+        assert len(results) == 2
+
+    def test_writes_fetches_log(self, tmp_path, monkeypatch):
+        """fetch_to_host appends to fetches.log."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+        clone_dir = tmp_path / "worktrees" / "test-run" / "code"
+        subprocess.run(["git", "clone", "--local", str(source), str(clone_dir)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "feat"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "commit", "--allow-empty", "-m", "work"], check=True, capture_output=True)
+
+        run_dir = tmp_path / "runs" / "test-run"
+        run_dir.mkdir(parents=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(source), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        fetch_to_host("test-run", config)
+
+        log = (run_dir / "fetches.log").read_text()
+        assert "feat" in log
+        assert "code" in log
+
+    def test_no_worktree_clones_raises(self, tmp_path, monkeypatch):
+        """fetch_to_host raises if clone dir doesn't exist."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(tmp_path), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+        with pytest.raises(FileNotFoundError):
+            fetch_to_host("nonexistent-run", config)
 
 

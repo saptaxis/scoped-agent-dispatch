@@ -233,6 +233,10 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     bootstrap_script = Path(__file__).parent / "templates" / "bootstrap-claude.sh"
     shutil.copy2(bootstrap_script, build_dir / "bootstrap-claude.sh")
 
+    # Copy .tmux.conf template
+    tmux_conf_src = Path(__file__).parent / "templates" / ".tmux.conf"
+    shutil.copy2(tmux_conf_src, build_dir / ".tmux.conf")
+
 
 def list_scad_containers() -> list[dict]:
     """List running scad containers from Docker."""
@@ -430,5 +434,72 @@ def run_container(
         },
     )
     return container.id
+
+
+def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
+    """Fetch branches from clones back to source repos.
+
+    For each clone: detach HEAD, fetch branch to source, re-checkout branch.
+    Appends to ~/.scad/runs/<run-id>/fetches.log.
+    """
+    clone_base = WORKTREE_DIR / run_id
+    if not clone_base.exists():
+        raise FileNotFoundError(f"No clones found for run: {run_id}")
+
+    results = []
+    for key, repo_cfg in config.repos.items():
+        clone_path = clone_base / key
+        if not clone_path.exists():
+            continue
+
+        source_path = repo_cfg.resolved_path
+
+        # Get current branch name
+        branch = subprocess.run(
+            ["git", "-C", str(clone_path), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        if branch == "HEAD":
+            continue
+
+        # Detach HEAD so source repo can accept the fetch
+        subprocess.run(
+            ["git", "-C", str(clone_path), "checkout", "--detach"],
+            capture_output=True, check=True,
+        )
+
+        # Fetch branch into source repo
+        subprocess.run(
+            ["git", "-C", str(source_path), "fetch", str(clone_path), f"{branch}:{branch}"],
+            capture_output=True, text=True, check=True,
+        )
+
+        # Re-checkout the branch in the clone
+        subprocess.run(
+            ["git", "-C", str(clone_path), "checkout", branch],
+            capture_output=True, check=True,
+        )
+
+        results.append({"repo": key, "branch": branch, "source": str(source_path)})
+
+    # Append to fetches.log
+    run_dir = RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_file = run_dir / "fetches.log"
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
+    with open(log_file, "a") as f:
+        for r in results:
+            f.write(f"{timestamp} {r['branch']} {r['repo']} → {r['source']}\n")
+
+    return results
+
+
+def config_name_for_run(run_id: str) -> Optional[str]:
+    """Extract config name from a run ID (format: <config>-<MonDD>-<HHMM>)."""
+    parts = run_id.rsplit("-", 2)
+    if len(parts) >= 3:
+        return parts[0]
+    return None
 
 

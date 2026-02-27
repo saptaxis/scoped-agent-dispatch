@@ -15,7 +15,9 @@ from scad.container import (
     check_claude_auth,
     clean_run,
     cleanup_clones,
+    config_name_for_run,
     create_clones,
+    fetch_to_host,
     generate_run_id,
     get_image_info,
     image_exists,
@@ -309,3 +311,28 @@ def clean(run_id: str):
     """Remove container, clones, and run data for a completed run."""
     clean_run(run_id)
     click.echo(f"[scad] Cleaned: {run_id}")
+
+
+def _config_for_run(run_id: str) -> "ScadConfig":
+    """Load the config associated with a run ID."""
+    config_name = config_name_for_run(run_id)
+    if not config_name:
+        raise click.ClickException(f"Cannot determine config from run ID: {run_id}")
+    return load_config(config_name)
+
+
+@main.command()
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def fetch(run_id: str):
+    """Fetch branches from clones back to source repos."""
+    try:
+        config = _config_for_run(run_id)
+        results = fetch_to_host(run_id, config)
+        if not results:
+            click.echo(f"[scad] Nothing to fetch for {run_id}")
+        else:
+            for r in results:
+                click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} → {r['source']}")
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(2)
