@@ -70,6 +70,51 @@ def resolve_branch(config: ScadConfig, branch: Optional[str]) -> str:
         return branch
 
 
+def create_clones(
+    config: ScadConfig, branch: str, run_id: str
+) -> dict[str, Path]:
+    """Create host-side local clones for each repo with worktree=True.
+
+    Uses git clone --local (hardlinks, near-instant) instead of git worktree
+    because worktrees' .git file references the main repo's .git directory,
+    which isn't accessible inside Docker containers.
+
+    Returns dict of repo_key -> clone_path (or direct path for non-worktree repos).
+    """
+    clone_base = Path.home() / ".scad" / "worktrees" / run_id
+    clone_base.mkdir(parents=True, exist_ok=True)
+
+    paths = {}
+    for key, repo in config.repos.items():
+        if repo.worktree:
+            clone_path = clone_base / key
+            subprocess.run(
+                ["git", "clone", "--local",
+                 str(repo.resolved_path), str(clone_path)],
+                check=True,
+            )
+            subprocess.run(
+                ["git", "-C", str(clone_path),
+                 "checkout", "-b", branch],
+                check=True,
+            )
+            paths[key] = clone_path
+        else:
+            paths[key] = repo.resolved_path
+    return paths
+
+
+def cleanup_clones(run_id: str) -> None:
+    """Remove clones for a completed run.
+
+    Does NOT fetch branches back — user does that separately.
+    Just deletes the clone directory.
+    """
+    clone_base = Path.home() / ".scad" / "worktrees" / run_id
+    if clone_base.exists():
+        shutil.rmtree(clone_base)
+
+
 def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     """Render Dockerfile and entrypoint into a build context directory."""
     env = _get_jinja_env()

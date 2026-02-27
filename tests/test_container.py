@@ -14,6 +14,8 @@ from scad.container import (
     generate_branch_name,
     check_branch_exists,
     resolve_branch,
+    create_clones,
+    cleanup_clones,
     build_image,
     run_container,
     fetch_pending_bundles,
@@ -134,6 +136,71 @@ class TestBranchManagement:
         )
         branch = resolve_branch(config, None)
         assert branch.endswith("-2")
+
+
+class TestCloneLifecycle:
+    @patch("scad.container.subprocess.run")
+    def test_create_clones_calls_git_clone(self, mock_run, tmp_path):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": str(tmp_path / "repo"), "workdir": True, "worktree": True}},
+        )
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            paths = create_clones(config, "plan-22", "test-run-id")
+
+        # First call: git clone --local, second call: git checkout -b
+        assert mock_run.call_count == 2
+        clone_args = mock_run.call_args_list[0][0][0]
+        assert "clone" in clone_args
+        assert "--local" in clone_args
+        checkout_args = mock_run.call_args_list[1][0][0]
+        assert "checkout" in checkout_args
+        assert "-b" in checkout_args
+        assert "plan-22" in checkout_args
+
+    @patch("scad.container.subprocess.run")
+    def test_create_clones_returns_paths(self, mock_run, tmp_path):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": str(tmp_path / "repo"), "workdir": True, "worktree": True}},
+        )
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            paths = create_clones(config, "plan-22", "test-run-id")
+
+        assert "code" in paths
+        expected = tmp_path / ".scad" / "worktrees" / "test-run-id" / "code"
+        assert paths["code"] == expected
+
+    @patch("scad.container.subprocess.run")
+    def test_create_clones_skips_non_worktree(self, mock_run, tmp_path):
+        config = ScadConfig(
+            name="test",
+            repos={
+                "code": {"path": str(tmp_path / "code"), "workdir": True, "worktree": True},
+                "ref": {"path": str(tmp_path / "ref"), "worktree": False},
+            },
+        )
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            paths = create_clones(config, "plan-22", "test-run-id")
+
+        # ref repo should return its original path, not a clone
+        assert paths["ref"] == (tmp_path / "ref").resolve()
+        # Two subprocess calls for code (clone + checkout), zero for ref
+        assert mock_run.call_count == 2
+
+    @patch("scad.container.shutil.rmtree")
+    def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path):
+        clone_base = tmp_path / ".scad" / "worktrees" / "test-run-id"
+        clone_base.mkdir(parents=True)
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            cleanup_clones("test-run-id")
+
+        mock_rmtree.assert_called_once_with(clone_base)
+
+    def test_cleanup_clones_noop_if_missing(self, tmp_path):
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            cleanup_clones("nonexistent")  # should not raise
 
 
 class TestBuildImage:
