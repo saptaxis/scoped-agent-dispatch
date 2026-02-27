@@ -18,7 +18,6 @@ from scad.container import (
     cleanup_clones,
     build_image,
     run_container,
-    fetch_pending_bundles,
     list_scad_containers,
     list_completed_runs,
     stop_container,
@@ -486,63 +485,3 @@ class TestRunContainerAuth:
             assert ".credentials" not in path
 
 
-class TestFetchPendingBundles:
-    def test_finds_and_fetches_unfetched_bundles(self, tmp_path):
-        status = {
-            "run_id": "test-Feb26-1430",
-            "config": "myconfig",
-            "branch": "test-branch",
-            "exit_code": 0,
-            "bundles": {"code": True},
-        }
-        (tmp_path / "test-Feb26-1430.status.json").write_text(json.dumps(status))
-        (tmp_path / "test-Feb26-1430-code.bundle").write_bytes(b"fake bundle")
-
-        with patch("scad.container.fetch_bundles") as mock_fetch:
-            mock_fetch.return_value = {"code": True}
-            with patch("scad.container.load_config") as mock_load:
-                mock_load.return_value = MagicMock()
-                results = fetch_pending_bundles(logs_dir=tmp_path)
-
-        assert len(results) == 1
-        assert results[0]["run_id"] == "test-Feb26-1430"
-        # Should create .fetched marker
-        assert (tmp_path / "test-Feb26-1430.fetched").exists()
-
-    def test_skips_already_fetched(self, tmp_path):
-        status = {
-            "run_id": "old-Feb25-1000",
-            "config": "myconfig",
-            "branch": "old",
-            "exit_code": 0,
-            "bundles": {"code": True},
-        }
-        (tmp_path / "old-Feb25-1000.status.json").write_text(json.dumps(status))
-        (tmp_path / "old-Feb25-1000-code.bundle").write_bytes(b"fake")
-        (tmp_path / "old-Feb25-1000.fetched").write_text("")
-
-        with patch("scad.container.fetch_bundles") as mock_fetch:
-            results = fetch_pending_bundles(logs_dir=tmp_path)
-
-        mock_fetch.assert_not_called()
-        assert results == []
-
-    def test_skips_runs_without_bundles(self, tmp_path):
-        status = {
-            "run_id": "no-bundles-Feb26-1430",
-            "config": "myconfig",
-            "branch": "test",
-            "exit_code": 0,
-            "bundles": {},
-        }
-        (tmp_path / "no-bundles-Feb26-1430.status.json").write_text(json.dumps(status))
-
-        with patch("scad.container.fetch_bundles") as mock_fetch:
-            results = fetch_pending_bundles(logs_dir=tmp_path)
-
-        mock_fetch.assert_not_called()
-        assert results == []
-
-    def test_returns_empty_for_missing_dir(self, tmp_path):
-        results = fetch_pending_bundles(logs_dir=tmp_path / "nonexistent")
-        assert results == []

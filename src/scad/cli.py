@@ -11,8 +11,6 @@ import docker
 from scad.config import load_config, list_configs
 from scad.container import (
     build_image,
-    fetch_bundles,
-    fetch_pending_bundles,
     generate_run_id,
     get_image_info,
     image_exists,
@@ -74,7 +72,7 @@ def main():
 
 
 def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) -> str:
-    """Orchestrate the full agent lifecycle: build, run, wait, fetch bundles."""
+    """Orchestrate the full agent lifecycle: build, run."""
     run_id = generate_run_id(branch)
 
     # Build image if needed
@@ -88,35 +86,18 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
     else:
         click.echo(f"[scad] Using cached image scad-{config.name}")
 
-    # Run the container
+    # Run the container (always detached)
     click.echo(f"[scad] Dispatching agent: {run_id}")
     container_id = run_container(config, branch, run_id, prompt)
     click.echo(f"[scad] Container started: {container_id[:12]}")
 
     if prompt:
-        # Headless mode — fire and forget
         click.echo(f"[scad] Running headless.")
         click.echo(f"[scad]   Setup log:    scad logs {run_id}")
         click.echo(f"[scad]   Claude stream: scad logs {run_id} --stream")
         click.echo(f"[scad]   Live follow:   scad logs {run_id} -sf")
-        click.echo(f"[scad]   Auto-fetch:    scad status")
     else:
-        # Interactive mode — attach
-        click.echo("[scad] Attaching to interactive session...")
-        client = docker.from_env()
-        container = client.containers.get(container_id)
-        try:
-            for chunk in container.attach(stream=True):
-                sys.stdout.buffer.write(chunk)
-                sys.stdout.buffer.flush()
-        except KeyboardInterrupt:
-            pass
-        container.wait()
-        fetch_bundles(config, run_id, branch)
-        try:
-            container.remove()
-        except Exception:
-            pass
+        click.echo(f"[scad] Session ready. Run: scad attach {run_id}")
 
     return run_id
 
@@ -196,11 +177,6 @@ def build(config_name: str):
 @main.command()
 def status():
     """List running and recently completed agents."""
-    # Auto-fetch any pending bundles from completed runs
-    fetched = fetch_pending_bundles()
-    for f in fetched:
-        click.echo(f"[scad] Auto-fetched bundles for {f['run_id']}")
-
     running = list_scad_containers()
     completed = list_completed_runs()
 
