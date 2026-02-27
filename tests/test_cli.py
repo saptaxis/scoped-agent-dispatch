@@ -110,6 +110,26 @@ class TestScadLogs:
         assert "line199" in result.output
         assert "line194" not in result.output
 
+    def test_logs_stream_shows_jsonl(self, runner, tmp_path):
+        logs_dir = tmp_path / ".scad" / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "test-run.stream.jsonl").write_text(
+            '{"type":"tool_use","tool":"Edit"}\n'
+            '{"type":"tool_result","output":"ok"}\n'
+        )
+
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, ["logs", "test-run", "--stream"])
+        assert result.exit_code == 0
+        assert "tool_use" in result.output
+        assert "Edit" in result.output
+
+    def test_logs_stream_not_found(self, runner, tmp_path):
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, ["logs", "nonexistent", "--stream"])
+        assert result.exit_code != 0
+        assert "No stream log" in result.output
+
 
 class TestScadStatus:
     @patch("scad.cli.fetch_pending_bundles")

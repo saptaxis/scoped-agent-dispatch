@@ -60,14 +60,26 @@ class TestDockerfileTemplate:
         )
         assert "COPY requirements.txt" not in result
 
-    def test_includes_claude_install(self, jinja_env, sample_config):
+    def test_includes_claude_native_install(self, jinja_env, sample_config):
         template = jinja_env.get_template("Dockerfile.j2")
         result = template.render(
             base_image=sample_config.base_image,
             apt_packages=[],
             requirements_content=False,
         )
-        assert "claude" in result.lower() or "claude.ai/install" in result
+        assert "claude.ai/install.sh" in result
+        # Native installer, not npm
+        assert "npm install" not in result
+        assert "nodejs" not in result
+
+    def test_disables_autoupdater(self, jinja_env, sample_config):
+        template = jinja_env.get_template("Dockerfile.j2")
+        result = template.render(
+            base_image=sample_config.base_image,
+            apt_packages=[],
+            requirements_content=False,
+        )
+        assert "DISABLE_AUTOUPDATER=1" in result
 
     def test_has_entrypoint(self, jinja_env, sample_config):
         template = jinja_env.get_template("Dockerfile.j2")

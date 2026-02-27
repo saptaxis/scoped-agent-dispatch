@@ -212,13 +212,16 @@ def run_container(
     if gitconfig.exists():
         volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
 
-    # Claude auth — mount .claude dir and .claude.json config
-    claude_dir = Path.home() / ".claude"
-    claude_json = Path.home() / ".claude.json"
-    if claude_dir.exists():
-        volumes[str(claude_dir)] = {"bind": "/home/scad/.claude", "mode": "rw"}
-    if claude_json.exists():
-        volumes[str(claude_json)] = {"bind": "/home/scad/.claude.json", "mode": "rw"}
+    # Claude auth — mount ONLY credentials file, not the whole ~/.claude dir.
+    # Mounting the full dir brings host plugins (with host-specific installPaths
+    # that don't resolve in the container) and risks host file deletion.
+    # The entrypoint generates a minimal ~/.claude.json stub for onboarding.
+    claude_creds = Path.home() / ".claude" / ".credentials.json"
+    if claude_creds.exists():
+        volumes[str(claude_creds)] = {
+            "bind": "/home/scad/.claude/.credentials.json",
+            "mode": "ro",
+        }
 
     # CLAUDE.md — global instructions for Claude Code
     if config.claude.claude_md is False:

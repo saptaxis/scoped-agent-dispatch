@@ -300,6 +300,62 @@ class TestRunContainerClaudeMd:
         assert custom_mount["bind"] == "/home/scad/CLAUDE.md"
 
 
+class TestRunContainerAuth:
+    @patch("scad.container.docker.from_env")
+    def test_mounts_credentials_only(self, mock_docker, sample_config, tmp_path):
+        """Only .credentials.json is mounted, not the whole ~/.claude dir."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Create ~/.claude/.credentials.json
+        claude_dir = tmp_path / ".claude"
+        claude_dir.mkdir()
+        creds = claude_dir / ".credentials.json"
+        creds.write_text('{"claudeAiOauth": {}}')
+        # Also create files that should NOT be mounted
+        (claude_dir / "settings.json").write_text("{}")
+        plugins_dir = claude_dir / "plugins"
+        plugins_dir.mkdir()
+        (plugins_dir / "installed_plugins.json").write_text("{}")
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        # Credentials file should be mounted read-only
+        creds_mount = volumes.get(str(creds))
+        assert creds_mount is not None
+        assert creds_mount["mode"] == "ro"
+        assert creds_mount["bind"] == "/home/scad/.claude/.credentials.json"
+        # Full .claude dir should NOT be mounted
+        assert str(claude_dir) not in volumes
+        # .claude.json from host should NOT be mounted
+        for path in volumes:
+            if path.endswith(".claude.json") and ".credentials" not in path:
+                pytest.fail(f"Host .claude.json should not be mounted: {path}")
+
+    @patch("scad.container.docker.from_env")
+    def test_no_auth_mount_when_no_credentials(self, mock_docker, sample_config, tmp_path):
+        """No auth mount if credentials file doesn't exist."""
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "test", "test-Feb27-1430")
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        for path in volumes:
+            assert ".credentials" not in path
+
+
 class TestFetchPendingBundles:
     def test_finds_and_fetches_unfetched_bundles(self, tmp_path):
         status = {

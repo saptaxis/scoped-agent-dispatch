@@ -95,9 +95,11 @@ def run_agent(config, branch: str, prompt: str = None, rebuild: bool = False) ->
 
     if prompt:
         # Headless mode — fire and forget
-        click.echo(f"[scad] Running headless. Logs: scad logs {run_id}")
-        click.echo(f"[scad] Bundles auto-fetch on: scad status")
-        click.echo(f"[scad] Container setup: docker logs -f scad-{run_id}")
+        click.echo(f"[scad] Running headless.")
+        click.echo(f"[scad]   Setup log:    scad logs {run_id}")
+        click.echo(f"[scad]   Claude stream: scad logs {run_id} --stream")
+        click.echo(f"[scad]   Live follow:   scad logs {run_id} -sf")
+        click.echo(f"[scad]   Auto-fetch:    scad status")
     else:
         # Interactive mode — attach
         click.echo("[scad] Attaching to interactive session...")
@@ -224,11 +226,19 @@ def status():
 @click.argument("run_id", shell_complete=_complete_run_ids)
 @click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
 @click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
-def logs(run_id: str, follow: bool, lines: int):
+@click.option("--stream", "-s", is_flag=True, help="Show Claude stream (tool calls, edits) instead of entrypoint log.")
+def logs(run_id: str, follow: bool, lines: int, stream: bool):
     """Read agent log output."""
-    log_path = Path.home() / ".scad" / "logs" / f"{run_id}.log"
+    logs_dir = Path.home() / ".scad" / "logs"
+    if stream:
+        log_path = logs_dir / f"{run_id}.stream.jsonl"
+        not_found_msg = f"No stream log found for {run_id}"
+    else:
+        log_path = logs_dir / f"{run_id}.log"
+        not_found_msg = f"No log file found for {run_id}"
+
     if not log_path.exists():
-        click.echo(f"[scad] No log file found for {run_id}", err=True)
+        click.echo(f"[scad] {not_found_msg}", err=True)
         sys.exit(1)
 
     if follow:

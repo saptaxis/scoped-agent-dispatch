@@ -132,8 +132,8 @@ class TestEntrypointTemplate:
         assert exec_pos != -1, "exec redirect not found"
         assert exec_pos < clone_pos, "exec redirect must appear before git clone"
 
-    def test_claude_uses_script_for_tty(self, jinja_env):
-        """Claude runs via script to force TTY output (prevents buffering)."""
+    def test_headless_uses_stream_json(self, jinja_env):
+        """Headless mode uses --output-format stream-json to a separate log."""
         template = jinja_env.get_template("entrypoint.sh.j2")
         result = template.render(
             repos={"code": {"branch_from": "main"}},
@@ -142,8 +142,30 @@ class TestEntrypointTemplate:
             claude={"dangerously_skip_permissions": True, "additional_flags": None},
             config_name="test",
         )
-        assert "script -qfc" in result
+        assert "--output-format stream-json" in result
+        assert "STREAM_LOG" in result
+        assert ".stream.jsonl" in result
+        # Should NOT use script -qfc or pipe to tee for headless
+        assert "script -qfc" not in result
         assert '| tee "$LOG_FILE"' not in result
+
+    def test_generates_claude_config_stub(self, jinja_env):
+        """Entrypoint generates minimal .claude.json for onboarding skip."""
+        template = jinja_env.get_template("entrypoint.sh.j2")
+        result = template.render(
+            repos={"code": {"branch_from": "main"}},
+            workdir_key="code",
+            requirements_file=None,
+            claude={"dangerously_skip_permissions": True, "additional_flags": None},
+            config_name="test",
+        )
+        assert "hasCompletedOnboarding" in result
+        assert "installMethod" in result
+        assert ".claude.json" in result
+        # Stub must be generated before claude command runs
+        stub_pos = result.find("hasCompletedOnboarding")
+        claude_pos = result.find("--output-format stream-json")
+        assert stub_pos < claude_pos, "config stub must be generated before Claude runs"
 
     def test_set_e_disabled_around_claude(self, jinja_env):
         """set -e is disabled before Claude runs so non-zero exit doesn't
@@ -157,7 +179,7 @@ class TestEntrypointTemplate:
             config_name="test",
         )
         set_plus_e_pos = result.find("set +e")
-        claude_pos = result.find("script -qfc")
+        claude_pos = result.find("--output-format stream-json")
         set_minus_e_pos = result.find("set -e", claude_pos)
         bundle_pos = result.find("git bundle create")
         assert set_plus_e_pos != -1, "set +e not found"

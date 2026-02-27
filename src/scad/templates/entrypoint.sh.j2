@@ -5,6 +5,7 @@ BRANCH="${BRANCH_NAME:?BRANCH_NAME not set}"
 RUN_ID="${RUN_ID:?RUN_ID not set}"
 PROMPT="${AGENT_PROMPT:-}"
 LOG_FILE="/scad-logs/${RUN_ID}.log"
+STREAM_LOG="/scad-logs/${RUN_ID}.stream.jsonl"
 STATUS_FILE="/scad-logs/${RUN_ID}.status.json"
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
@@ -12,6 +13,13 @@ START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[scad] Starting agent on branch: $BRANCH (run: $RUN_ID)"
+
+# Generate minimal Claude config stub (skip onboarding, mark native install)
+# The credentials file is mounted separately at ~/.claude/.credentials.json
+mkdir -p "$HOME/.claude"
+cat > "$HOME/.claude.json" <<'CLAUDECFG'
+{"hasCompletedOnboarding": true, "installMethod": "native"}
+CLAUDECFG
 
 # Copy host git config if mounted, then add safe.directory for container use
 if [ -f /mnt/host-gitconfig ]; then
@@ -56,11 +64,13 @@ CLAUDE_CMD="$CLAUDE_CMD {{ claude.additional_flags }}"
 # before bundle creation and status file writing
 set +e
 
-# Run claude (output already captured by exec redirect above)
+# Run claude
 if [ -n "$PROMPT" ]; then
     echo "[scad] Running headless: $PROMPT"
-    # script -qfc forces a pseudo-TTY so Claude flushes output line-by-line
-    script -qfc "$CLAUDE_CMD -p \"$PROMPT\" 2>&1" /dev/null
+    echo "[scad] Claude stream: $STREAM_LOG"
+    # stream-json gives real-time JSON events (tool calls, edits, etc.)
+    # stdout → .stream.jsonl (separate from entrypoint .log)
+    $CLAUDE_CMD -p --output-format stream-json "$PROMPT" > "$STREAM_LOG" 2>&1
     EXIT_CODE=$?
 else
     echo "[scad] Starting interactive session"
