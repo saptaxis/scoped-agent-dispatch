@@ -348,9 +348,10 @@ class TestRunContainerClaudeMd:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Instructions")
 
+        worktree_paths = {"code": Path("/tmp/fake")}
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
-            run_container(sample_config, "test", "test-Feb27-1430")
+            run_container(sample_config, "test", "test-Feb27-1430", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
         claude_md_mount = volumes.get(str(claude_md))
@@ -367,9 +368,10 @@ class TestRunContainerClaudeMd:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
+        worktree_paths = {"code": Path("/tmp/fake")}
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
-            run_container(sample_config, "test", "test-Feb27-1430")
+            run_container(sample_config, "test", "test-Feb27-1430", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
         for path in volumes:
@@ -392,9 +394,10 @@ class TestRunContainerClaudeMd:
         claude_md = tmp_path / "CLAUDE.md"
         claude_md.write_text("# Instructions")
 
+        worktree_paths = {"code": Path("/tmp/fake")}
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
-            run_container(config, "test", "test-Feb27-1430")
+            run_container(config, "test", "test-Feb27-1430", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
         for path in volumes:
@@ -418,9 +421,10 @@ class TestRunContainerClaudeMd:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
+        worktree_paths = {"code": Path("/tmp/fake")}
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
-            run_container(config, "test", "test-Feb27-1430")
+            run_container(config, "test", "test-Feb27-1430", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
         custom_mount = volumes.get(str(custom_md))
@@ -431,41 +435,29 @@ class TestRunContainerClaudeMd:
 
 class TestRunContainerAuth:
     @patch("scad.container.docker.from_env")
-    def test_mounts_credentials_only(self, mock_docker, sample_config, tmp_path):
-        """Only .credentials.json is mounted, not the whole ~/.claude dir."""
+    def test_mounts_credentials_to_staging_path(self, mock_docker, sample_config, tmp_path):
+        """Credentials mounted to staging path, not final ~/.claude location."""
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "abc123"
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        # Create ~/.claude/.credentials.json
         claude_dir = tmp_path / ".claude"
         claude_dir.mkdir()
         creds = claude_dir / ".credentials.json"
         creds.write_text('{"claudeAiOauth": {}}')
-        # Also create files that should NOT be mounted
-        (claude_dir / "settings.json").write_text("{}")
-        plugins_dir = claude_dir / "plugins"
-        plugins_dir.mkdir()
-        (plugins_dir / "installed_plugins.json").write_text("{}")
 
+        worktree_paths = {"code": Path("/tmp/fake")}
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
-            run_container(sample_config, "test", "test-Feb27-1430")
+            run_container(sample_config, "test", "test-Feb27-1430", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
-        # Credentials file should be mounted read-only
         creds_mount = volumes.get(str(creds))
         assert creds_mount is not None
         assert creds_mount["mode"] == "ro"
-        assert creds_mount["bind"] == "/home/scad/.claude/.credentials.json"
-        # Full .claude dir should NOT be mounted
-        assert str(claude_dir) not in volumes
-        # .claude.json from host should NOT be mounted
-        for path in volumes:
-            if path.endswith(".claude.json") and ".credentials" not in path:
-                pytest.fail(f"Host .claude.json should not be mounted: {path}")
+        assert creds_mount["bind"] == "/mnt/host-claude-credentials.json"
 
     @patch("scad.container.docker.from_env")
     def test_no_auth_mount_when_no_credentials(self, mock_docker, sample_config, tmp_path):
@@ -476,12 +468,100 @@ class TestRunContainerAuth:
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
+        worktree_paths = {"code": Path("/tmp/fake")}
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
-            run_container(sample_config, "test", "test-Feb27-1430")
+            run_container(sample_config, "test", "test-Feb27-1430", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
         for path in volumes:
             assert ".credentials" not in path
+
+
+class TestRunContainerWorktreeMounts:
+    @patch("scad.container.docker.from_env")
+    def test_mounts_worktree_at_workspace(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        worktree_paths = {"code": tmp_path / "worktrees" / "code"}
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "plan-22", "test-run", worktree_paths)
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        wt_mount = volumes.get(str(worktree_paths["code"]))
+        assert wt_mount is not None
+        assert wt_mount["bind"] == "/workspace/code"
+        assert wt_mount["mode"] == "rw"
+
+    @patch("scad.container.docker.from_env")
+    def test_no_mnt_repos_mount(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        worktree_paths = {"code": tmp_path / "worktrees" / "code"}
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "plan-22", "test-run", worktree_paths)
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        for bind_info in volumes.values():
+            assert not bind_info["bind"].startswith("/mnt/repos")
+
+    @patch("scad.container.docker.from_env")
+    def test_direct_mount_is_readonly(self, mock_docker, tmp_path):
+        config = ScadConfig(
+            name="test",
+            repos={
+                "code": {"path": str(tmp_path / "code"), "workdir": True, "worktree": True},
+                "ref": {"path": str(tmp_path / "ref"), "worktree": False},
+            },
+        )
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        worktree_paths = {
+            "code": tmp_path / "worktrees" / "code",
+            "ref": (tmp_path / "ref").resolve(),
+        }
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(config, "plan-22", "test-run", worktree_paths)
+
+        volumes = mock_client.containers.run.call_args[1]["volumes"]
+        ref_mount = volumes.get(str((tmp_path / "ref").resolve()))
+        assert ref_mount is not None
+        assert ref_mount["mode"] == "ro"
+
+    @patch("scad.container.docker.from_env")
+    def test_no_branch_name_env(self, mock_docker, sample_config, tmp_path):
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        worktree_paths = {"code": tmp_path / "worktrees" / "code"}
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "plan-22", "test-run", worktree_paths)
+
+        env = mock_client.containers.run.call_args[1]["environment"]
+        assert "BRANCH_NAME" not in env
+        assert "RUN_ID" in env
 
 

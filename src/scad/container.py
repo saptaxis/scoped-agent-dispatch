@@ -287,6 +287,7 @@ def run_container(
     config: ScadConfig,
     branch: str,
     run_id: str,
+    worktree_paths: dict[str, Path],
     prompt: Optional[str] = None,
     image_tag: Optional[str] = None,
 ) -> str:
@@ -301,10 +302,11 @@ def run_container(
     # Build volume mounts
     volumes = {}
 
-    # Repos — read-only
+    # Repos — clone (rw) or direct mount (ro) at /workspace/<key>
     for key, repo in config.repos.items():
-        host_path = str(Path(repo.path).expanduser().resolve())
-        volumes[host_path] = {"bind": f"/mnt/repos/{key}", "mode": "ro"}
+        host_path = str(worktree_paths[key])
+        mode = "rw" if repo.worktree else "ro"
+        volumes[host_path] = {"bind": f"/workspace/{key}", "mode": mode}
 
     # Data mounts — read-write
     for mount in config.mounts:
@@ -319,14 +321,14 @@ def run_container(
     if gitconfig.exists():
         volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
 
-    # Claude auth — mount ONLY credentials file, not the whole ~/.claude dir.
-    # Mounting the full dir brings host plugins (with host-specific installPaths
-    # that don't resolve in the container) and risks host file deletion.
-    # The entrypoint generates a minimal ~/.claude.json stub for onboarding.
+    # Claude auth — mount to staging path (same pattern as gitconfig)
+    # Direct-mount to final path breaks on credential refresh (/login writes
+    # a new file → new inode → container still sees stale mount).
+    # Entrypoint copies from staging path on startup.
     claude_creds = Path.home() / ".claude" / ".credentials.json"
     if claude_creds.exists():
         volumes[str(claude_creds)] = {
-            "bind": "/home/scad/.claude/.credentials.json",
+            "bind": "/mnt/host-claude-credentials.json",
             "mode": "ro",
         }
 
@@ -345,10 +347,10 @@ def run_container(
             volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
 
     # Environment variables
-    environment = {
-        "BRANCH_NAME": branch,
-        "RUN_ID": run_id,
-    }
+    # Pass host timezone so git commits, logs, and branch names match host time
+    import time as _time
+    tz = _time.tzname[0] if _time.daylight == 0 else _time.tzname[_time.daylight]
+    environment = {"RUN_ID": run_id, "TZ": tz}
     if prompt:
         environment["AGENT_PROMPT"] = prompt
 
