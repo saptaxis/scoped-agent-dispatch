@@ -4,40 +4,54 @@ Config-driven CLI for launching Claude Code sessions in isolated Docker containe
 
 ## The problem
 
-When you ask Claude Code to execute an implementation plan, it runs in your current working tree — touching your files, your branch, your environment. If you want to run multiple plans in parallel, or keep your workspace clean while an agent works, you're stuck setting up Docker containers, entrypoint scripts, git branches, and volume mounts by hand.
+Running Claude Code on your working tree means it touches your files, your branch, your environment. If you want isolated agents — or parallel plans on separate branches — you're stuck setting up Docker, entrypoint scripts, git branches, and volume mounts by hand.
 
 ## What this does
 
-Define your project setup once in YAML — repos, data directories, Python deps — then dispatch agents with one command:
+Define your project once in YAML — repos, data mounts, Python deps — then launch isolated sessions:
 
 ```bash
-scad run myproject --branch plan-22 --prompt "Execute plan 22"
+# Interactive — drop into a long-lived Claude session
+scad run myproject
+scad attach myproject-Feb28-1400
+
+# Headless — fire-and-forget with streaming logs
+scad run myproject --prompt "Execute plan 22"
+scad logs myproject-Feb28-1400 -sf
 ```
 
-Each agent gets:
-- **Its own container** with a baked-in Python environment
-- **Its own git branch** cloned from your local repos (read-only mounts)
+Each session gets:
+- **Its own container** with a baked Python environment
+- **Its own git branches** cloned from your local repos
 - **Shared data mounts** for experiment I/O
 - **Full `--dangerously-skip-permissions`** since it's isolated
+- **Persistent Claude session data** across stop/restart
 
-When done, the agent's work comes back as git bundles — fetched into your host repos as branches you can review and merge. Your working tree is never touched.
+Sessions are long-lived. Work on multiple plans, detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad clean` it.
 
-## How it works
+## CLI
 
-1. **Build** — First run renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after that.
-2. **Clone** — Entrypoint clones repos from read-only mounts into `/workspace/`, creates the agent's branch.
-3. **Run** — Claude Code runs with your prompt inside the container.
-4. **Bundle** — On exit, the entrypoint creates git bundles for each repo with new commits.
-5. **Fetch** — The CLI fetches bundles into your host repos as new branches.
-
-Run IDs follow the format `<branch>-<MonDD>-<HHMM>` (e.g., `plan-22-Feb26-1430`) and are used for container names, log files, and bundle files.
+```bash
+scad run <config>              # launch session (interactive or --prompt for headless)
+scad attach <run-id>           # attach to tmux session inside container
+scad status                    # list running/stopped containers
+scad logs <run-id>             # read agent output
+scad stop <run-id>             # stop container (preserves state)
+scad clean <run-id>            # remove container + clones + session data (destructive)
+scad fetch <run-id>            # snapshot clone branches back to host repos
+scad sync <run-id>             # pull host repo updates into clones
+scad build <config>            # build/rebuild Docker image
+scad configs                   # list available configs
+scad config view <name>        # print config YAML
+scad config edit <name>        # open config in $EDITOR
+```
 
 ## Prerequisites
 
-- **Docker** — must be installed and running. scad uses the Docker SDK to build images and manage containers. Install: https://docs.docker.com/engine/install/
+- **Docker** — installed and running ([install](https://docs.docker.com/engine/install/))
 - **Python >= 3.11**
-- **Git** — for repo cloning and bundle operations
-- **Claude Code subscription or API key** — for auth inside the container
+- **Git**
+- **Claude Code subscription or API key**
 
 ## Install
 
@@ -45,27 +59,19 @@ Run IDs follow the format `<branch>-<MonDD>-<HHMM>` (e.g., `plan-22-Feb26-1430`)
 pip install git+https://github.com/saptaxis/scoped-agent-dispatch.git
 ```
 
-Or for development:
+Development:
 
 ```bash
 git clone https://github.com/saptaxis/scoped-agent-dispatch.git
 cd scoped-agent-dispatch
-pip install -e .
+pip install -e ".[dev]"
 ```
 
-## Setup
+## Quick start
 
-### 1. Create a project config
+### 1. Create a config
 
-Configs live in `~/.scad/templates/<name>.yml`. Copy an example from `examples/`:
-
-```bash
-mkdir -p ~/.scad/templates
-cp examples/minimal.yml ~/.scad/templates/myproject.yml
-# Edit paths to match your repos
-```
-
-Minimal config:
+Configs live in `~/.scad/configs/<name>.yml`:
 
 ```yaml
 name: my-project
@@ -74,65 +80,52 @@ repos:
   code:
     path: ~/code/my-project
     workdir: true
-    branch_from: main
+  docs:
+    path: ~/code/my-project-docs
+    add_dir: true
+
+mounts:
+  - host: /data/experiments
 
 python:
   version: "3.11"
+  requirements: requirements.txt
 
 claude:
   dangerously_skip_permissions: true
+  plugins:
+    - superpowers
 ```
 
-See `examples/multi-repo.yml` for a config with multiple repos, data mounts, and apt packages.
-
-### 2. Auth
-
-scad mounts your Claude auth into the container. Either:
-
-- **Subscription auth** (default): Have an active Claude subscription. `~/.claude/` and `~/.claude.json` are mounted automatically.
-- **API key**: Set `ANTHROPIC_API_KEY` in your environment — it's passed through to the container.
-
-### 3. Dispatch
+### 2. Build and run
 
 ```bash
-# Headless — dispatches and returns immediately
-scad run myproject --branch feature-x --prompt "Add user authentication"
-
-# Interactive — attaches to the container session
-scad run myproject --branch explore --prompt ""
+scad build my-project          # builds Docker image (cached after first run)
+scad run my-project            # creates clones, starts container
+scad attach my-project-Feb28   # drops into tmux with Claude running
 ```
 
-### 4. Monitor (pre-CLI — using Docker directly)
+### 3. Work
+
+Inside the container, Claude has access to all repos and mounts. Detach with `Ctrl+b d` — container keeps running.
+
+### 4. Get code back
 
 ```bash
-# List running scad containers
-docker ps --filter "label=scad.managed=true"
-
-# Tail logs from a running agent
-docker logs -f scad-<run-id>
-
-# View the last 50 lines
-docker logs --tail 50 scad-<run-id>
-
-# Stop an agent
-docker stop scad-<run-id> && docker rm scad-<run-id>
-
-# Check exit status after completion
-cat ~/.scad/logs/<run-id>.status.json | python3 -m json.tool
-
-# Fetch bundles manually (if the background watcher didn't)
-git bundle verify ~/.scad/logs/<run-id>-code.bundle
-git fetch ~/.scad/logs/<run-id>-code.bundle <branch>:<branch>
+scad fetch my-project-Feb28    # fetches clone branches into your host repos
 ```
 
-Container names follow the pattern `scad-<run-id>` where run ID is `<branch>-<MonDD>-<HHMM>`.
-
-### 5. Demo
-
-`demo.sh` walks through the full lifecycle — dispatch, watch logs, check artifacts, fetch the bundle:
+Then review and merge on the host:
 
 ```bash
-./demo.sh my-branch "Add a hello_world function and test it"
+git log main..scad-Feb28-1400 --oneline
+git merge scad-Feb28-1400
+```
+
+### 5. Clean up
+
+```bash
+scad clean my-project-Feb28    # removes container, clones, session data
 ```
 
 ## Config reference
@@ -140,33 +133,41 @@ Container names follow the pattern `scad-<run-id>` where run ID is `<branch>-<Mo
 | Field | Required | Description |
 |-------|----------|-------------|
 | `name` | yes | Project name (used for Docker image tag) |
-| `repos` | yes | Map of repo labels to config. At least one must have `workdir: true` |
-| `repos.<key>.path` | yes | Host path to the git repo (`~` expanded) |
-| `repos.<key>.workdir` | no | Set as container working directory (exactly one required) |
-| `repos.<key>.branch_from` | no | Base branch for the agent's work (default: `main`) |
+| `repos` | yes | Map of repo keys to config. Exactly one must have `workdir: true` |
+| `repos.<key>.path` | yes | Host path to git repo (`~` expanded) |
+| `repos.<key>.workdir` | no | Container working directory (exactly one required) |
 | `repos.<key>.add_dir` | no | Pass to `claude --add-dir` for multi-repo context |
+| `repos.<key>.focus` | no | Subdirectory to highlight in Claude's context prompt |
 | `mounts` | no | List of `{host, container}` read-write data mounts |
-| `python.version` | no | Python version for the container venv (default: `3.11`) |
-| `python.requirements` | no | Path to requirements.txt relative to workdir repo root |
+| `python.version` | no | Python version (default: `3.11`) |
+| `python.requirements` | no | Path to requirements.txt relative to workdir repo |
 | `apt_packages` | no | System packages to install via apt |
-| `claude.dangerously_skip_permissions` | no | Pass `--dangerously-skip-permissions` (default: `false`) |
-| `claude.additional_flags` | no | Extra CLI flags passed to claude |
+| `claude.dangerously_skip_permissions` | no | Skip permission prompts (default: `false`) |
+| `claude.plugins` | no | Claude Code plugins to bootstrap at startup |
+| `claude.claude_md` | no | Host path to CLAUDE.md to mount into container |
 
-## Artifacts
+## How it works
 
-All artifacts live in `~/.scad/logs/`:
+1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
+2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/worktrees/<run-id>/`. Mounts into container.
+3. **Branch** — Auto-generates branch name (`scad-MonDD-HHMM`) and checks it out in each clone.
+4. **Run** — Starts container detached. Entrypoint launches tmux with Claude (interactive) or streams JSON output (headless).
+5. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Survives stop/restart.
+6. **Fetch** — `scad fetch` snapshots clone branches back to host source repos.
 
-| File | Description |
-|------|-------------|
-| `<run-id>.log` | Claude's stdout/stderr |
-| `<run-id>.status.json` | Structured exit status (exit code, duration, bundle results) |
-| `<run-id>-<repo>.bundle` | Git bundle per repo with new commits |
+## Data layout
 
-## Status
-
-**Working:** `scad run` with full container lifecycle — build, dispatch, bundle fetch.
-
-**In progress:** Remaining CLI commands (`status`, `logs`, `stop`, `build`, `configs`).
+```
+~/.scad/
+  configs/                          # project YAML configs
+    my-project.yml
+  worktrees/<run-id>/               # git clones (one per repo)
+    my-project-code/
+    my-project-docs/
+  runs/<run-id>/                    # persistent session data
+    claude/                         # mounted as container ~/.claude/
+    fetches.log                     # append-only fetch history
+```
 
 ## License
 
