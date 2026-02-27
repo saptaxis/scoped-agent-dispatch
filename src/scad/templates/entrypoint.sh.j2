@@ -31,20 +31,18 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 echo "[scad] Starting session (run: $RUN_ID)"
 
 # Seed Claude config — pre-trust workdir, skip onboarding
+# Always merge required keys (Claude overwrites .claude.json on first run)
 mkdir -p "$HOME/.claude"
-if [ ! -f "$HOME/.claude.json" ]; then
-    cat > "$HOME/.claude.json" <<CLAUDECFG
-{
-  "hasCompletedOnboarding": true,
-  "installMethod": "native",
-  "projects": {
-    "/workspace/{{ workdir_key }}": {
-      "hasTrustDialogAccepted": true
-    }
-  }
-}
-CLAUDECFG
-fi
+python3 -c "
+import json, pathlib
+p = pathlib.Path('$HOME/.claude.json')
+d = json.loads(p.read_text()) if p.exists() else {}
+d['hasCompletedOnboarding'] = True
+d['effortCalloutDismissed'] = True
+d.setdefault('installMethod', 'native')
+d.setdefault('projects', {}).setdefault('/workspace/{{ workdir_key }}', {})['hasTrustDialogAccepted'] = True
+p.write_text(json.dumps(d, indent=2))
+"
 
 # Copy host git config if mounted
 if [ -f /mnt/host-gitconfig ]; then
