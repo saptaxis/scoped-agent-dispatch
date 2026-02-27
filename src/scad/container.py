@@ -495,6 +495,34 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     return results
 
 
+def sync_from_host(run_id: str, config: ScadConfig) -> list[dict]:
+    """Fetch source repo refs into clones. Makes new branches/commits available.
+
+    Does NOT checkout or merge — just makes refs available.
+    """
+    clone_base = WORKTREE_DIR / run_id
+    if not clone_base.exists():
+        raise FileNotFoundError(f"No clones found for run: {run_id}")
+
+    results = []
+    for key, repo_cfg in config.repos.items():
+        clone_path = clone_base / key
+        if not clone_path.exists():
+            continue
+
+        source_path = repo_cfg.resolved_path
+
+        subprocess.run(
+            ["git", "-C", str(clone_path), "fetch", str(source_path),
+             "+refs/heads/*:refs/remotes/origin/*"],
+            capture_output=True, text=True, check=True,
+        )
+
+        results.append({"repo": key, "source": str(source_path)})
+
+    return results
+
+
 def config_name_for_run(run_id: str) -> Optional[str]:
     """Extract config name from a run ID (format: <config>-<MonDD>-<HHMM>)."""
     parts = run_id.rsplit("-", 2)

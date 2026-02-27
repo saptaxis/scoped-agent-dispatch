@@ -26,6 +26,7 @@ from scad.container import (
     resolve_branch,
     run_container,
     stop_container,
+    sync_from_host,
 )
 
 
@@ -333,6 +334,23 @@ def fetch(run_id: str):
         else:
             for r in results:
                 click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} → {r['source']}")
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(2)
+
+
+@main.command()
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def sync(run_id: str):
+    """Sync host repo changes into clones (makes new branches available)."""
+    try:
+        config = _config_for_run(run_id)
+        results = sync_from_host(run_id, config)
+        if not results:
+            click.echo(f"[scad] Nothing to sync for {run_id}")
+        else:
+            for r in results:
+                click.echo(f"[scad] Synced {r['repo']} from {r['source']}")
     except FileNotFoundError as e:
         click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(2)

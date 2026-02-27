@@ -27,6 +27,7 @@ from scad.container import (
     list_completed_runs,
     stop_container,
     fetch_to_host,
+    sync_from_host,
 )
 
 
@@ -826,5 +827,54 @@ class TestFetchToHost:
         )
         with pytest.raises(FileNotFoundError):
             fetch_to_host("nonexistent-run", config)
+
+
+class TestSyncFromHost:
+    def test_syncs_new_branches_into_clone(self, tmp_path, monkeypatch):
+        """sync_from_host fetches source repo refs into clone."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+
+        # Create source repo with a branch
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+
+        # Clone it
+        clone = tmp_path / "worktrees" / "test-run" / "code"
+        subprocess.run(["git", "clone", "--local", str(source), str(clone)], check=True, capture_output=True)
+
+        # Add a new branch to source AFTER cloning
+        subprocess.run(["git", "-C", str(source), "checkout", "-b", "new-feature"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "new work"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "checkout", "-"], check=True, capture_output=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(source), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        results = sync_from_host("test-run", config)
+
+        # Clone should now know about new-feature
+        branches = subprocess.run(
+            ["git", "-C", str(clone), "branch", "-r"],
+            capture_output=True, text=True
+        )
+        assert "new-feature" in branches.stdout
+        assert len(results) == 1
+
+    def test_no_clones_raises(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(tmp_path), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+        with pytest.raises(FileNotFoundError):
+            sync_from_host("nonexistent", config)
 
 
