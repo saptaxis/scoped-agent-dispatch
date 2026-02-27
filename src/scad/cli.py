@@ -106,7 +106,7 @@ def run_agent(
         click.echo(f"[scad] Building image {tag}...")
         with tempfile.TemporaryDirectory() as build_dir:
             for line in build_image(config, Path(build_dir)):
-                click.echo(f"  {line}")
+                pass  # quiet build
         click.echo(f"[scad] Image built: {tag}")
     else:
         click.echo(f"[scad] Using cached image scad-{config.name}")
