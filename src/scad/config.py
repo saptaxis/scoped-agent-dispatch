@@ -10,8 +10,14 @@ from pydantic import BaseModel, model_validator
 class RepoConfig(BaseModel):
     path: str
     workdir: bool = False
-    branch_from: str = "main"
+    branch_from: str = "main"  # kept until Task 5
     add_dir: bool = False
+    worktree: bool = True
+    focus: Optional[str] = None
+
+    @property
+    def resolved_path(self) -> Path:
+        return Path(self.path).expanduser().resolve()
 
 
 class MountConfig(BaseModel):
@@ -24,10 +30,18 @@ class PythonConfig(BaseModel):
     requirements: Optional[str] = None
 
 
+SCAD_DEFAULT_PLUGINS = [
+    "superpowers@claude-plugins-official",
+    "commit-commands@claude-plugins-official",
+    "pyright-lsp@claude-plugins-official",
+]
+
+
 class ClaudeConfig(BaseModel):
     dangerously_skip_permissions: bool = False
     additional_flags: Optional[str] = None
     claude_md: str | bool | None = None  # None=auto ~/CLAUDE.md, False=disabled, str=custom path
+    plugins: list[str] = SCAD_DEFAULT_PLUGINS.copy()
 
 
 class ScadConfig(BaseModel):

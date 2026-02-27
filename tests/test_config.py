@@ -3,7 +3,7 @@
 import pytest
 import yaml
 from pathlib import Path
-from scad.config import ScadConfig, load_config, list_configs
+from scad.config import ScadConfig, load_config, list_configs, SCAD_DEFAULT_PLUGINS
 
 
 @pytest.fixture
@@ -132,6 +132,58 @@ class TestScadConfig:
             claude={"claude_md": False},
         )
         assert config.claude.claude_md is False
+
+    def test_worktree_default_true(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.repos["code"].worktree is True
+
+    def test_focus_default_none(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.repos["code"].focus is None
+
+    def test_focus_with_value(self):
+        config = ScadConfig(
+            name="test",
+            repos={
+                "docs": {
+                    "path": "/tmp/docs",
+                    "workdir": True,
+                    "focus": "docs/projects/lwg",
+                }
+            },
+        )
+        assert config.repos["docs"].focus == "docs/projects/lwg"
+
+    def test_resolved_path(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake-repo", "workdir": True}},
+        )
+        assert config.repos["code"].resolved_path == Path("/tmp/fake-repo")
+
+    def test_plugins_default(self, sample_config_dict):
+        config = ScadConfig(**sample_config_dict)
+        assert config.claude.plugins == [
+            "superpowers@claude-plugins-official",
+            "commit-commands@claude-plugins-official",
+            "pyright-lsp@claude-plugins-official",
+        ]
+
+    def test_plugins_override(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"plugins": ["superpowers@claude-plugins-official"]},
+        )
+        assert config.claude.plugins == ["superpowers@claude-plugins-official"]
+
+    def test_plugins_empty(self):
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"plugins": []},
+        )
+        assert config.claude.plugins == []
 
 
 class TestLoadConfig:
