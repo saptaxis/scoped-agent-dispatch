@@ -70,7 +70,6 @@ class TestEntrypointTemplate:
     def test_interactive_tmux_session(self, jinja_env):
         result = _render_entrypoint(jinja_env)
         assert "tmux new-session -d -s scad" in result
-        assert "tmux has-session -t scad" in result
 
     def test_interactive_context_prompt(self, jinja_env):
         result = _render_entrypoint(
@@ -82,7 +81,7 @@ class TestEntrypointTemplate:
 
     def test_interactive_no_context_prompt(self, jinja_env):
         result = _render_entrypoint(jinja_env, context_prompt=None)
-        assert 'tmux new-session -d -s scad "$CLAUDE_CMD"' in result
+        assert 'tmux new-session -d -s scad "$CLAUDE_CMD; exec bash"' in result
 
     def test_generates_claude_config_stub(self, jinja_env):
         result = _render_entrypoint(jinja_env)
@@ -104,12 +103,11 @@ class TestEntrypointTemplate:
         set_plus_e = result.find("set +e")
         # Find the actual claude execution (not the CLAUDE_CMD= assignment)
         claude_pos = result.find("$CLAUDE_CMD -p")
-        set_minus_e = result.find("set -e", claude_pos)
-        status_pos = result.find("STATUS_FILE", set_minus_e)
         assert set_plus_e != -1
         assert set_plus_e < claude_pos
-        assert set_minus_e != -1
-        assert set_minus_e < status_pos
+        # Status writing is handled by EXIT trap with set -e
+        assert "trap write_status EXIT" in result
+        assert "STATUS_FILE" in result
 
     def test_log_file_capture_early(self, jinja_env):
         result = _render_entrypoint(jinja_env)
@@ -118,26 +116,89 @@ class TestEntrypointTemplate:
         assert exec_pos != -1
         assert exec_pos < claude_pos
 
+    def test_pretrusts_workdir(self, jinja_env):
+        """Entrypoint .claude.json includes hasTrustDialogAccepted for workdir."""
+        result = _render_entrypoint(jinja_env)
+        assert "hasTrustDialogAccepted" in result
+        assert "/workspace/" in result
+
+    def test_disables_coauthored_by(self, jinja_env):
+        """Entrypoint sets coAuthoredBy to false in settings.json."""
+        result = _render_entrypoint(jinja_env)
+        assert "coAuthoredBy" in result
+
+    def test_claude_exit_drops_to_bash(self, jinja_env):
+        """Interactive mode: Claude exit drops to bash, not container exit."""
+        result = _render_entrypoint(jinja_env)
+        assert "exec bash" in result
+
+    def test_sleep_infinity(self, jinja_env):
+        """Container stays alive via sleep infinity, not tmux wait loop."""
+        result = _render_entrypoint(jinja_env)
+        assert "sleep infinity" in result
+        assert "while tmux has-session" not in result
+
+    def test_credentials_copied_if_mounted(self, jinja_env):
+        """Credentials always re-copied from staging path (handles /login refresh)."""
+        result = _render_entrypoint(jinja_env)
+        assert "/mnt/host-claude-credentials.json" in result
+        assert ".credentials.json" in result
+
+    def test_seeds_settings_json(self, jinja_env):
+        """Entrypoint creates settings.json if not present."""
+        result = _render_entrypoint(jinja_env)
+        assert "settings.json" in result
+
 
 class TestDockerfileTemplate:
+    def _make_config(self):
+        return {
+            "base_image": "python:3.11-slim",
+            "apt_packages": ["build-essential"],
+            "requirements_content": False,
+        }
+
+    def _render_dockerfile(self, config):
+        env = Environment(loader=PackageLoader("scad", "templates"))
+        template = env.get_template("Dockerfile.j2")
+        return template.render(**config)
+
     def test_includes_tmux(self, jinja_env):
-        template = jinja_env.get_template("Dockerfile.j2")
-        result = template.render(
-            base_image="python:3.11-slim",
-            apt_packages=["build-essential"],
-            requirements_content=False,
-        )
-        assert "tmux" in result
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert "tmux" in rendered
 
     def test_copies_bootstrap_scripts(self, jinja_env):
-        template = jinja_env.get_template("Dockerfile.j2")
-        result = template.render(
-            base_image="python:3.11-slim",
-            apt_packages=[],
-            requirements_content=False,
-        )
-        assert "bootstrap-claude.sh" in result
-        assert "bootstrap-claude.conf" in result
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert "bootstrap-claude.sh" in rendered
+        assert "bootstrap-claude.conf" in rendered
+
+    def test_path_before_claude_install(self):
+        """PATH is set before Claude install to suppress warning."""
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        path_pos = rendered.index('PATH="/home/scad/.local/bin')
+        install_pos = rendered.index("claude.ai/install.sh")
+        assert path_pos < install_pos
+
+    def test_includes_ohmyzsh(self):
+        """Dockerfile installs oh-my-zsh."""
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert "ohmyzsh" in rendered
+
+    def test_sets_term(self):
+        """Dockerfile sets TERM=xterm-256color."""
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert "xterm-256color" in rendered
+
+    def test_copies_tmux_conf(self):
+        """Dockerfile copies .tmux.conf."""
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert ".tmux.conf" in rendered
 
 
 class TestBootstrapConfTemplate:

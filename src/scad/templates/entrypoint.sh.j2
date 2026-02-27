@@ -8,16 +8,43 @@ STREAM_LOG="/scad-logs/${RUN_ID}.stream.jsonl"
 STATUS_FILE="/scad-logs/${RUN_ID}.status.json"
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# Write status on exit (SIGTERM from scad stop)
+write_status() {
+    set -e
+    END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    cat > "$STATUS_FILE" <<STATUSEOF
+{
+  "run_id": "$RUN_ID",
+  "config": "{{ config_name }}",
+  "exit_code": ${EXIT_CODE:-0},
+  "started": "$START_TIME",
+  "finished": "$END_TIME"
+}
+STATUSEOF
+    echo "[scad] Session finished"
+}
+trap write_status EXIT
+
 # Capture all output to log file AND stdout
 exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[scad] Starting session (run: $RUN_ID)"
 
-# Claude config stub (skip onboarding, native install)
+# Seed Claude config — pre-trust workdir, skip onboarding
 mkdir -p "$HOME/.claude"
-cat > "$HOME/.claude.json" <<'CLAUDECFG'
-{"hasCompletedOnboarding": true, "installMethod": "native"}
+if [ ! -f "$HOME/.claude.json" ]; then
+    cat > "$HOME/.claude.json" <<CLAUDECFG
+{
+  "hasCompletedOnboarding": true,
+  "installMethod": "native",
+  "projects": {
+    "/workspace/{{ workdir_key }}": {
+      "hasTrustDialogAccepted": true
+    }
+  }
+}
 CLAUDECFG
+fi
 
 # Copy host git config if mounted
 if [ -f /mnt/host-gitconfig ]; then
@@ -32,6 +59,19 @@ if [ -f /mnt/host-claude-credentials.json ]; then
     mkdir -p "$HOME/.claude"
     cp /mnt/host-claude-credentials.json "$HOME/.claude/.credentials.json"
 fi
+
+# Disable co-authored-by in Claude settings
+CLAUDE_DIR="$HOME/.claude"
+if [ ! -f "$CLAUDE_DIR/settings.json" ]; then
+    echo '{}' > "$CLAUDE_DIR/settings.json"
+fi
+python3 -c "
+import json, pathlib
+p = pathlib.Path('$CLAUDE_DIR/settings.json')
+d = json.loads(p.read_text())
+d.setdefault('cliSettings', {})['coAuthoredBy'] = False
+p.write_text(json.dumps(d, indent=2))
+"
 
 # Install Claude plugins (idempotent — skips already-installed)
 if [ -f "$HOME/bootstrap-claude.sh" ]; then
@@ -70,33 +110,13 @@ if [ -n "$PROMPT" ]; then
     $CLAUDE_CMD -p --output-format stream-json "$PROMPT" > "$STREAM_LOG" 2>&1
     EXIT_CODE=$?
 else
-    # Interactive: tmux + Claude with context prompt
+    # Interactive: tmux + Claude, drops to bash on exit
     echo "[scad] Starting interactive session"
     {% if context_prompt %}
-    tmux new-session -d -s scad "$CLAUDE_CMD '{{ context_prompt }}'"
+    tmux new-session -d -s scad "$CLAUDE_CMD '{{ context_prompt }}'; exec bash"
     {% else %}
-    tmux new-session -d -s scad "$CLAUDE_CMD"
+    tmux new-session -d -s scad "$CLAUDE_CMD; exec bash"
     {% endif %}
-    # Keep container alive while tmux session exists
-    while tmux has-session -t scad 2>/dev/null; do
-        sleep 2
-    done
-    EXIT_CODE=0
+    # Keep container alive until scad stop
+    sleep infinity
 fi
-
-set -e
-
-# Write structured exit status
-END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-cat > "$STATUS_FILE" <<STATUSEOF
-{
-  "run_id": "$RUN_ID",
-  "config": "{{ config_name }}",
-  "exit_code": $EXIT_CODE,
-  "started": "$START_TIME",
-  "finished": "$END_TIME"
-}
-STATUSEOF
-
-echo "[scad] Session finished with exit code $EXIT_CODE"
-exit $EXIT_CODE
