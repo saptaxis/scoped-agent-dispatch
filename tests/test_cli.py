@@ -176,24 +176,33 @@ class TestScadBuild:
 
         result = runner.invoke(main, ["build", "test"])
         assert result.exit_code == 0
-        assert "Image built" in result.output
+        assert "Built" in result.output
         mock_build.assert_called_once()
 
     @patch("scad.cli.build_image")
     @patch("scad.cli.load_config")
-    def test_build_streams_output(self, mock_load, mock_build, runner):
+    def test_build_quiet_by_default(self, mock_load, mock_build, runner):
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
-        mock_build.return_value = iter([
-            "Step 1/5 : FROM python:3.11-slim",
-            "Step 2/5 : RUN apt-get update",
-        ])
+        mock_build.return_value = iter(["Step 1/10: FROM python", "Step 2/10: RUN apt"])
 
         result = runner.invoke(main, ["build", "test"])
         assert result.exit_code == 0
-        assert "Step 1/5" in result.output
-        assert "Step 2/5" in result.output
+        assert "Step 1/10" not in result.output
+        assert "Built" in result.output or "built" in result.output
+
+    @patch("scad.cli.build_image")
+    @patch("scad.cli.load_config")
+    def test_build_verbose_shows_output(self, mock_load, mock_build, runner):
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_build.return_value = iter(["Step 1/10: FROM python", "Step 2/10: RUN apt"])
+
+        result = runner.invoke(main, ["build", "test", "-v"])
+        assert result.exit_code == 0
+        assert "Step 1/10" in result.output
 
     @patch("scad.cli.load_config")
     def test_build_config_not_found(self, mock_load, runner):

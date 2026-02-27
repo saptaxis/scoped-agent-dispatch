@@ -182,7 +182,8 @@ def configs():
 
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
-def build(config_name: str):
+@click.option("-v", "--verbose", is_flag=True, help="Show full Docker build output.")
+def build(config_name: str, verbose: bool):
     """Build or rebuild the Docker image for a config."""
     try:
         config = load_config(config_name)
@@ -198,8 +199,9 @@ def build(config_name: str):
     try:
         with tempfile.TemporaryDirectory() as build_dir:
             for line in build_image(config, Path(build_dir)):
-                click.echo(f"  {line}")
-        click.echo(f"[scad] Image built: {tag}")
+                if verbose:
+                    click.echo(f"  {line}")
+        click.echo(f"[scad] Built: {tag}")
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)
