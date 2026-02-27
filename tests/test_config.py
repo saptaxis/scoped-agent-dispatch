@@ -3,7 +3,7 @@
 import pytest
 import yaml
 from pathlib import Path
-from scad.config import ScadConfig, load_config, list_configs, SCAD_DEFAULT_PLUGINS
+from scad.config import ScadConfig, load_config, list_configs, SCAD_DEFAULT_PLUGINS, CONFIG_DIR, SCAD_DIR
 
 
 @pytest.fixture
@@ -221,3 +221,46 @@ class TestListConfigs:
     def test_missing_dir(self, tmp_path):
         result = list_configs(config_dir=tmp_path / "nonexistent")
         assert result == []
+
+
+class TestConfigDirMigration:
+    def test_configs_dir_used_by_default(self, tmp_path, monkeypatch):
+        """list_configs reads from ~/.scad/configs/ by default."""
+        configs_dir = tmp_path / ".scad" / "configs"
+        configs_dir.mkdir(parents=True)
+        (configs_dir / "demo.yml").write_text("name: demo\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\npython:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n")
+        monkeypatch.setattr("scad.config.SCAD_DIR", tmp_path / ".scad")
+        monkeypatch.setattr("scad.config.CONFIG_DIR", configs_dir)
+        result = list_configs()
+        assert "demo" in result
+
+    def test_auto_migrates_templates_to_configs(self, tmp_path, monkeypatch):
+        """If templates/ exists but configs/ doesn't, rename it."""
+        templates_dir = tmp_path / ".scad" / "templates"
+        templates_dir.mkdir(parents=True)
+        (templates_dir / "lwg.yml").write_text("name: lwg\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\npython:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n")
+        scad_dir = tmp_path / ".scad"
+        configs_dir = scad_dir / "configs"
+        monkeypatch.setattr("scad.config.SCAD_DIR", scad_dir)
+        monkeypatch.setattr("scad.config.CONFIG_DIR", configs_dir)
+        from scad.config import _ensure_config_dir
+        _ensure_config_dir()
+        assert configs_dir.exists()
+        assert not templates_dir.exists()
+        assert (configs_dir / "lwg.yml").exists()
+
+    def test_no_migration_if_configs_exists(self, tmp_path, monkeypatch):
+        """If configs/ already exists, don't touch templates/."""
+        scad_dir = tmp_path / ".scad"
+        configs_dir = scad_dir / "configs"
+        templates_dir = scad_dir / "templates"
+        configs_dir.mkdir(parents=True)
+        templates_dir.mkdir(parents=True)
+        (configs_dir / "a.yml").write_text("name: a\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\npython:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n")
+        (templates_dir / "b.yml").write_text("name: b\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\npython:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n")
+        monkeypatch.setattr("scad.config.SCAD_DIR", scad_dir)
+        monkeypatch.setattr("scad.config.CONFIG_DIR", configs_dir)
+        from scad.config import _ensure_config_dir
+        _ensure_config_dir()
+        assert configs_dir.exists()
+        assert templates_dir.exists()  # NOT deleted

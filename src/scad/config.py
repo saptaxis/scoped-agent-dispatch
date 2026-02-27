@@ -6,6 +6,9 @@ from typing import Optional
 import yaml
 from pydantic import BaseModel, model_validator
 
+SCAD_DIR = Path.home() / ".scad"
+CONFIG_DIR = SCAD_DIR / "configs"
+
 
 class RepoConfig(BaseModel):
     path: str
@@ -74,21 +77,35 @@ class ScadConfig(BaseModel):
         return self
 
 
+def _ensure_config_dir() -> None:
+    """Migrate ~/.scad/templates/ to ~/.scad/configs/ if needed."""
+    templates_dir = SCAD_DIR / "templates"
+    if not CONFIG_DIR.exists() and templates_dir.exists():
+        templates_dir.rename(CONFIG_DIR)
+
+
 def list_configs(config_dir: Optional[Path] = None) -> list[str]:
-    """List available config names from ~/.scad/templates/."""
-    if config_dir is None:
-        config_dir = Path.home() / ".scad"
-    templates_dir = config_dir / "templates"
-    if not templates_dir.exists():
+    """List available config names from ~/.scad/configs/."""
+    if config_dir is not None:
+        # Legacy: caller passes parent dir, configs live in templates/ subdir
+        templates_dir = config_dir / "templates"
+        if not templates_dir.exists():
+            return []
+        return sorted(p.stem for p in templates_dir.glob("*.yml"))
+    _ensure_config_dir()
+    if not CONFIG_DIR.exists():
         return []
-    return sorted(p.stem for p in templates_dir.glob("*.yml"))
+    return sorted(p.stem for p in CONFIG_DIR.glob("*.yml"))
 
 
 def load_config(name: str, config_dir: Optional[Path] = None) -> ScadConfig:
-    """Load a config from ~/.scad/templates/<name>.yml."""
-    if config_dir is None:
-        config_dir = Path.home() / ".scad"
-    config_path = config_dir / "templates" / f"{name}.yml"
+    """Load a config from ~/.scad/configs/<name>.yml."""
+    if config_dir is not None:
+        # Legacy: caller passes parent dir, configs live in templates/ subdir
+        config_path = config_dir / "templates" / f"{name}.yml"
+    else:
+        _ensure_config_dir()
+        config_path = CONFIG_DIR / f"{name}.yml"
     if not config_path.exists():
         raise FileNotFoundError(f"Config '{name}' not found at {config_path}")
     raw = yaml.safe_load(config_path.read_text())
