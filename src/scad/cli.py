@@ -1,5 +1,7 @@
 """CLI entry point."""
 
+import os
+import subprocess
 import subprocess as _subprocess
 import sys
 import tempfile
@@ -9,7 +11,7 @@ from pathlib import Path
 import click
 import docker
 
-from scad.config import load_config, list_configs
+from scad.config import load_config, list_configs, CONFIG_DIR
 from scad.container import (
     build_image,
     check_claude_auth,
@@ -178,6 +180,35 @@ def configs():
             built = "never (not built)"
             image = f"scad-{name}"
         click.echo(f"{name:<20} {image:<25} {built}")
+
+
+@main.group()
+def config():
+    """Manage project configs."""
+    pass
+
+
+@config.command()
+@click.argument("config_name", shell_complete=_complete_config_names)
+def view(config_name: str):
+    """Display a project config."""
+    path = CONFIG_DIR / f"{config_name}.yml"
+    if not path.exists():
+        click.echo(f"[scad] Config not found: {config_name}", err=True)
+        sys.exit(2)
+    click.echo(path.read_text())
+
+
+@config.command()
+@click.argument("config_name", shell_complete=_complete_config_names)
+def edit(config_name: str):
+    """Open a project config in $EDITOR."""
+    path = CONFIG_DIR / f"{config_name}.yml"
+    if not path.exists():
+        click.echo(f"[scad] Config not found: {config_name}", err=True)
+        sys.exit(2)
+    editor = os.environ.get("EDITOR", "vim")
+    subprocess.run([editor, str(path)])
 
 
 @main.command()

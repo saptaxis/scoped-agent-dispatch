@@ -333,6 +333,40 @@ class TestScadClean:
         mock_clean.assert_called_once_with("nonexistent")
 
 
+class TestScadConfig:
+    def test_config_view(self, runner, tmp_path, monkeypatch):
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "demo.yml").write_text("name: demo\nrepos:\n  code:\n    path: /tmp\n    workdir: true\n")
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+        result = runner.invoke(main, ["config", "view", "demo"])
+        assert result.exit_code == 0
+        assert "name: demo" in result.output
+
+    def test_config_view_not_found(self, runner, tmp_path, monkeypatch):
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+        result = runner.invoke(main, ["config", "view", "nope"])
+        assert result.exit_code != 0
+
+    @patch("scad.cli.subprocess.run")
+    def test_config_edit_calls_editor(self, mock_run, runner, tmp_path, monkeypatch):
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "demo.yml").write_text("name: demo\n")
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+        monkeypatch.setenv("EDITOR", "nano")
+        result = runner.invoke(main, ["config", "edit", "demo"])
+        assert result.exit_code == 0
+        mock_run.assert_called_once()
+        call_args = mock_run.call_args[0][0]
+        assert "nano" in call_args
+
+
 class TestShellCompletion:
     @patch("scad.cli.docker.from_env")
     def test_run_id_completion_from_status_files(self, mock_docker, tmp_path):
