@@ -1,5 +1,6 @@
 """CLI entry point."""
 
+import subprocess as _subprocess
 import sys
 import tempfile
 from datetime import datetime, timezone
@@ -264,3 +265,37 @@ def stop(run_id: str):
     else:
         click.echo(f"[scad] No running container found for {run_id}", err=True)
         sys.exit(1)
+
+
+@main.command()
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def attach(run_id: str):
+    """Attach to an interactive tmux session."""
+    container_name = f"scad-{run_id}"
+    try:
+        client = docker.from_env()
+        container = client.containers.get(container_name)
+    except docker.errors.NotFound:
+        click.echo(f"[scad] No container found for {run_id}", err=True)
+        sys.exit(1)
+    except docker.errors.DockerException as e:
+        click.echo(f"[scad] Docker error: {e}", err=True)
+        sys.exit(1)
+
+    if container.status != "running":
+        click.echo(f"[scad] Container not running: {run_id}", err=True)
+        sys.exit(1)
+
+    check = container.exec_run("tmux has-session -t scad")
+    if check.exit_code != 0:
+        click.echo(
+            f"[scad] Container '{run_id}' is running headless. "
+            f"Use 'scad logs {run_id}' to view output.",
+            err=True,
+        )
+        sys.exit(1)
+
+    result = _subprocess.run(
+        ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
+    )
+    sys.exit(result.returncode)

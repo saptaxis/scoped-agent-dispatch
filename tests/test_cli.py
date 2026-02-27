@@ -4,6 +4,7 @@ import pytest
 from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
+import docker
 from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time
 
 
@@ -246,6 +247,61 @@ class TestScadRun:
         result = runner.invoke(main, ["run", "test"])
         assert result.exit_code == 0
         mock_resolve.assert_called_once_with(mock_config, None)
+
+
+class TestScadAttach:
+    @patch("scad.cli._subprocess.run")
+    @patch("scad.cli.docker.from_env")
+    def test_attach_runs_docker_exec(self, mock_docker, mock_subprocess, runner):
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = MagicMock(exit_code=0)
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_subprocess.return_value = MagicMock(returncode=0)
+
+        result = runner.invoke(main, ["attach", "test-Feb27-1430"])
+        mock_subprocess.assert_called_once()
+        call_args = mock_subprocess.call_args[0][0]
+        assert "docker" in call_args
+        assert "exec" in call_args
+        assert "tmux" in call_args
+
+    @patch("scad.cli.docker.from_env")
+    def test_attach_not_found(self, mock_docker, runner):
+        mock_client = MagicMock()
+        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
+        mock_docker.return_value = mock_client
+
+        result = runner.invoke(main, ["attach", "nonexistent"])
+        assert result.exit_code != 0
+        assert "No container" in result.output
+
+    @patch("scad.cli.docker.from_env")
+    def test_attach_not_running(self, mock_docker, runner):
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = runner.invoke(main, ["attach", "stopped-run"])
+        assert result.exit_code != 0
+        assert "not running" in result.output.lower()
+
+    @patch("scad.cli.docker.from_env")
+    def test_attach_headless_no_tmux(self, mock_docker, runner):
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = MagicMock(exit_code=1)  # no tmux session
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        result = runner.invoke(main, ["attach", "headless-run"])
+        assert result.exit_code != 0
+        assert "headless" in result.output.lower()
 
 
 class TestShellCompletion:
