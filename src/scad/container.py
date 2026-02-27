@@ -246,7 +246,7 @@ def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
 
 
 def stop_container(run_id: str) -> bool:
-    """Stop and remove a scad container by run ID."""
+    """Stop a scad container by run ID. Does NOT remove — use clean for that."""
     try:
         client = docker.from_env()
     except docker.errors.DockerException:
@@ -255,7 +255,6 @@ def stop_container(run_id: str) -> bool:
     try:
         container = client.containers.get(container_name)
         container.stop(timeout=10)
-        container.remove()
         return True
     except docker.errors.NotFound:
         return False

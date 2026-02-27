@@ -313,24 +313,19 @@ class TestListCompletedRuns:
 
 class TestStopContainer:
     @patch("scad.container.docker.from_env")
-    def test_stops_existing_container(self, mock_docker):
+    def test_stops_running_container(self, mock_from_env):
         mock_container = MagicMock()
-        mock_client = MagicMock()
-        mock_client.containers.get.return_value = mock_container
-        mock_docker.return_value = mock_client
-
-        result = stop_container("test-Feb26-1430")
+        mock_from_env.return_value.containers.get.return_value = mock_container
+        result = stop_container("test-run")
         assert result is True
-        mock_client.containers.get.assert_called_with("scad-test-Feb26-1430")
         mock_container.stop.assert_called_once_with(timeout=10)
-        mock_container.remove.assert_called_once()
+        mock_container.remove.assert_not_called()  # Changed: no remove on stop
 
     @patch("scad.container.docker.from_env")
-    def test_returns_false_for_missing(self, mock_docker):
-        mock_client = MagicMock()
-        mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
-        mock_docker.return_value = mock_client
-
+    def test_returns_false_for_missing_container(self, mock_from_env):
+        mock_from_env.return_value.containers.get.side_effect = (
+            docker.errors.NotFound("not found")
+        )
         result = stop_container("nonexistent")
         assert result is False
 
