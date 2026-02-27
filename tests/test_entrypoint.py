@@ -186,3 +186,48 @@ class TestEntrypointTemplate:
         assert set_plus_e_pos < claude_pos, "set +e must come before claude command"
         assert set_minus_e_pos != -1, "set -e not restored after claude"
         assert set_minus_e_pos < bundle_pos, "set -e must be restored before bundling"
+
+
+class TestDockerfileTemplate:
+    def test_includes_tmux(self, jinja_env):
+        template = jinja_env.get_template("Dockerfile.j2")
+        result = template.render(
+            base_image="python:3.11-slim",
+            apt_packages=["build-essential"],
+            requirements_content=False,
+        )
+        assert "tmux" in result
+
+    def test_copies_bootstrap_scripts(self, jinja_env):
+        template = jinja_env.get_template("Dockerfile.j2")
+        result = template.render(
+            base_image="python:3.11-slim",
+            apt_packages=[],
+            requirements_content=False,
+        )
+        assert "bootstrap-claude.sh" in result
+        assert "bootstrap-claude.conf" in result
+
+
+class TestBootstrapConfTemplate:
+    def test_renders_default_plugins(self, jinja_env):
+        template = jinja_env.get_template("bootstrap-claude.conf.j2")
+        result = template.render(plugins=[
+            "superpowers@claude-plugins-official",
+            "commit-commands@claude-plugins-official",
+            "pyright-lsp@claude-plugins-official",
+        ])
+        assert "superpowers@claude-plugins-official" in result
+        assert "commit-commands@claude-plugins-official" in result
+        assert "pyright-lsp@claude-plugins-official" in result
+
+    def test_renders_custom_plugins(self, jinja_env):
+        template = jinja_env.get_template("bootstrap-claude.conf.j2")
+        result = template.render(plugins=["superpowers@claude-plugins-official"])
+        assert "superpowers@claude-plugins-official" in result
+        assert "commit-commands" not in result
+
+    def test_renders_empty_plugins(self, jinja_env):
+        template = jinja_env.get_template("bootstrap-claude.conf.j2")
+        result = template.render(plugins=[])
+        assert "PLUGINS=(" in result

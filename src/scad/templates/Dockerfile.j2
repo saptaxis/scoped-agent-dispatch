@@ -2,7 +2,7 @@ FROM {{ base_image | default('python:3.11-slim') }}
 
 # System packages
 RUN apt-get update && apt-get install -y \
-    curl git bash \
+    curl git bash tmux \
     {% for pkg in apt_packages %}{{ pkg }} {% endfor %}\
     && rm -rf /var/lib/apt/lists/*
 
@@ -29,8 +29,12 @@ RUN curl -fsSL https://claude.ai/install.sh | bash
 ENV PATH="/home/scad/.local/bin:$PATH"
 ENV DISABLE_AUTOUPDATER=1
 
-# Entrypoint (must be readable by scad user)
+# Bootstrap scripts for Claude plugin installation
 USER root
+COPY bootstrap-claude.sh bootstrap-claude.conf /home/scad/
+RUN chmod +x /home/scad/bootstrap-claude.sh
+
+# Entrypoint (must be readable by scad user)
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 
