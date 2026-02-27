@@ -11,6 +11,7 @@ from typing import Optional
 
 import click
 import docker
+from docker.errors import DockerException, NotFound as DockerNotFound
 from jinja2 import Environment, PackageLoader
 
 from scad.config import ScadConfig
@@ -141,6 +142,27 @@ def cleanup_clones(run_id: str) -> None:
     clone_base = WORKTREE_DIR / run_id
     if clone_base.exists():
         shutil.rmtree(clone_base)
+
+
+def clean_run(run_id: str) -> None:
+    """Remove container, clones, and run directory for a run. Point of no return."""
+    # Stop + remove container if it exists
+    try:
+        client = docker.from_env()
+        container_name = f"scad-{run_id}"
+        container = client.containers.get(container_name)
+        container.stop(timeout=10)
+        container.remove()
+    except (DockerNotFound, DockerException):
+        pass
+
+    # Remove clones
+    cleanup_clones(run_id)
+
+    # Remove run directory
+    run_dir = RUNS_DIR / run_id
+    if run_dir.exists():
+        shutil.rmtree(run_dir)
 
 
 def render_build_context(config: ScadConfig, build_dir: Path) -> None:

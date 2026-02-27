@@ -20,6 +20,7 @@ from scad.container import (
     resolve_branch,
     create_clones,
     cleanup_clones,
+    clean_run,
     build_image,
     run_container,
     list_scad_containers,
@@ -666,5 +667,47 @@ class TestRunDirectory:
         claude_mount = volumes[str(runs_dir)]
         assert claude_mount["bind"] == "/home/scad/.claude"
         assert claude_mount["mode"] == "rw"
+
+
+class TestCleanRun:
+    @patch("scad.container.docker")
+    def test_removes_container(self, mock_docker, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_container = MagicMock()
+        mock_docker.from_env.return_value.containers.get.return_value = mock_container
+        clean_run("test-run")
+        mock_container.stop.assert_called_once()
+        mock_container.remove.assert_called_once()
+
+    @patch("scad.container.docker")
+    def test_removes_clones(self, mock_docker, tmp_path, monkeypatch):
+        clone_dir = tmp_path / "worktrees" / "test-run"
+        clone_dir.mkdir(parents=True)
+        (clone_dir / "somefile").touch()
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+        clean_run("test-run")
+        assert not clone_dir.exists()
+
+    @patch("scad.container.docker")
+    def test_removes_run_dir(self, mock_docker, tmp_path, monkeypatch):
+        run_dir = tmp_path / "runs" / "test-run"
+        run_dir.mkdir(parents=True)
+        (run_dir / "claude").mkdir()
+        (run_dir / "fetches.log").touch()
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+        clean_run("test-run")
+        assert not run_dir.exists()
+
+    @patch("scad.container.docker")
+    def test_succeeds_even_if_nothing_exists(self, mock_docker, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+        clean_run("nonexistent")  # Should not raise
 
 

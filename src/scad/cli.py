@@ -13,6 +13,7 @@ from scad.config import load_config, list_configs
 from scad.container import (
     build_image,
     check_claude_auth,
+    clean_run,
     cleanup_clones,
     create_clones,
     generate_run_id,
@@ -305,6 +306,6 @@ def attach(run_id: str):
 @main.command()
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def clean(run_id: str):
-    """Remove clones for a completed run."""
-    cleanup_clones(run_id)
-    click.echo(f"[scad] Cleaned up clones for {run_id}")
+    """Remove container, clones, and run data for a completed run."""
+    clean_run(run_id)
+    click.echo(f"[scad] Cleaned: {run_id}")
