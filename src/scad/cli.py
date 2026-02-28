@@ -27,6 +27,7 @@ from scad.container import (
     get_session_info,
     image_exists,
     list_scad_containers,
+    refresh_credentials,
     resolve_branch,
     run_container,
     stop_container,
@@ -490,3 +491,17 @@ def code_sync(run_id: str):
     except FileNotFoundError as e:
         click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(2)
+
+
+@code.command("refresh")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def code_refresh(run_id: str):
+    """Push fresh credentials into a running container."""
+    try:
+        hours = refresh_credentials(run_id)
+        h = int(hours)
+        m = int((hours - h) * 60)
+        click.echo(f"[scad] Credentials refreshed. Time remaining: {h}h {m:02d}m")
+    except click.ClickException as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(1)

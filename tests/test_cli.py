@@ -598,3 +598,19 @@ class TestSessionInfo:
         result = runner.invoke(main, ["session", "info", "bad-id"])
         assert result.exit_code != 0
         assert "No session found" in result.output
+
+
+class TestCodeRefresh:
+    @patch("scad.cli.refresh_credentials")
+    def test_refresh_shows_time_remaining(self, mock_refresh, runner):
+        mock_refresh.return_value = 4.5
+        result = runner.invoke(main, ["code", "refresh", "test-run"])
+        assert result.exit_code == 0
+        assert "4h 30m" in result.output or "refreshed" in result.output.lower()
+
+    @patch("scad.cli.refresh_credentials")
+    def test_refresh_expired(self, mock_refresh, runner):
+        mock_refresh.side_effect = click.ClickException("Credentials expired")
+        result = runner.invoke(main, ["code", "refresh", "test-run"])
+        assert result.exit_code != 0
+        assert "expired" in result.output.lower()

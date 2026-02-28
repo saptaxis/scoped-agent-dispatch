@@ -661,3 +661,31 @@ def get_session_info(run_id: str) -> dict:
     return info
 
 
+def refresh_credentials(run_id: str) -> float:
+    """Push fresh credentials into a running container.
+
+    Returns hours remaining on the credentials.
+    Raises ClickException if credentials expired or container not running.
+    """
+    valid, hours = check_claude_auth()
+    if not valid:
+        raise click.ClickException("Credentials expired. Run: claude /login")
+
+    container_name = f"scad-{run_id}"
+    try:
+        client = docker.from_env()
+        container = client.containers.get(container_name)
+    except DockerNotFound:
+        raise click.ClickException(f"Container scad-{run_id} not found")
+
+    if container.status != "running":
+        raise click.ClickException(f"Container scad-{run_id} is not running")
+
+    container.exec_run(
+        "cp /mnt/host-claude-credentials.json /home/scad/.claude/.credentials.json"
+    )
+
+    log_event(run_id, "refresh", "credentials")
+    return hours
+
+

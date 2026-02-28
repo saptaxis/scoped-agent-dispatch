@@ -31,6 +31,7 @@ from scad.container import (
     log_event,
     get_all_sessions,
     get_session_info,
+    refresh_credentials,
 )
 
 
@@ -1099,3 +1100,98 @@ class TestGetSessionInfo:
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         with pytest.raises(FileNotFoundError, match="No session found"):
             get_session_info("nonexistent")
+
+
+class TestRefreshCredentials:
+    @patch("scad.container.docker.from_env")
+    def test_copies_credentials_to_container(self, mock_docker, tmp_path, monkeypatch):
+        """refresh_credentials copies host creds into container."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": future_ms}})
+        )
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = MagicMock(exit_code=0)
+
+        hours = refresh_credentials("test-run")
+
+        mock_container.exec_run.assert_called_once_with(
+            "cp /mnt/host-claude-credentials.json /home/scad/.claude/.credentials.json"
+        )
+        assert hours > 3.0
+
+    @patch("scad.container.docker.from_env")
+    def test_logs_refresh_event(self, mock_docker, tmp_path, monkeypatch):
+        """refresh_credentials logs to events.log."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": future_ms}})
+        )
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        refresh_credentials("test-run")
+
+        events_log = tmp_path / "runs" / "test-run" / "events.log"
+        assert events_log.exists()
+        assert "refresh" in events_log.read_text()
+        assert "credentials" in events_log.read_text()
+
+    @patch("scad.container.docker.from_env")
+    def test_raises_if_credentials_expired(self, mock_docker, tmp_path, monkeypatch):
+        """refresh_credentials raises if host credentials expired."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        expired_ms = (_time.time() - 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": expired_ms}})
+        )
+        with pytest.raises(click.ClickException, match="expired"):
+            refresh_credentials("test-run")
+
+    @patch("scad.container.docker.from_env")
+    def test_raises_if_container_not_running(self, mock_docker, tmp_path, monkeypatch):
+        """refresh_credentials raises if container is not running."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": future_ms}})
+        )
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        with pytest.raises(click.ClickException, match="not running"):
+            refresh_credentials("test-run")
+
+    @patch("scad.container.docker.from_env")
+    def test_raises_if_container_not_found(self, mock_docker, tmp_path, monkeypatch):
+        """refresh_credentials raises if container doesn't exist."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr(Path, "home", lambda: tmp_path)
+        creds_dir = tmp_path / ".claude"
+        creds_dir.mkdir()
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        (creds_dir / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"expiresAt": future_ms}})
+        )
+        mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("gone")
+
+        with pytest.raises(click.ClickException, match="not found"):
+            refresh_credentials("test-run")
