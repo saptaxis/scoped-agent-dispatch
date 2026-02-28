@@ -29,6 +29,7 @@ from scad.container import (
     fetch_to_host,
     sync_from_host,
     log_event,
+    get_all_sessions,
 )
 
 
@@ -918,5 +919,104 @@ class TestLogEvent:
         content = (tmp_path / "runs" / "test-run" / "events.log").read_text()
         import re
         assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", content)
+
+
+class TestGetAllSessions:
+    @patch("scad.container.docker.from_env")
+    def test_returns_running_containers(self, mock_docker, tmp_path, monkeypatch):
+        """get_all_sessions includes running containers."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        mock_container = MagicMock()
+        mock_container.labels = {
+            "scad.managed": "true",
+            "scad.run_id": "demo-Feb28-1400",
+            "scad.config": "demo",
+            "scad.branch": "scad-Feb28-1400",
+            "scad.started": "2026-02-28T14:00:00Z",
+        }
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = [mock_container]
+        mock_client.containers.get.return_value = mock_container
+        mock_container.status = "running"
+        mock_docker.return_value = mock_client
+
+        results = get_all_sessions()
+        assert len(results) >= 1
+        running = [r for r in results if r["run_id"] == "demo-Feb28-1400"]
+        assert running[0]["container"] == "running"
+
+    @patch("scad.container.docker.from_env")
+    def test_includes_stopped_sessions(self, mock_docker, tmp_path, monkeypatch):
+        """get_all_sessions includes sessions with stopped containers."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+
+        stopped_container = MagicMock()
+        stopped_container.status = "exited"
+        stopped_container.labels = {
+            "scad.config": "demo",
+            "scad.branch": "scad-Feb28-1400",
+            "scad.started": "2026-02-28T14:00:00Z",
+        }
+        mock_client.containers.get.return_value = stopped_container
+        mock_docker.return_value = mock_client
+
+        run_dir = tmp_path / "runs" / "demo-Feb28-1400"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text(
+            "2026-02-28T14:00 start config=demo branch=scad-Feb28-1400\n"
+        )
+        (tmp_path / "worktrees" / "demo-Feb28-1400").mkdir(parents=True)
+
+        results = get_all_sessions()
+        assert len(results) == 1
+        assert results[0]["container"] == "stopped"
+
+    @patch("scad.container.docker.from_env")
+    def test_includes_removed_sessions(self, mock_docker, tmp_path, monkeypatch):
+        """get_all_sessions shows removed when container gone but clones exist."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.containers.get.side_effect = docker.errors.NotFound("gone")
+        mock_docker.return_value = mock_client
+
+        run_dir = tmp_path / "runs" / "old-Feb27-0900"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text(
+            "2026-02-27T09:00 start config=demo branch=scad-Feb27-0900\n"
+        )
+        (tmp_path / "worktrees" / "old-Feb27-0900").mkdir(parents=True)
+
+        results = get_all_sessions()
+        assert len(results) == 1
+        assert results[0]["container"] == "removed"
+        assert results[0]["clones"] == "yes"
+
+    @patch("scad.container.docker.from_env")
+    def test_includes_cleaned_sessions(self, mock_docker, tmp_path, monkeypatch):
+        """get_all_sessions shows cleaned when only events.log remains."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.containers.get.side_effect = docker.errors.NotFound("gone")
+        mock_docker.return_value = mock_client
+
+        run_dir = tmp_path / "runs" / "ancient-Feb26-1000"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text(
+            "2026-02-26T10:00 start config=demo branch=scad-Feb26-1000\n"
+            "2026-02-26T11:00 stop\n"
+        )
+
+        results = get_all_sessions()
+        assert len(results) == 1
+        assert results[0]["container"] == "cleaned"
+        assert results[0]["clones"] == "-"
 
 

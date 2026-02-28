@@ -22,9 +22,9 @@ from scad.container import (
     create_clones,
     fetch_to_host,
     generate_run_id,
+    get_all_sessions,
     get_image_info,
     image_exists,
-    list_completed_runs,
     list_scad_containers,
     resolve_branch,
     run_container,
@@ -288,27 +288,41 @@ def build(config_name: str, verbose: bool):
 
 
 @session.command("status")
-def session_status():
-    """List running and recently completed agents."""
-    running = list_scad_containers()
-    completed = list_completed_runs()
-
-    # Exclude completed runs that are still showing as running
-    running_ids = {r["run_id"] for r in running}
-    completed = [c for c in completed if c["run_id"] not in running_ids]
-
-    all_runs = running + completed
-    if not all_runs:
-        click.echo("[scad] No agents found.")
-        return
-
-    click.echo(f"{'RUN ID':<30} {'CONFIG':<15} {'BRANCH':<20} {'STARTED':<15} {'STATUS'}")
-    for run in all_runs:
-        started = _relative_time(run["started"]) if run["started"] else "?"
+@click.option("--all", "show_all", is_flag=True, help="Show full session history.")
+def session_status(show_all: bool):
+    """List sessions. Running only by default, --all for full history."""
+    if show_all:
+        all_runs = get_all_sessions()
+        if not all_runs:
+            click.echo("[scad] No sessions found.")
+            return
         click.echo(
-            f"{run['run_id']:<30} {run['config']:<15} {run['branch']:<20} "
-            f"{started:<15} {run['status']}"
+            f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
+            f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
         )
+        for run in all_runs:
+            started = _relative_time(run["started"]) if run["started"] else "?"
+            click.echo(
+                f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
+                f"{started:<12} {run['container']:<12} {run['clones']}"
+            )
+    else:
+        running = list_scad_containers()
+        if not running:
+            click.echo("[scad] No running sessions.")
+            return
+        click.echo(
+            f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
+            f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
+        )
+        for run in running:
+            started = _relative_time(run["started"]) if run["started"] else "?"
+            clone_dir = Path.home() / ".scad" / "worktrees" / run["run_id"]
+            clones = "yes" if clone_dir.exists() else "-"
+            click.echo(
+                f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
+                f"{started:<12} {'running':<12} {clones}"
+            )
 
 
 @session.command("logs")

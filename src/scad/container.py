@@ -542,3 +542,74 @@ def config_name_for_run(run_id: str) -> Optional[str]:
     return None
 
 
+def _parse_events_log(run_id: str) -> dict:
+    """Parse events.log for config, branch, start time."""
+    events_log = RUNS_DIR / run_id / "events.log"
+    info = {"run_id": run_id, "config": "?", "branch": "?", "started": ""}
+    if not events_log.exists():
+        return info
+    for line in events_log.read_text().strip().split("\n"):
+        parts = line.split()
+        if len(parts) >= 2 and parts[1] == "start":
+            info["started"] = parts[0]
+            for p in parts[2:]:
+                if p.startswith("config="):
+                    info["config"] = p.split("=", 1)[1]
+                elif p.startswith("branch="):
+                    info["branch"] = p.split("=", 1)[1]
+            break
+    return info
+
+
+def get_all_sessions() -> list[dict]:
+    """Get all sessions with container state. Sorted most-recent-first."""
+    sessions = {}
+
+    # 1. Running containers (from Docker)
+    for c in list_scad_containers():
+        run_id = c["run_id"]
+        clone_dir = WORKTREE_DIR / run_id
+        sessions[run_id] = {
+            "run_id": run_id,
+            "config": c["config"],
+            "branch": c["branch"],
+            "started": c["started"],
+            "container": "running",
+            "clones": "yes" if clone_dir.exists() else "-",
+        }
+
+    # 2. Scan runs dir for all sessions
+    if RUNS_DIR.exists():
+        for d in RUNS_DIR.iterdir():
+            if not d.is_dir() or d.name in sessions:
+                continue
+            run_id = d.name
+            info = _parse_events_log(run_id)
+
+            # Determine container state
+            try:
+                client = docker.from_env()
+                container = client.containers.get(f"scad-{run_id}")
+                container_state = "stopped" if container.status != "running" else "running"
+            except (DockerNotFound, DockerException):
+                container_state = "removed"
+
+            clone_dir = WORKTREE_DIR / run_id
+            has_clones = clone_dir.exists()
+
+            if container_state == "removed" and not has_clones:
+                container_state = "cleaned"
+
+            sessions[run_id] = {
+                "run_id": run_id,
+                "config": info["config"],
+                "branch": info["branch"],
+                "started": info["started"],
+                "container": container_state,
+                "clones": "yes" if has_clones else "-",
+            }
+
+    # Sort most-recent-first by start time
+    return sorted(sessions.values(), key=lambda x: x.get("started", ""), reverse=True)
+
+

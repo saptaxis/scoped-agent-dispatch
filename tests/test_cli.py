@@ -6,7 +6,7 @@ from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
 import docker
-from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time
+from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions
 
 
 @pytest.fixture
@@ -157,36 +157,54 @@ class TestSessionLogs:
 
 
 class TestSessionStatus:
-    @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
-    def test_status_shows_running_and_completed(self, mock_running, mock_completed, runner):
+    def test_status_shows_running(self, mock_running, runner):
         mock_running.return_value = [{
             "run_id": "test-Feb26-1430",
             "config": "myconfig",
             "branch": "test",
             "started": "2026-02-26T14:30:00Z",
-            "status": "running",
-        }]
-        mock_completed.return_value = [{
-            "run_id": "old-Feb25-0900",
-            "config": "myconfig",
-            "branch": "old",
-            "started": "2026-02-25T09:00:00Z",
-            "status": "exited(0)",
+            "container": "running",
+            "clones": "yes",
         }]
         result = runner.invoke(main, ["session", "status"])
         assert result.exit_code == 0
         assert "test-Feb26-1430" in result.output
-        assert "old-Feb25-0900" in result.output
+        assert "running" in result.output
 
-    @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
-    def test_status_empty(self, mock_running, mock_completed, runner):
+    def test_status_empty(self, mock_running, runner):
         mock_running.return_value = []
-        mock_completed.return_value = []
         result = runner.invoke(main, ["session", "status"])
         assert result.exit_code == 0
-        assert "No agents" in result.output
+        assert "No running sessions" in result.output
+
+    @patch("scad.cli.get_all_sessions")
+    def test_status_all_shows_history(self, mock_all, runner):
+        mock_all.return_value = [
+            {
+                "run_id": "test-Feb28-1400",
+                "config": "demo",
+                "branch": "scad-Feb28-1400",
+                "started": "2026-02-28T14:00:00Z",
+                "container": "running",
+                "clones": "yes",
+            },
+            {
+                "run_id": "old-Feb27-0900",
+                "config": "demo",
+                "branch": "scad-Feb27-0900",
+                "started": "2026-02-27T09:00:00Z",
+                "container": "stopped",
+                "clones": "yes",
+            },
+        ]
+        result = runner.invoke(main, ["session", "status", "--all"])
+        assert result.exit_code == 0
+        assert "test-Feb28-1400" in result.output
+        assert "old-Feb27-0900" in result.output
+        assert "running" in result.output
+        assert "stopped" in result.output
 
 
 class TestScadBuild:
