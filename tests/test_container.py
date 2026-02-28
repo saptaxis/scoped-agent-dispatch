@@ -873,6 +873,34 @@ class TestSyncFromHost:
         assert "new-feature" in branches.stdout
         assert len(results) == 1
 
+    def test_sync_logs_events(self, tmp_path, monkeypatch):
+        """sync_from_host logs sync events to events.log."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+        clone = tmp_path / "worktrees" / "test-run" / "code"
+        subprocess.run(["git", "clone", "--local", str(source), str(clone)], check=True, capture_output=True)
+
+        (tmp_path / "runs" / "test-run").mkdir(parents=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(source), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        sync_from_host("test-run", config)
+
+        events_log = tmp_path / "runs" / "test-run" / "events.log"
+        assert events_log.exists()
+        assert "sync" in events_log.read_text()
+        assert "code" in events_log.read_text()
+
     def test_no_clones_raises(self, tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
         config = ScadConfig(

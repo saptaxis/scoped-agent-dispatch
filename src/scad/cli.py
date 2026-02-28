@@ -27,6 +27,7 @@ from scad.container import (
     get_session_info,
     image_exists,
     list_scad_containers,
+    log_event,
     refresh_credentials,
     resolve_branch,
     run_container,
@@ -160,6 +161,7 @@ def session_start(config_name: str, branch: str, prompt: str, rebuild: bool):
         run_id = run_agent(
             config, branch=branch, prompt=prompt, rebuild=rebuild
         )
+        log_event(run_id, "start", f"config={config.name} branch={branch}")
         if prompt:
             click.echo(f"[scad] Dispatched: {run_id}")
     except click.ClickException as e:
@@ -406,6 +408,7 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
 def session_stop(run_id: str):
     """Stop a running agent."""
     if stop_container(run_id):
+        log_event(run_id, "stop")
         click.echo(f"[scad] Stopped: {run_id}")
     else:
         click.echo(f"[scad] No running container found for {run_id}", err=True)
@@ -440,6 +443,7 @@ def session_attach(run_id: str):
         )
         sys.exit(1)
 
+    log_event(run_id, "attach")
     result = _subprocess.run(
         ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
     )

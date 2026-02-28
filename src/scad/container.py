@@ -531,6 +531,10 @@ def sync_from_host(run_id: str, config: ScadConfig) -> list[dict]:
 
         results.append({"repo": key, "source": str(source_path)})
 
+    # Log to events.log
+    for r in results:
+        log_event(run_id, "sync", f"{r['repo']} \u2190 {r['source']}")
+
     return results
 
 

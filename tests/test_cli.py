@@ -598,6 +598,52 @@ class TestSessionInfo:
         assert "No session found" in result.output
 
 
+class TestEventLogging:
+    @patch("scad.cli.log_event")
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.resolve_branch")
+    @patch("scad.cli.load_config")
+    def test_start_logs_event(self, mock_load, mock_resolve, mock_run, mock_log, runner):
+        """session start logs a start event."""
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_resolve.return_value = "scad-Feb28-1400"
+        mock_run.return_value = "test-Feb28-1400"
+
+        runner.invoke(main, ["session", "start", "test"])
+        mock_log.assert_called_once()
+        call_args = mock_log.call_args
+        assert call_args[0][0] == "test-Feb28-1400"  # run_id
+        assert call_args[0][1] == "start"  # verb
+        assert "config=test" in call_args[0][2]
+        assert "branch=scad-Feb28-1400" in call_args[0][2]
+
+    @patch("scad.cli.log_event")
+    @patch("scad.cli.stop_container")
+    def test_stop_logs_event(self, mock_stop, mock_log, runner):
+        """session stop logs a stop event."""
+        mock_stop.return_value = True
+        runner.invoke(main, ["session", "stop", "test-run"])
+        mock_log.assert_called_once_with("test-run", "stop")
+
+    @patch("scad.cli.log_event")
+    @patch("scad.cli._subprocess.run")
+    @patch("scad.cli.docker.from_env")
+    def test_attach_logs_event(self, mock_docker, mock_subprocess, mock_log, runner):
+        """session attach logs an attach event."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_container.exec_run.return_value = MagicMock(exit_code=0)
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value = mock_container
+        mock_docker.return_value = mock_client
+        mock_subprocess.return_value = MagicMock(returncode=0)
+
+        runner.invoke(main, ["session", "attach", "test-run"])
+        mock_log.assert_called_once_with("test-run", "attach")
+
+
 class TestCodeRefresh:
     @patch("scad.cli.refresh_credentials")
     def test_refresh_shows_time_remaining(self, mock_refresh, runner):
