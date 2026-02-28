@@ -76,6 +76,21 @@ cd scoped-agent-dispatch
 pip install -e ".[dev]"
 ```
 
+Shell completion (zsh):
+
+```bash
+echo 'eval "$(_SCAD_COMPLETE=zsh_source scad)"' >> ~/.zshrc
+source ~/.zshrc
+```
+
+Bash:
+
+```bash
+echo 'eval "$(_SCAD_COMPLETE=bash_source scad)"' >> ~/.bashrc
+```
+
+Completes commands, subcommands, run IDs, and config names.
+
 ## Quick start
 
 ### 1. Create a config
