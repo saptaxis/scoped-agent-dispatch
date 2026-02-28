@@ -21,6 +21,22 @@ WORKTREE_DIR = SCAD_DIR / "worktrees"
 RUNS_DIR = SCAD_DIR / "runs"
 
 
+def log_event(run_id: str, verb: str, details: str = "") -> None:
+    """Append an event to ~/.scad/runs/<run-id>/events.log.
+
+    Format: <ISO-timestamp> <verb> <details>
+    """
+    run_dir = RUNS_DIR / run_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+    log_file = run_dir / "events.log"
+    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
+    line = f"{timestamp} {verb}"
+    if details:
+        line += f" {details}"
+    with open(log_file, "a") as f:
+        f.write(line + "\n")
+
+
 def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
 
@@ -440,7 +456,7 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     """Fetch branches from clones back to source repos.
 
     For each clone: detach HEAD, fetch branch to source, re-checkout branch.
-    Appends to ~/.scad/runs/<run-id>/fetches.log.
+    Appends to ~/.scad/runs/<run-id>/events.log.
     """
     clone_base = WORKTREE_DIR / run_id
     if not clone_base.exists():
@@ -483,14 +499,9 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
 
         results.append({"repo": key, "branch": branch, "source": str(source_path)})
 
-    # Append to fetches.log
-    run_dir = RUNS_DIR / run_id
-    run_dir.mkdir(parents=True, exist_ok=True)
-    log_file = run_dir / "fetches.log"
-    timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
-    with open(log_file, "a") as f:
-        for r in results:
-            f.write(f"{timestamp} {r['branch']} {r['repo']} → {r['source']}\n")
+    # Log to events.log
+    for r in results:
+        log_event(run_id, "fetch", f"{r['repo']} {r['branch']} → {r['source']}")
 
     return results
 

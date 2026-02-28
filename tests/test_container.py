@@ -28,6 +28,7 @@ from scad.container import (
     stop_container,
     fetch_to_host,
     sync_from_host,
+    log_event,
 )
 
 
@@ -785,8 +786,8 @@ class TestFetchToHost:
         results = fetch_to_host("test-run", config)
         assert len(results) == 2
 
-    def test_writes_fetches_log(self, tmp_path, monkeypatch):
-        """fetch_to_host appends to fetches.log."""
+    def test_writes_events_log(self, tmp_path, monkeypatch):
+        """fetch_to_host appends to events.log (not fetches.log)."""
         monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
 
@@ -811,9 +812,12 @@ class TestFetchToHost:
 
         fetch_to_host("test-run", config)
 
-        log = (run_dir / "fetches.log").read_text()
-        assert "feat" in log
-        assert "code" in log
+        events_log = (run_dir / "events.log").read_text()
+        assert "fetch" in events_log
+        assert "code" in events_log
+        assert "feat" in events_log
+        # Old fetches.log should NOT be created
+        assert not (run_dir / "fetches.log").exists()
 
     def test_no_worktree_clones_raises(self, tmp_path, monkeypatch):
         """fetch_to_host raises if clone dir doesn't exist."""
@@ -876,5 +880,43 @@ class TestSyncFromHost:
         )
         with pytest.raises(FileNotFoundError):
             sync_from_host("nonexistent", config)
+
+
+class TestLogEvent:
+    def test_creates_events_log(self, tmp_path, monkeypatch):
+        """log_event creates events.log in run dir."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        log_event("test-run", "start", "config=demo branch=scad-Feb28-1400")
+        log_file = tmp_path / "runs" / "test-run" / "events.log"
+        assert log_file.exists()
+        content = log_file.read_text()
+        assert "start" in content
+        assert "config=demo" in content
+
+    def test_appends_multiple_events(self, tmp_path, monkeypatch):
+        """log_event appends, doesn't overwrite."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        log_event("test-run", "start", "config=demo branch=feat")
+        log_event("test-run", "fetch", "code feat → /source")
+        content = (tmp_path / "runs" / "test-run" / "events.log").read_text()
+        lines = content.strip().split("\n")
+        assert len(lines) == 2
+        assert "start" in lines[0]
+        assert "fetch" in lines[1]
+
+    def test_event_without_details(self, tmp_path, monkeypatch):
+        """log_event works with no details."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        log_event("test-run", "stop")
+        content = (tmp_path / "runs" / "test-run" / "events.log").read_text()
+        assert "stop" in content
+
+    def test_event_has_iso_timestamp(self, tmp_path, monkeypatch):
+        """Each event line starts with an ISO timestamp."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        log_event("test-run", "attach")
+        content = (tmp_path / "runs" / "test-run" / "events.log").read_text()
+        import re
+        assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}", content)
 
 
