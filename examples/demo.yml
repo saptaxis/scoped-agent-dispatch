@@ -1,0 +1,16 @@
+# Example scad config.
+# Register with: scad config add examples/demo.yml
+# The 'name' field becomes the config name in scad.
+# Paths are expanded (~, env vars) at load time.
+name: demo
+repos:
+  demo-code:
+    path: ~/vsr-tmp/scad-demo/demo-code
+    workdir: true                          # container working directory
+  demo-docs:
+    path: ~/vsr-tmp/scad-demo/demo-docs
+    add_dir: true                          # passed to claude --add-dir
+python:
+  version: "3.11"
+claude:
+  dangerously_skip_permissions: true
