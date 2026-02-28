@@ -180,6 +180,26 @@ def config():
     pass
 
 
+@config.command("list")
+def config_list():
+    """List available project configs."""
+    names = list_configs()
+    if not names:
+        click.echo("[scad] No configs found in ~/.scad/configs/")
+        return
+
+    click.echo(f"{'CONFIG':<20} {'IMAGE':<25} {'BUILT'}")
+    for name in names:
+        info = get_image_info(name)
+        if info:
+            built = _relative_time(info["created"])
+            image = info["tag"]
+        else:
+            built = "never (not built)"
+            image = f"scad-{name}"
+        click.echo(f"{name:<20} {image:<25} {built}")
+
+
 @config.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
 def view(config_name: str):

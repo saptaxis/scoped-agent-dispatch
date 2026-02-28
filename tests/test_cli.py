@@ -357,6 +357,29 @@ class TestSessionClean:
         mock_clean.assert_called_once_with("nonexistent")
 
 
+class TestConfigList:
+    @patch("scad.cli.get_image_info")
+    @patch("scad.cli.list_configs")
+    def test_config_list_shows_table(self, mock_list, mock_info, runner):
+        mock_list.return_value = ["alpha", "beta"]
+        mock_info.side_effect = [
+            {"tag": "scad-alpha", "created": "2026-02-26T10:00:00Z"},
+            None,
+        ]
+        result = runner.invoke(main, ["config", "list"])
+        assert result.exit_code == 0
+        assert "alpha" in result.output
+        assert "beta" in result.output
+        assert "never" in result.output
+
+    @patch("scad.cli.list_configs")
+    def test_config_list_empty(self, mock_list, runner):
+        mock_list.return_value = []
+        result = runner.invoke(main, ["config", "list"])
+        assert result.exit_code == 0
+        assert "No configs" in result.output
+
+
 class TestScadConfig:
     def test_config_view(self, runner, tmp_path, monkeypatch):
         config_dir = tmp_path / "configs"
