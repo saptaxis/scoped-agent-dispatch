@@ -8,3 +8,4 @@ build/
 *.so
 .venv/
 .env
+scad-scad.yml
