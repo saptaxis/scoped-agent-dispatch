@@ -82,6 +82,12 @@ def main():
     pass
 
 
+@main.group()
+def session():
+    """Container + Claude session lifecycle."""
+    pass
+
+
 def run_agent(
     config, branch: str, prompt: str = None, rebuild: bool = False
 ) -> str:
@@ -122,21 +128,21 @@ def run_agent(
 
     if prompt:
         click.echo(f"[scad] Running headless.")
-        click.echo(f"[scad]   Setup log:    scad logs {run_id}")
-        click.echo(f"[scad]   Claude stream: scad logs {run_id} --stream")
-        click.echo(f"[scad]   Live follow:   scad logs {run_id} -sf")
+        click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
+        click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
+        click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
     else:
-        click.echo(f"[scad] Session ready. Run: scad attach {run_id}")
+        click.echo(f"[scad] Session ready. Run: scad session attach {run_id}")
 
     return run_id
 
 
-@main.command()
+@session.command("start")
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("--branch", default=None, help="Branch name (auto-generated if not specified).")
 @click.option("--prompt", default=None, help="Prompt for headless mode.")
 @click.option("--rebuild", is_flag=True, help="Force rebuild the Docker image.")
-def run(config_name: str, branch: str, prompt: str, rebuild: bool):
+def session_start(config_name: str, branch: str, prompt: str, rebuild: bool):
     """Launch an agent in a new container."""
     try:
         config = load_config(config_name)
@@ -238,8 +244,8 @@ def build(config_name: str, verbose: bool):
         sys.exit(3)
 
 
-@main.command()
-def status():
+@session.command("status")
+def session_status():
     """List running and recently completed agents."""
     running = list_scad_containers()
     completed = list_completed_runs()
@@ -262,12 +268,12 @@ def status():
         )
 
 
-@main.command()
+@session.command("logs")
 @click.argument("run_id", shell_complete=_complete_run_ids)
 @click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
 @click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
 @click.option("--stream", "-s", is_flag=True, help="Show Claude stream (tool calls, edits) instead of entrypoint log.")
-def logs(run_id: str, follow: bool, lines: int, stream: bool):
+def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
     """Read agent log output."""
     logs_dir = Path.home() / ".scad" / "logs"
     if stream:
@@ -294,20 +300,20 @@ def logs(run_id: str, follow: bool, lines: int, stream: bool):
             click.echo(line)
 
 
-@main.command()
+@session.command("stop")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def stop(run_id: str):
+def session_stop(run_id: str):
     """Stop a running agent."""
     if stop_container(run_id):
-        click.echo(f"[scad] Stopped and removed: {run_id}")
+        click.echo(f"[scad] Stopped: {run_id}")
     else:
         click.echo(f"[scad] No running container found for {run_id}", err=True)
         sys.exit(1)
 
 
-@main.command()
+@session.command("attach")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def attach(run_id: str):
+def session_attach(run_id: str):
     """Attach to an interactive tmux session."""
     container_name = f"scad-{run_id}"
     try:
@@ -328,7 +334,7 @@ def attach(run_id: str):
     if check.exit_code != 0:
         click.echo(
             f"[scad] Container '{run_id}' is running headless. "
-            f"Use 'scad logs {run_id}' to view output.",
+            f"Use 'scad session logs {run_id}' to view output.",
             err=True,
         )
         sys.exit(1)
@@ -339,9 +345,9 @@ def attach(run_id: str):
     sys.exit(result.returncode)
 
 
-@main.command()
+@session.command("clean")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def clean(run_id: str):
+def session_clean(run_id: str):
     """Remove container, clones, and run data for a completed run."""
     clean_run(run_id)
     click.echo(f"[scad] Cleaned: {run_id}")

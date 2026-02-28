@@ -64,23 +64,23 @@ class TestScadConfigs:
         assert "No configs" in result.output
 
 
-class TestScadStop:
+class TestSessionStop:
     @patch("scad.cli.stop_container")
     def test_stop_running(self, mock_stop, runner):
         mock_stop.return_value = True
-        result = runner.invoke(main, ["stop", "test-Feb26-1430"])
+        result = runner.invoke(main, ["session", "stop", "test-Feb26-1430"])
         assert result.exit_code == 0
         assert "Stopped" in result.output
 
     @patch("scad.cli.stop_container")
     def test_stop_not_found(self, mock_stop, runner):
         mock_stop.return_value = False
-        result = runner.invoke(main, ["stop", "nonexistent"])
+        result = runner.invoke(main, ["session", "stop", "nonexistent"])
         assert result.exit_code != 0
         assert "No running container" in result.output
 
 
-class TestScadLogs:
+class TestSessionLogs:
     def test_logs_shows_file_content(self, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
             # Create the expected directory structure
@@ -88,14 +88,14 @@ class TestScadLogs:
             logs_dir.mkdir(parents=True)
             (logs_dir / "test-run.log").write_text("line1\nline2\nline3\n")
 
-            result = runner.invoke(main, ["logs", "test-run"])
+            result = runner.invoke(main, ["session", "logs", "test-run"])
         assert result.exit_code == 0
         assert "line1" in result.output
         assert "line3" in result.output
 
     def test_logs_not_found(self, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            result = runner.invoke(main, ["logs", "nonexistent"])
+            result = runner.invoke(main, ["session", "logs", "nonexistent"])
         assert result.exit_code != 0
         assert "No log file" in result.output
 
@@ -106,7 +106,7 @@ class TestScadLogs:
         (logs_dir / "big-run.log").write_text("\n".join(lines))
 
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            result = runner.invoke(main, ["logs", "big-run", "-n", "5"])
+            result = runner.invoke(main, ["session", "logs", "big-run", "-n", "5"])
         assert result.exit_code == 0
         assert "line199" in result.output
         assert "line194" not in result.output
@@ -120,19 +120,19 @@ class TestScadLogs:
         )
 
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            result = runner.invoke(main, ["logs", "test-run", "--stream"])
+            result = runner.invoke(main, ["session", "logs", "test-run", "--stream"])
         assert result.exit_code == 0
         assert "tool_use" in result.output
         assert "Edit" in result.output
 
     def test_logs_stream_not_found(self, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            result = runner.invoke(main, ["logs", "nonexistent", "--stream"])
+            result = runner.invoke(main, ["session", "logs", "nonexistent", "--stream"])
         assert result.exit_code != 0
         assert "No stream log" in result.output
 
 
-class TestScadStatus:
+class TestSessionStatus:
     @patch("scad.cli.list_completed_runs")
     @patch("scad.cli.list_scad_containers")
     def test_status_shows_running_and_completed(self, mock_running, mock_completed, runner):
@@ -150,7 +150,7 @@ class TestScadStatus:
             "started": "2026-02-25T09:00:00Z",
             "status": "exited(0)",
         }]
-        result = runner.invoke(main, ["status"])
+        result = runner.invoke(main, ["session", "status"])
         assert result.exit_code == 0
         assert "test-Feb26-1430" in result.output
         assert "old-Feb25-0900" in result.output
@@ -160,7 +160,7 @@ class TestScadStatus:
     def test_status_empty(self, mock_running, mock_completed, runner):
         mock_running.return_value = []
         mock_completed.return_value = []
-        result = runner.invoke(main, ["status"])
+        result = runner.invoke(main, ["session", "status"])
         assert result.exit_code == 0
         assert "No agents" in result.output
 
@@ -212,23 +212,23 @@ class TestScadBuild:
         assert "not found" in result.output.lower()
 
 
-class TestScadRun:
-    def test_run_requires_config(self, runner):
-        result = runner.invoke(main, ["run"])
+class TestSessionStart:
+    def test_start_requires_config(self, runner):
+        result = runner.invoke(main, ["session", "start"])
         assert result.exit_code != 0
         assert "Missing argument" in result.output or "config" in result.output.lower()
 
     @patch("scad.cli.load_config")
-    def test_run_config_not_found(self, mock_load, runner):
+    def test_start_config_not_found(self, mock_load, runner):
         mock_load.side_effect = FileNotFoundError("Config 'bad' not found")
-        result = runner.invoke(main, ["run", "bad"])
+        result = runner.invoke(main, ["session", "start", "bad"])
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
 
     @patch("scad.cli.run_agent")
     @patch("scad.cli.resolve_branch")
     @patch("scad.cli.load_config")
-    def test_run_dispatches_headless(self, mock_load, mock_resolve, mock_run, runner):
+    def test_start_dispatches_headless(self, mock_load, mock_resolve, mock_run, runner):
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
@@ -236,7 +236,7 @@ class TestScadRun:
         mock_run.return_value = "test-Feb27-1430"
 
         result = runner.invoke(
-            main, ["run", "test", "--branch", "plan-22", "--prompt", "do stuff"]
+            main, ["session", "start", "test", "--branch", "plan-22", "--prompt", "do stuff"]
         )
         assert result.exit_code == 0
         mock_run.assert_called_once()
@@ -246,19 +246,19 @@ class TestScadRun:
     @patch("scad.cli.run_agent")
     @patch("scad.cli.resolve_branch")
     @patch("scad.cli.load_config")
-    def test_run_auto_generates_branch(self, mock_load, mock_resolve, mock_run, runner):
+    def test_start_auto_generates_branch(self, mock_load, mock_resolve, mock_run, runner):
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
         mock_resolve.return_value = "scad-Feb27-1430"
         mock_run.return_value = "test-Feb27-1430"
 
-        result = runner.invoke(main, ["run", "test"])
+        result = runner.invoke(main, ["session", "start", "test"])
         assert result.exit_code == 0
         mock_resolve.assert_called_once_with(mock_config, None)
 
 
-class TestScadAttach:
+class TestSessionAttach:
     @patch("scad.cli._subprocess.run")
     @patch("scad.cli.docker.from_env")
     def test_attach_runs_docker_exec(self, mock_docker, mock_subprocess, runner):
@@ -270,7 +270,7 @@ class TestScadAttach:
         mock_docker.return_value = mock_client
         mock_subprocess.return_value = MagicMock(returncode=0)
 
-        result = runner.invoke(main, ["attach", "test-Feb27-1430"])
+        result = runner.invoke(main, ["session", "attach", "test-Feb27-1430"])
         mock_subprocess.assert_called_once()
         call_args = mock_subprocess.call_args[0][0]
         assert "docker" in call_args
@@ -283,7 +283,7 @@ class TestScadAttach:
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
         mock_docker.return_value = mock_client
 
-        result = runner.invoke(main, ["attach", "nonexistent"])
+        result = runner.invoke(main, ["session", "attach", "nonexistent"])
         assert result.exit_code != 0
         assert "No container" in result.output
 
@@ -295,7 +295,7 @@ class TestScadAttach:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = runner.invoke(main, ["attach", "stopped-run"])
+        result = runner.invoke(main, ["session", "attach", "stopped-run"])
         assert result.exit_code != 0
         assert "not running" in result.output.lower()
 
@@ -308,16 +308,16 @@ class TestScadAttach:
         mock_client.containers.get.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        result = runner.invoke(main, ["attach", "headless-run"])
+        result = runner.invoke(main, ["session", "attach", "headless-run"])
         assert result.exit_code != 0
         assert "headless" in result.output.lower()
 
 
-class TestScadClean:
+class TestSessionClean:
     @patch("scad.cli.clean_run")
     def test_clean_removes_run(self, mock_clean, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            result = runner.invoke(main, ["clean", "test-run"])
+            result = runner.invoke(main, ["session", "clean", "test-run"])
 
         assert result.exit_code == 0
         assert "Cleaned" in result.output
@@ -327,7 +327,7 @@ class TestScadClean:
     def test_clean_nonexistent_is_ok(self, mock_clean, runner, tmp_path):
         # clean_run is a no-op if nothing exists, so clean always succeeds
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            result = runner.invoke(main, ["clean", "nonexistent"])
+            result = runner.invoke(main, ["session", "clean", "nonexistent"])
 
         assert result.exit_code == 0
         mock_clean.assert_called_once_with("nonexistent")
