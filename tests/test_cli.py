@@ -1,6 +1,7 @@
 """CLI tests."""
 
 import pytest
+import click
 from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
@@ -41,27 +42,50 @@ class TestRelativeTime:
         assert result == "just now"  # max(0, ...) clamps to 0
 
 
-class TestScadConfigs:
-    @patch("scad.cli.get_image_info")
-    @patch("scad.cli.list_configs")
-    def test_configs_shows_table(self, mock_list, mock_info, runner):
-        mock_list.return_value = ["alpha", "beta"]
-        mock_info.side_effect = [
-            {"tag": "scad-alpha", "created": "2026-02-26T10:00:00Z"},
-            None,
-        ]
-        result = runner.invoke(main, ["configs"])
+class TestCodeFetch:
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli._config_for_run")
+    def test_fetch_shows_results(self, mock_config, mock_fetch, runner):
+        mock_config.return_value = MagicMock()
+        mock_fetch.return_value = [{"repo": "code", "branch": "feat", "source": "/src"}]
+        result = runner.invoke(main, ["code", "fetch", "test-run"])
         assert result.exit_code == 0
-        assert "alpha" in result.output
-        assert "beta" in result.output
-        assert "never" in result.output
+        assert "Fetched" in result.output
 
-    @patch("scad.cli.list_configs")
-    def test_configs_empty(self, mock_list, runner):
-        mock_list.return_value = []
-        result = runner.invoke(main, ["configs"])
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli._config_for_run")
+    def test_fetch_nothing(self, mock_config, mock_fetch, runner):
+        mock_config.return_value = MagicMock()
+        mock_fetch.return_value = []
+        result = runner.invoke(main, ["code", "fetch", "test-run"])
         assert result.exit_code == 0
-        assert "No configs" in result.output
+        assert "Nothing to fetch" in result.output
+
+    @patch("scad.cli._config_for_run")
+    def test_fetch_not_found(self, mock_config, runner):
+        mock_config.side_effect = click.ClickException("Cannot determine config")
+        result = runner.invoke(main, ["code", "fetch", "nonexistent"])
+        assert result.exit_code != 0
+
+
+class TestCodeSync:
+    @patch("scad.cli.sync_from_host")
+    @patch("scad.cli._config_for_run")
+    def test_sync_shows_results(self, mock_config, mock_sync, runner):
+        mock_config.return_value = MagicMock()
+        mock_sync.return_value = [{"repo": "code", "source": "/src"}]
+        result = runner.invoke(main, ["code", "sync", "test-run"])
+        assert result.exit_code == 0
+        assert "Synced" in result.output
+
+    @patch("scad.cli.sync_from_host")
+    @patch("scad.cli._config_for_run")
+    def test_sync_nothing(self, mock_config, mock_sync, runner):
+        mock_config.return_value = MagicMock()
+        mock_sync.return_value = []
+        result = runner.invoke(main, ["code", "sync", "test-run"])
+        assert result.exit_code == 0
+        assert "Nothing to sync" in result.output
 
 
 class TestSessionStop:

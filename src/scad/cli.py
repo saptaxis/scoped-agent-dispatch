@@ -88,6 +88,12 @@ def session():
     pass
 
 
+@main.group()
+def code():
+    """Git state between host and clones."""
+    pass
+
+
 def run_agent(
     config, branch: str, prompt: str = None, rebuild: bool = False
 ) -> str:
@@ -166,26 +172,6 @@ def session_start(config_name: str, branch: str, prompt: str, rebuild: bool):
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)
-
-
-@main.command()
-def configs():
-    """List available project configs."""
-    names = list_configs()
-    if not names:
-        click.echo("[scad] No configs found in ~/.scad/templates/")
-        return
-
-    click.echo(f"{'CONFIG':<20} {'IMAGE':<25} {'BUILT'}")
-    for name in names:
-        info = get_image_info(name)
-        if info:
-            built = _relative_time(info["created"])
-            image = info["tag"]
-        else:
-            built = "never (not built)"
-            image = f"scad-{name}"
-        click.echo(f"{name:<20} {image:<25} {built}")
 
 
 @main.group()
@@ -361,9 +347,9 @@ def _config_for_run(run_id: str) -> "ScadConfig":
     return load_config(config_name)
 
 
-@main.command()
+@code.command("fetch")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def fetch(run_id: str):
+def code_fetch(run_id: str):
     """Fetch branches from clones back to source repos."""
     try:
         config = _config_for_run(run_id)
@@ -378,9 +364,9 @@ def fetch(run_id: str):
         sys.exit(2)
 
 
-@main.command()
+@code.command("sync")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def sync(run_id: str):
+def code_sync(run_id: str):
     """Sync host repo changes into clones (makes new branches available)."""
     try:
         config = _config_for_run(run_id)
