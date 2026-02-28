@@ -30,6 +30,7 @@ from scad.container import (
     sync_from_host,
     log_event,
     get_all_sessions,
+    get_session_info,
 )
 
 
@@ -1020,3 +1021,81 @@ class TestGetAllSessions:
         assert results[0]["clones"] == "-"
 
 
+class TestGetSessionInfo:
+    def test_basic_info_from_events_log(self, tmp_path, monkeypatch):
+        """get_session_info parses config and branch from events.log."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        run_dir = tmp_path / "runs" / "demo-Feb28-1400"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text(
+            "2026-02-28T14:00 start config=demo branch=scad-Feb28-1400\n"
+            "2026-02-28T14:30 fetch code scad-Feb28-1400 → /src\n"
+        )
+
+        with patch("scad.container.docker.from_env") as mock_docker:
+            mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+            info = get_session_info("demo-Feb28-1400")
+
+        assert info["run_id"] == "demo-Feb28-1400"
+        assert info["config"] == "demo"
+        assert info["branch"] == "scad-Feb28-1400"
+        assert len(info["events"]) == 2
+
+    def test_container_state_running(self, tmp_path, monkeypatch):
+        """get_session_info shows container as running."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        run_dir = tmp_path / "runs" / "demo-Feb28-1400"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text("2026-02-28T14:00 start config=demo branch=feat\n")
+
+        with patch("scad.container.docker.from_env") as mock_docker:
+            mock_container = MagicMock()
+            mock_container.status = "running"
+            mock_docker.return_value.containers.get.return_value = mock_container
+            info = get_session_info("demo-Feb28-1400")
+
+        assert info["container"] == "running"
+
+    def test_clone_paths(self, tmp_path, monkeypatch):
+        """get_session_info lists clone directories."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        run_dir = tmp_path / "runs" / "demo-Feb28-1400"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text("2026-02-28T14:00 start config=demo branch=feat\n")
+        clone_dir = tmp_path / "worktrees" / "demo-Feb28-1400"
+        (clone_dir / "demo-code").mkdir(parents=True)
+        (clone_dir / "demo-docs").mkdir(parents=True)
+
+        with patch("scad.container.docker.from_env") as mock_docker:
+            mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+            info = get_session_info("demo-Feb28-1400")
+
+        assert "demo-code" in info["clones"]
+        assert "demo-docs" in info["clones"]
+
+    def test_claude_sessions(self, tmp_path, monkeypatch):
+        """get_session_info finds Claude session .jsonl files."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        run_dir = tmp_path / "runs" / "demo-Feb28-1400"
+        run_dir.mkdir(parents=True)
+        (run_dir / "events.log").write_text("2026-02-28T14:00 start config=demo branch=feat\n")
+        projects_dir = run_dir / "claude" / "projects" / "encoded-path"
+        projects_dir.mkdir(parents=True)
+        (projects_dir / "abc12345.jsonl").write_text("{}\n")
+
+        with patch("scad.container.docker.from_env") as mock_docker:
+            mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+            info = get_session_info("demo-Feb28-1400")
+
+        assert len(info["claude_sessions"]) == 1
+        assert info["claude_sessions"][0]["id"] == "abc12345"
+
+    def test_nonexistent_run_raises(self, tmp_path, monkeypatch):
+        """get_session_info raises for unknown run ID."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        with pytest.raises(FileNotFoundError, match="No session found"):
+            get_session_info("nonexistent")

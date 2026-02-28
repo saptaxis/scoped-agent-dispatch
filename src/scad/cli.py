@@ -24,6 +24,7 @@ from scad.container import (
     generate_run_id,
     get_all_sessions,
     get_image_info,
+    get_session_info,
     image_exists,
     list_scad_containers,
     resolve_branch,
@@ -323,6 +324,45 @@ def session_status(show_all: bool):
                 f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
                 f"{started:<12} {'running':<12} {clones}"
             )
+
+
+@session.command("info")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def session_info(run_id: str):
+    """Show session dashboard."""
+    try:
+        info = get_session_info(run_id)
+    except FileNotFoundError as e:
+        click.echo(f"[scad] {e}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Run ID:      {info['run_id']}")
+    click.echo(f"Config:      {info.get('config', '?')}")
+    click.echo(f"Branch:      {info.get('branch', '?')}")
+    click.echo(f"Container:   {info.get('container', '?')}")
+
+    if info.get("clones_path"):
+        click.echo(f"Clones:      {info['clones_path']}")
+        if info["clones"]:
+            click.echo(f"             {', '.join(info['clones'])}")
+    else:
+        click.echo("Clones:      (cleaned)")
+
+    click.echo()
+    if info.get("claude_sessions"):
+        click.echo("Claude sessions:")
+        for s in info["claude_sessions"]:
+            click.echo(f"  {s['id']} ({s['modified']})")
+    else:
+        click.echo("Claude sessions: (none)")
+
+    click.echo()
+    if info.get("events"):
+        click.echo("Events:")
+        for e in info["events"]:
+            click.echo(f"  {e}")
+    else:
+        click.echo("Events: (none)")
 
 
 @session.command("logs")

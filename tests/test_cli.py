@@ -567,3 +567,34 @@ class TestShellCompletion:
         completions = [c.value if hasattr(c, "value") else c for c in results]
         assert "alpha" in completions
         assert "beta" not in completions
+
+
+class TestSessionInfo:
+    @patch("scad.cli.get_session_info")
+    def test_info_shows_dashboard(self, mock_info, runner):
+        mock_info.return_value = {
+            "run_id": "demo-Feb28-1400",
+            "config": "demo",
+            "branch": "scad-Feb28-1400",
+            "container": "running",
+            "clones_path": "~/.scad/worktrees/demo-Feb28-1400/",
+            "clones": ["demo-code", "demo-docs"],
+            "claude_sessions": [{"id": "abc12345", "modified": "2026-02-28 14:00"}],
+            "events": [
+                "2026-02-28T14:00 start config=demo branch=scad-Feb28-1400",
+                "2026-02-28T14:30 fetch demo-code → /src",
+            ],
+        }
+        result = runner.invoke(main, ["session", "info", "demo-Feb28-1400"])
+        assert result.exit_code == 0
+        assert "demo-Feb28-1400" in result.output
+        assert "demo" in result.output
+        assert "running" in result.output
+        assert "abc12345" in result.output
+
+    @patch("scad.cli.get_session_info")
+    def test_info_not_found(self, mock_info, runner):
+        mock_info.side_effect = FileNotFoundError("No session found for bad-id")
+        result = runner.invoke(main, ["session", "info", "bad-id"])
+        assert result.exit_code != 0
+        assert "No session found" in result.output

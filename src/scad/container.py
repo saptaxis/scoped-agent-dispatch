@@ -613,3 +613,51 @@ def get_all_sessions() -> list[dict]:
     return sorted(sessions.values(), key=lambda x: x.get("started", ""), reverse=True)
 
 
+def get_session_info(run_id: str) -> dict:
+    """Assemble session dashboard from multiple sources."""
+    run_dir = RUNS_DIR / run_id
+    if not run_dir.exists():
+        raise FileNotFoundError(f"No session found for {run_id}")
+
+    info = _parse_events_log(run_id)
+
+    # Events list
+    events_log = run_dir / "events.log"
+    info["events"] = []
+    if events_log.exists():
+        info["events"] = [
+            line for line in events_log.read_text().strip().split("\n") if line
+        ]
+
+    # Container state
+    try:
+        client = docker.from_env()
+        container = client.containers.get(f"scad-{run_id}")
+        info["container"] = container.status
+    except (DockerNotFound, DockerException):
+        clone_dir = WORKTREE_DIR / run_id
+        info["container"] = "removed" if clone_dir.exists() else "cleaned"
+
+    # Clone paths
+    clone_dir = WORKTREE_DIR / run_id
+    if clone_dir.exists():
+        info["clones"] = sorted(d.name for d in clone_dir.iterdir() if d.is_dir())
+        info["clones_path"] = str(clone_dir)
+    else:
+        info["clones"] = []
+        info["clones_path"] = None
+
+    # Claude sessions — glob for .jsonl files in run_dir/claude/projects/
+    claude_projects = run_dir / "claude" / "projects"
+    info["claude_sessions"] = []
+    if claude_projects.exists():
+        for jsonl in claude_projects.rglob("*.jsonl"):
+            stat = jsonl.stat()
+            info["claude_sessions"].append({
+                "id": jsonl.stem,
+                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            })
+
+    return info
+
+
