@@ -5,10 +5,17 @@ set -euo pipefail
 # Runs start to finish — creates toy repos, registers config, builds,
 # starts a session, shows status/info, stops, cleans up.
 #
-# Usage: ./examples/demo.sh [base_dir]
-#   base_dir defaults to ~/vsr-tmp/scad-demo
+# Usage: ./examples/demo.sh [--step] [base_dir]
+#   --step     step-through mode: press Enter between steps instead of sleeping
+#   base_dir   defaults to ~/vsr-tmp/scad-demo
 
-BASE="${1:-$HOME/vsr-tmp/scad-demo}"
+STEP=false
+if [[ "${1:-}" == "--step" ]]; then
+    STEP=true
+    shift
+fi
+
+BASE="${1:-$HOME/tmp/scad-demo}"
 PAUSE=${PAUSE:-2}  # seconds between steps (set PAUSE=0 for fast)
 
 # ── Helpers ──────────────────────────────────────────────────────────
@@ -33,7 +40,12 @@ run() {
 }
 
 pause() {
-    sleep "$PAUSE"
+    if $STEP; then
+        echo "  Press Enter to continue..."
+        read -r
+    else
+        sleep "$PAUSE"
+    fi
 }
 
 # ── 1. Create toy repos ─────────────────────────────────────────────
