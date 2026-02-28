@@ -414,6 +414,117 @@ class TestScadConfig:
         assert "nano" in call_args
 
 
+class TestConfigAdd:
+    def test_add_creates_symlink(self, runner, tmp_path, monkeypatch):
+        """config add creates a symlink in configs dir."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        ext_config = tmp_path / "project" / "scad.yml"
+        ext_config.parent.mkdir()
+        ext_config.write_text(
+            "name: myproject\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\n"
+            "python:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n"
+        )
+
+        result = runner.invoke(main, ["config", "add", str(ext_config)])
+        assert result.exit_code == 0
+        assert "Registered" in result.output
+
+        link = config_dir / "myproject.yml"
+        assert link.is_symlink()
+        assert link.resolve() == ext_config.resolve()
+
+    def test_add_rejects_duplicate_name(self, runner, tmp_path, monkeypatch):
+        """config add errors if a config with that name already exists."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "taken.yml").write_text("name: taken\n")
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        ext_config = tmp_path / "other" / "scad.yml"
+        ext_config.parent.mkdir()
+        ext_config.write_text(
+            "name: taken\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\n"
+            "python:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n"
+        )
+
+        result = runner.invoke(main, ["config", "add", str(ext_config)])
+        assert result.exit_code != 0
+        assert "already exists" in result.output
+
+    def test_add_same_target_is_noop(self, runner, tmp_path, monkeypatch):
+        """config add with same target is idempotent."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        ext_config = tmp_path / "project" / "scad.yml"
+        ext_config.parent.mkdir()
+        ext_config.write_text(
+            "name: myproject\nrepos:\n  code:\n    path: /tmp/code\n    workdir: true\n"
+            "python:\n  version: '3.11'\nclaude:\n  dangerously_skip_permissions: true\n"
+        )
+
+        # First add
+        runner.invoke(main, ["config", "add", str(ext_config)])
+        # Second add — same target, should be fine
+        result = runner.invoke(main, ["config", "add", str(ext_config)])
+        assert result.exit_code == 0
+        assert "Already registered" in result.output
+
+    def test_add_validates_yaml(self, runner, tmp_path, monkeypatch):
+        """config add rejects invalid config YAML."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        bad_config = tmp_path / "bad.yml"
+        bad_config.write_text("not: valid: scad: config\n")
+
+        result = runner.invoke(main, ["config", "add", str(bad_config)])
+        assert result.exit_code != 0
+
+
+class TestConfigRemove:
+    def test_remove_deletes_symlink(self, runner, tmp_path, monkeypatch):
+        """config remove removes the symlink."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        ext_config = tmp_path / "project" / "scad.yml"
+        ext_config.parent.mkdir()
+        ext_config.write_text("name: myproject\n")
+
+        link = config_dir / "myproject.yml"
+        link.symlink_to(ext_config.resolve())
+
+        result = runner.invoke(main, ["config", "remove", "myproject"])
+        assert result.exit_code == 0
+        assert "Removed" in result.output
+        assert not link.exists()
+        # Original file still exists
+        assert ext_config.exists()
+
+    def test_remove_nonexistent(self, runner, tmp_path, monkeypatch):
+        """config remove errors for unknown config."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        result = runner.invoke(main, ["config", "remove", "nope"])
+        assert result.exit_code != 0
+        assert "not found" in result.output.lower()
+
+
 class TestShellCompletion:
     @patch("scad.cli.docker.from_env")
     def test_run_id_completion_from_status_files(self, mock_docker, tmp_path):

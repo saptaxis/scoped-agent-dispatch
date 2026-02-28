@@ -10,8 +10,9 @@ from pathlib import Path
 
 import click
 import docker
+import yaml
 
-from scad.config import load_config, list_configs, CONFIG_DIR
+from scad.config import load_config, list_configs, CONFIG_DIR, ScadConfig
 from scad.container import (
     build_image,
     check_claude_auth,
@@ -221,6 +222,50 @@ def edit(config_name: str):
         sys.exit(2)
     editor = os.environ.get("EDITOR", "vim")
     subprocess.run([editor, str(path)])
+
+
+@config.command("add")
+@click.argument("config_path", type=click.Path(exists=True))
+def config_add(config_path: str):
+    """Register an external config (symlink into ~/.scad/configs/)."""
+    path = Path(config_path).resolve()
+    try:
+        raw = yaml.safe_load(path.read_text())
+        cfg = ScadConfig(**raw)
+    except Exception as e:
+        click.echo(f"[scad] Invalid config: {e}", err=True)
+        sys.exit(2)
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    link = CONFIG_DIR / f"{cfg.name}.yml"
+
+    if link.exists():
+        if link.is_symlink() and link.resolve() == path:
+            click.echo(f"[scad] Already registered: {cfg.name}")
+            return
+        click.echo(f"[scad] Config '{cfg.name}' already exists at {link}", err=True)
+        sys.exit(1)
+
+    link.symlink_to(path)
+    click.echo(f"[scad] Registered: {cfg.name} → {path}")
+
+
+@config.command("remove")
+@click.argument("config_name", shell_complete=_complete_config_names)
+def config_remove(config_name: str):
+    """Unregister a config (removes link, does not delete the source file)."""
+    link = CONFIG_DIR / f"{config_name}.yml"
+    if not link.exists():
+        click.echo(f"[scad] Config not found: {config_name}", err=True)
+        sys.exit(1)
+
+    if link.is_symlink():
+        target = link.resolve()
+        link.unlink()
+        click.echo(f"[scad] Removed: {config_name} (was → {target})")
+    else:
+        link.unlink()
+        click.echo(f"[scad] Removed: {config_name}")
 
 
 @main.command()
