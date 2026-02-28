@@ -526,22 +526,22 @@ class TestConfigRemove:
 
 
 class TestShellCompletion:
-    @patch("scad.cli.docker.from_env")
-    def test_run_id_completion_from_status_files(self, mock_docker, tmp_path):
-        mock_client = MagicMock()
-        mock_client.containers.list.return_value = []
-        mock_docker.return_value = mock_client
-
-        logs_dir = tmp_path / ".scad" / "logs"
-        logs_dir.mkdir(parents=True)
-        (logs_dir / "plan-22-Feb26-1430.status.json").write_text("{}")
-        (logs_dir / "plan-23-Feb26-1500.status.json").write_text("{}")
+    def test_run_id_completion_from_worktrees(self, tmp_path):
+        worktrees_dir = tmp_path / ".scad" / "worktrees"
+        worktrees_dir.mkdir(parents=True)
+        (worktrees_dir / "demo-Feb28-1400").mkdir()
+        (worktrees_dir / "scad-Feb28-0900").mkdir()
 
         with patch("scad.cli.Path.home", return_value=tmp_path):
-            results = _complete_run_ids(None, None, "plan-22")
+            results = _complete_run_ids(None, None, "demo")
         completions = [c.value if hasattr(c, "value") else c for c in results]
-        assert "plan-22-Feb26-1430" in completions
-        assert "plan-23-Feb26-1500" not in completions
+        assert "demo-Feb28-1400" in completions
+        assert "scad-Feb28-0900" not in completions
+
+    def test_run_id_completion_empty(self, tmp_path):
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            results = _complete_run_ids(None, None, "")
+        assert results == []
 
     def test_config_name_completion(self, tmp_path):
         with patch("scad.cli.list_configs", return_value=["alpha", "beta"]):

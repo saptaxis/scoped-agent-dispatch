@@ -54,22 +54,14 @@ def _relative_time(iso_str: str) -> str:
 
 
 def _complete_run_ids(ctx, param, incomplete):
-    """Shell completion for run IDs."""
-    run_ids = set()
-    logs_dir = Path.home() / ".scad" / "logs"
-    if logs_dir.exists():
-        for f in logs_dir.glob("*.status.json"):
-            run_id = f.name.replace(".status.json", "")
-            run_ids.add(run_id)
-    try:
-        client = docker.from_env()
-        for c in client.containers.list(filters={"label": "scad.managed=true"}):
-            run_id = c.labels.get("scad.run_id", "")
-            if run_id:
-                run_ids.add(run_id)
-    except Exception:
-        pass
-    return sorted(r for r in run_ids if r.startswith(incomplete))
+    """Shell completion for run IDs from worktrees directory."""
+    worktrees_dir = Path.home() / ".scad" / "worktrees"
+    if not worktrees_dir.exists():
+        return []
+    return sorted(
+        d.name for d in worktrees_dir.iterdir()
+        if d.is_dir() and d.name.startswith(incomplete)
+    )
 
 
 def _complete_config_names(ctx, param, incomplete):
