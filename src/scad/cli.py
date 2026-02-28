@@ -113,7 +113,8 @@ def run_agent(
         click.echo(f"[scad] Building image {tag}...")
         with tempfile.TemporaryDirectory() as build_dir:
             for line in build_image(config, Path(build_dir)):
-                pass  # quiet build
+                if line.startswith("Step "):
+                    click.echo(f"[scad] {line}")
         click.echo(f"[scad] Image built: {tag}")
     else:
         click.echo(f"[scad] Using cached image scad-{config.name}")
@@ -283,6 +284,8 @@ def build(config_name: str, verbose: bool):
             for line in build_image(config, Path(build_dir)):
                 if verbose:
                     click.echo(f"  {line}")
+                elif line.startswith("Step "):
+                    click.echo(f"[scad] {line}")
         click.echo(f"[scad] Built: {tag}")
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
