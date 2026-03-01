@@ -674,6 +674,49 @@ def get_session_info(run_id: str) -> dict:
     return info
 
 
+def get_session_cost(run_id: str) -> Optional[dict]:
+    """Get session cost via ccusage or stream-json fallback.
+
+    Returns dict with total_cost, total_input_tokens, total_output_tokens, total_turns.
+    Returns None if cost data unavailable.
+    """
+    claude_dir = RUNS_DIR / run_id / "claude"
+
+    # Try ccusage first
+    try:
+        result = subprocess.run(
+            ["npx", "ccusage", "session", "--json", "--dir", str(claude_dir)],
+            capture_output=True, text=True, timeout=30,
+        )
+        if result.returncode == 0 and result.stdout.strip():
+            data = json.loads(result.stdout)
+            if isinstance(data, list) and data:
+                return data[0]
+            elif isinstance(data, dict):
+                return data
+    except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
+        pass
+
+    # Fallback: parse stream-json final record
+    stream_log = SCAD_DIR / "logs" / f"{run_id}.stream.jsonl"
+    if stream_log.exists():
+        try:
+            lines = stream_log.read_text().strip().split("\n")
+            for line in reversed(lines):
+                record = json.loads(line)
+                if "cost_usd" in record:
+                    return {
+                        "total_cost": record["cost_usd"],
+                        "total_input_tokens": record.get("input_tokens", 0),
+                        "total_output_tokens": record.get("output_tokens", 0),
+                        "total_turns": record.get("num_turns", 0),
+                    }
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    return None
+
+
 def refresh_credentials(run_id: str) -> float:
     """Push fresh credentials into a running container.
 

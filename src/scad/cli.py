@@ -24,6 +24,7 @@ from scad.container import (
     generate_run_id,
     get_all_sessions,
     get_image_info,
+    get_session_cost,
     get_session_info,
     image_exists,
     list_scad_containers,
@@ -392,6 +393,16 @@ def session_info(run_id: str):
             click.echo(f"  {e}")
     else:
         click.echo("Events: (none)")
+
+    # Cost (optional — may not be available)
+    cost = get_session_cost(run_id)
+    if cost:
+        total = cost.get("total_cost", 0)
+        inp = cost.get("total_input_tokens", 0)
+        out = cost.get("total_output_tokens", 0)
+        turns = cost.get("total_turns", 0)
+        click.echo()
+        click.echo(f"Cost:        ${total:.2f} ({inp:,} input / {out:,} output tokens, {turns} turns)")
 
 
 @session.command("logs")

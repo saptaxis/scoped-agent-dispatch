@@ -31,6 +31,7 @@ from scad.container import (
     log_event,
     get_all_sessions,
     get_session_info,
+    get_session_cost,
     refresh_credentials,
 )
 
@@ -1256,3 +1257,64 @@ class TestRunContainerTelemetry:
         assert env["DISABLE_TELEMETRY"] == "1"
         assert env["DISABLE_ERROR_REPORTING"] == "1"
         assert env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] == "1"
+
+
+class TestGetSessionCost:
+    def test_returns_cost_from_ccusage(self, tmp_path, monkeypatch):
+        """get_session_cost parses ccusage JSON output."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        run_dir = tmp_path / "runs" / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        ccusage_output = json.dumps([{
+            "total_cost": 2.34,
+            "total_input_tokens": 12450,
+            "total_output_tokens": 8200,
+            "total_turns": 47,
+        }])
+
+        with patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(
+                returncode=0,
+                stdout=ccusage_output,
+            )
+            cost = get_session_cost("test-run")
+
+        assert cost is not None
+        assert cost["total_cost"] == 2.34
+        assert cost["total_input_tokens"] == 12450
+
+    def test_returns_none_on_failure(self, tmp_path, monkeypatch):
+        """get_session_cost returns None if ccusage fails."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        run_dir = tmp_path / "runs" / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        with patch("scad.container.subprocess.run") as mock_run:
+            mock_run.side_effect = FileNotFoundError("npx not found")
+            cost = get_session_cost("test-run")
+
+        assert cost is None
+
+    def test_fallback_to_stream_json(self, tmp_path, monkeypatch):
+        """get_session_cost falls back to stream-json final record."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.SCAD_DIR", tmp_path)
+        run_dir = tmp_path / "runs" / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        # Create a stream log with cost in final line
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir(parents=True)
+        stream_log = logs_dir / "test-run.stream.jsonl"
+        stream_log.write_text(
+            '{"type":"tool_use"}\n'
+            '{"type":"result","cost_usd":1.50,"num_turns":20,"duration_ms":120000}\n'
+        )
+
+        with patch("scad.container.subprocess.run") as mock_run:
+            mock_run.side_effect = FileNotFoundError("npx not found")
+            cost = get_session_cost("test-run")
+
+        assert cost is not None
+        assert cost["total_cost"] == 1.50

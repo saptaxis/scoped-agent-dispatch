@@ -597,6 +597,29 @@ class TestSessionInfo:
         assert "running" in result.output
         assert "abc12345" in result.output
 
+    @patch("scad.cli.get_session_cost")
+    @patch("scad.cli.get_session_info")
+    def test_info_shows_cost(self, mock_info, mock_cost, runner):
+        mock_info.return_value = {
+            "run_id": "demo-Feb28-1400",
+            "config": "demo",
+            "branch": "scad-Feb28-1400",
+            "container": "running",
+            "clones_path": None,
+            "clones": [],
+            "claude_sessions": [],
+            "events": [],
+        }
+        mock_cost.return_value = {
+            "total_cost": 2.34,
+            "total_input_tokens": 12450,
+            "total_output_tokens": 8200,
+            "total_turns": 47,
+        }
+        result = runner.invoke(main, ["session", "info", "demo-Feb28-1400"])
+        assert result.exit_code == 0
+        assert "$2.34" in result.output
+
     @patch("scad.cli.get_session_info")
     def test_info_not_found(self, mock_info, runner):
         mock_info.side_effect = FileNotFoundError("No session found for bad-id")
