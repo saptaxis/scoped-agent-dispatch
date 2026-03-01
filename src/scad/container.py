@@ -43,7 +43,7 @@ def _get_jinja_env() -> Environment:
 
 def generate_run_id(config_name: str) -> str:
     """Generate a unique run ID from config name and current timestamp."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now()  # local time, not UTC
     date_str = now.strftime("%b%d")  # e.g., Feb26
     time_str = now.strftime("%H%M")  # e.g., 1430
     return f"{config_name}-{date_str}-{time_str}"
@@ -69,7 +69,7 @@ def check_claude_auth() -> tuple[bool, float]:
 
 def generate_branch_name() -> str:
     """Auto-generate branch name: scad-MonDD-HHMM."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now()  # local time, not UTC
     return f"scad-{now.strftime('%b%d')}-{now.strftime('%H%M')}"
 
 
