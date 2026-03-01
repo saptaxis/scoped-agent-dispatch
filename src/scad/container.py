@@ -253,6 +253,10 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     tmux_conf_src = Path(__file__).parent / "templates" / ".tmux.conf"
     shutil.copy2(tmux_conf_src, build_dir / ".tmux.conf")
 
+    # Copy statusline script
+    statusline_src = Path(__file__).parent / "templates" / "statusline.sh"
+    shutil.copy2(statusline_src, build_dir / "statusline.sh")
+
 
 def list_scad_containers() -> list[dict]:
     """List running scad containers from Docker."""

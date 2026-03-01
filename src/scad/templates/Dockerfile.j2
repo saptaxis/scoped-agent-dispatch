@@ -2,7 +2,7 @@ FROM {{ base_image | default('python:3.11-slim') }}
 
 # System packages
 RUN apt-get update && apt-get install -y \
-    curl git bash tmux zsh \
+    curl git bash tmux zsh jq \
     {% for pkg in apt_packages %}{{ pkg }} {% endfor %}\
     && rm -rf /var/lib/apt/lists/*
 
@@ -40,6 +40,8 @@ COPY .tmux.conf /home/scad/.tmux.conf
 USER root
 COPY bootstrap-claude.sh bootstrap-claude.conf /home/scad/
 RUN chmod +x /home/scad/bootstrap-claude.sh
+COPY statusline.sh /home/scad/statusline.sh
+RUN chmod +x /home/scad/statusline.sh
 
 # Entrypoint
 COPY entrypoint.sh /entrypoint.sh

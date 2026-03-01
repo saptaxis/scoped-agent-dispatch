@@ -182,6 +182,16 @@ class TestEntrypointTemplate:
         result = _render_entrypoint(jinja_env)
         assert "cleanupPeriodDays" in result
 
+    def test_statusline_hook(self, jinja_env):
+        """Entrypoint configures statusline hook in settings.json."""
+        result = _render_entrypoint(jinja_env)
+        assert "Notification" in result or "statusline" in result
+
+    def test_statusline_hook_command(self, jinja_env):
+        """Statusline hook points to the statusline script."""
+        result = _render_entrypoint(jinja_env)
+        assert "statusline.sh" in result
+
 
 class TestDockerfileTemplate:
     def _make_config(self):
@@ -232,6 +242,12 @@ class TestDockerfileTemplate:
         config = self._make_config()
         rendered = self._render_dockerfile(config)
         assert ".tmux.conf" in rendered
+
+    def test_includes_jq(self):
+        """Dockerfile installs jq for statusline script."""
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert "jq" in rendered
 
 
 class TestBootstrapConfTemplate:

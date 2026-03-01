@@ -102,6 +102,17 @@ d.setdefault('hooks', {})['PreToolUse'] = [
     },
 ]
 
+# Statusline hook — live cost/context during interactive sessions
+d.setdefault('hooks', {})['Notification'] = [
+    {
+        'matcher': 'statusline',
+        'hooks': [{
+            'type': 'command',
+            'command': 'bash /home/scad/statusline.sh',
+        }],
+    },
+]
+
 p.write_text(json.dumps(d, indent=2))
 "
 
