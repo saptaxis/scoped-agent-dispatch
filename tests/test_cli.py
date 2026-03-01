@@ -665,3 +665,47 @@ class TestCodeRefresh:
         result = runner.invoke(main, ["code", "refresh", "test-run"])
         assert result.exit_code != 0
         assert "expired" in result.output.lower()
+
+
+class TestConfigNew:
+    def test_new_creates_template(self, runner, tmp_path, monkeypatch):
+        """config new creates a YAML template file."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        result = runner.invoke(main, ["config", "new", "demo"])
+        assert result.exit_code == 0
+        config_file = config_dir / "demo.yml"
+        assert config_file.exists()
+        content = config_file.read_text()
+        assert "name: demo" in content
+        assert "workdir: true" in content
+        assert str(config_file) in result.output
+
+    def test_new_rejects_existing(self, runner, tmp_path, monkeypatch):
+        """config new errors if config already exists."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        (config_dir / "demo.yml").write_text("name: demo\n")
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+
+        result = runner.invoke(main, ["config", "new", "demo"])
+        assert result.exit_code != 0
+        assert "already exists" in result.output
+
+    @patch("scad.cli.subprocess.run")
+    def test_new_edit_flag(self, mock_run, runner, tmp_path, monkeypatch):
+        """config new --edit opens in $EDITOR."""
+        config_dir = tmp_path / "configs"
+        config_dir.mkdir()
+        monkeypatch.setattr("scad.config.CONFIG_DIR", config_dir)
+        monkeypatch.setattr("scad.cli.CONFIG_DIR", config_dir)
+        monkeypatch.setenv("EDITOR", "nano")
+
+        result = runner.invoke(main, ["config", "new", "demo", "--edit"])
+        assert result.exit_code == 0
+        mock_run.assert_called_once()
+        assert "nano" in mock_run.call_args[0][0]

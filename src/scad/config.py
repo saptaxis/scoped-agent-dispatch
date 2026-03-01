@@ -9,6 +9,38 @@ from pydantic import BaseModel, model_validator
 SCAD_DIR = Path.home() / ".scad"
 CONFIG_DIR = SCAD_DIR / "configs"
 
+CONFIG_TEMPLATE = """\
+# scad config: {name}
+# Edit this file, then run: scad build {name}
+
+name: {name}
+
+repos:
+  # At least one repo must have workdir: true
+  code:
+    path: ~/path/to/your/repo
+    workdir: true
+    # add_dir: false    # add to Claude context with --add-dir
+    # worktree: true    # create local clone (false = direct mount)
+    # focus: docs/      # subdir for context prompt
+
+# mounts:              # additional host paths to mount
+#   - host: ~/data
+#     container: /data
+
+# apt_packages: []     # extra system packages
+
+python:
+  version: "3.11"
+  # requirements: requirements.txt   # relative to workdir repo
+
+claude:
+  dangerously_skip_permissions: true
+  # additional_flags: ""
+  # claude_md: ~/CLAUDE.md   # null=auto, false=disabled, string=path
+  # plugins:                 # defaults: superpowers, commit-commands, pyright-lsp
+"""
+
 
 class RepoConfig(BaseModel):
     path: str

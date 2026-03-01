@@ -266,6 +266,28 @@ def config_remove(config_name: str):
         click.echo(f"[scad] Removed: {config_name}")
 
 
+@config.command("new")
+@click.argument("config_name")
+@click.option("--edit", is_flag=True, help="Open in $EDITOR after creating.")
+def config_new(config_name: str, edit: bool):
+    """Create a new config from a commented template."""
+    from scad.config import CONFIG_TEMPLATE
+
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+    path = CONFIG_DIR / f"{config_name}.yml"
+
+    if path.exists():
+        click.echo(f"[scad] Config '{config_name}' already exists. Run: scad config edit {config_name}", err=True)
+        sys.exit(1)
+
+    path.write_text(CONFIG_TEMPLATE.format(name=config_name))
+    click.echo(f"[scad] Created: {path}")
+
+    if edit:
+        editor = os.environ.get("EDITOR", "vim")
+        subprocess.run([editor, str(path)])
+
+
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("-v", "--verbose", is_flag=True, help="Show full Docker build output.")
