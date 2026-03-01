@@ -59,12 +59,12 @@ def _relative_time(iso_str: str) -> str:
 
 
 def _complete_run_ids(ctx, param, incomplete):
-    """Shell completion for run IDs from worktrees directory."""
-    worktrees_dir = Path.home() / ".scad" / "worktrees"
-    if not worktrees_dir.exists():
+    """Shell completion for run IDs from ~/.scad/runs/."""
+    runs_dir = Path.home() / ".scad" / "runs"
+    if not runs_dir.exists():
         return []
     return sorted(
-        d.name for d in worktrees_dir.iterdir()
+        d.name for d in runs_dir.iterdir()
         if d.is_dir() and d.name.startswith(incomplete)
     )
 
@@ -394,7 +394,7 @@ def session_status(show_all: bool):
         )
         for run in running:
             started = _relative_time(run["started"]) if run["started"] else "?"
-            clone_dir = Path.home() / ".scad" / "worktrees" / run["run_id"]
+            clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "worktrees"
             clones = "yes" if clone_dir.exists() else "-"
             click.echo(
                 f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "

@@ -17,7 +17,6 @@ from jinja2 import Environment, PackageLoader
 from scad.config import ScadConfig
 
 SCAD_DIR = Path.home() / ".scad"
-WORKTREE_DIR = SCAD_DIR / "worktrees"
 RUNS_DIR = SCAD_DIR / "runs"
 
 
@@ -121,7 +120,7 @@ def create_clones(
 
     Returns dict of repo_key -> clone_path (or direct path for non-worktree repos).
     """
-    clone_base = WORKTREE_DIR / run_id
+    clone_base = RUNS_DIR / run_id / "worktrees"
     clone_base.mkdir(parents=True, exist_ok=True)
 
     paths = {}
@@ -153,9 +152,9 @@ def cleanup_clones(run_id: str) -> None:
     """Remove clones for a completed run.
 
     Does NOT fetch branches back — user does that separately.
-    Just deletes the clone directory.
+    Just deletes the worktrees subdirectory under the run dir.
     """
-    clone_base = WORKTREE_DIR / run_id
+    clone_base = RUNS_DIR / run_id / "worktrees"
     if clone_base.exists():
         shutil.rmtree(clone_base)
 
@@ -172,10 +171,7 @@ def clean_run(run_id: str) -> None:
     except (DockerNotFound, DockerException):
         pass
 
-    # Remove clones
-    cleanup_clones(run_id)
-
-    # Remove run directory
+    # Remove entire run directory (worktrees + claude data + events.log)
     run_dir = RUNS_DIR / run_id
     if run_dir.exists():
         shutil.rmtree(run_dir)
@@ -467,7 +463,7 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     For each clone: detach HEAD, fetch branch to source, re-checkout branch.
     Appends to ~/.scad/runs/<run-id>/events.log.
     """
-    clone_base = WORKTREE_DIR / run_id
+    clone_base = RUNS_DIR / run_id / "worktrees"
     if not clone_base.exists():
         raise FileNotFoundError(f"No clones found for run: {run_id}")
 
@@ -520,7 +516,7 @@ def sync_from_host(run_id: str, config: ScadConfig) -> list[dict]:
 
     Does NOT checkout or merge — just makes refs available.
     """
-    clone_base = WORKTREE_DIR / run_id
+    clone_base = RUNS_DIR / run_id / "worktrees"
     if not clone_base.exists():
         raise FileNotFoundError(f"No clones found for run: {run_id}")
 
@@ -585,7 +581,7 @@ def get_all_sessions() -> list[dict]:
     # 1. Running containers (from Docker)
     for c in list_scad_containers():
         run_id = c["run_id"]
-        clone_dir = WORKTREE_DIR / run_id
+        clone_dir = RUNS_DIR / run_id / "worktrees"
         sessions[run_id] = {
             "run_id": run_id,
             "config": c["config"],
@@ -611,7 +607,7 @@ def get_all_sessions() -> list[dict]:
             except (DockerNotFound, DockerException):
                 container_state = "removed"
 
-            clone_dir = WORKTREE_DIR / run_id
+            clone_dir = RUNS_DIR / run_id / "worktrees"
             has_clones = clone_dir.exists()
 
             if container_state == "removed" and not has_clones:
@@ -652,11 +648,11 @@ def get_session_info(run_id: str) -> dict:
         container = client.containers.get(f"scad-{run_id}")
         info["container"] = container.status
     except (DockerNotFound, DockerException):
-        clone_dir = WORKTREE_DIR / run_id
+        clone_dir = RUNS_DIR / run_id / "worktrees"
         info["container"] = "removed" if clone_dir.exists() else "cleaned"
 
     # Clone paths
-    clone_dir = WORKTREE_DIR / run_id
+    clone_dir = RUNS_DIR / run_id / "worktrees"
     if clone_dir.exists():
         info["clones"] = sorted(d.name for d in clone_dir.iterdir() if d.is_dir())
         info["clones_path"] = str(clone_dir)

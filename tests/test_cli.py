@@ -549,11 +549,11 @@ class TestConfigRemove:
 
 
 class TestShellCompletion:
-    def test_run_id_completion_from_worktrees(self, tmp_path):
-        worktrees_dir = tmp_path / ".scad" / "worktrees"
-        worktrees_dir.mkdir(parents=True)
-        (worktrees_dir / "demo-Feb28-1400").mkdir()
-        (worktrees_dir / "scad-Feb28-0900").mkdir()
+    def test_run_id_completion_from_runs(self, tmp_path):
+        runs_dir = tmp_path / ".scad" / "runs"
+        runs_dir.mkdir(parents=True)
+        (runs_dir / "demo-Feb28-1400").mkdir()
+        (runs_dir / "scad-Feb28-0900").mkdir()
 
         with patch("scad.cli.Path.home", return_value=tmp_path):
             results = _complete_run_ids(None, None, "demo")
@@ -582,7 +582,7 @@ class TestSessionInfo:
             "config": "demo",
             "branch": "scad-Feb28-1400",
             "container": "running",
-            "clones_path": "~/.scad/worktrees/demo-Feb28-1400/",
+            "clones_path": "~/.scad/runs/demo-Feb28-1400/worktrees/",
             "clones": ["demo-code", "demo-docs"],
             "claude_sessions": [{"id": "abc12345", "modified": "2026-02-28 14:00"}],
             "events": [
