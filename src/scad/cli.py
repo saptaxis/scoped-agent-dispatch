@@ -31,6 +31,7 @@ from scad.container import (
     image_exists,
     list_scad_containers,
     log_event,
+    prune_old_images,
     refresh_credentials,
     resolve_branch,
     run_container,
@@ -372,6 +373,13 @@ def build(config_name: str, verbose: bool):
                 elif line.startswith("Step "):
                     click.echo(f"[scad] {line}")
         click.echo(f"[scad] Built: {tag}")
+        # After successful build, prune old images
+        try:
+            client = docker.from_env()
+            new_image = client.images.get(tag)
+            prune_old_images(client, config.name, new_image.id)
+        except Exception:
+            pass  # don't fail build over prune
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)

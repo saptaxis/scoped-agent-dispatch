@@ -369,6 +369,23 @@ def get_image_info(config_name: str) -> Optional[dict]:
         return None
 
 
+def prune_old_images(client, config_name: str, new_image_id: str) -> None:
+    """Remove old scad images for a config after a successful build.
+
+    Silent — never fails the build.
+    """
+    try:
+        images = client.images.list(name=f"scad-{config_name}")
+        for img in images:
+            if img.id != new_image_id:
+                try:
+                    client.images.remove(img.id)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
 def build_image(config: ScadConfig, build_dir: Path):
     """Build a Docker image for the given config. Yields build log lines."""
     tag = f"scad-{config.name}"

@@ -34,6 +34,7 @@ from scad.container import (
     get_session_info,
     get_session_usage,
     get_project_status,
+    prune_old_images,
     refresh_credentials,
     validate_run_id,
     _migrate_worktrees,
@@ -1618,3 +1619,34 @@ class TestGarbageCollection:
 
         gc(force=True)
         assert not dead_dir.exists()
+
+
+class TestImagePrune:
+    """Build auto-removes old image for same config."""
+
+    def test_prune_old_image_after_build(self):
+        """After build, old image for same config is removed."""
+        old_image = MagicMock()
+        old_image.id = "sha256:old"
+        new_image = MagicMock()
+        new_image.id = "sha256:new"
+
+        mock_client = MagicMock()
+        mock_client.images.list.return_value = [old_image, new_image]
+
+        pruned = []
+        mock_client.images.remove = lambda img_id: pruned.append(img_id)
+
+        prune_old_images(mock_client, "demo", "sha256:new")
+        assert pruned == ["sha256:old"]
+
+    def test_prune_noop_when_no_old_images(self):
+        """No error when there's only the new image."""
+        new_image = MagicMock()
+        new_image.id = "sha256:new"
+
+        mock_client = MagicMock()
+        mock_client.images.list.return_value = [new_image]
+
+        prune_old_images(mock_client, "demo", "sha256:new")
+        mock_client.images.remove.assert_not_called()
