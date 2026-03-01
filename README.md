@@ -12,12 +12,12 @@ Define your project once in YAML — repos, data mounts, Python deps — then la
 
 ```bash
 # Interactive — drop into a long-lived Claude session
-scad session start myproject
-scad session attach myproject-Feb28-1400
+scad session start myproject --tag plan22
+scad session attach myproject-plan22-Feb28-1400
 
 # Headless — fire-and-forget with streaming logs
-scad session start myproject --prompt "Execute plan 22"
-scad session logs myproject-Feb28-1400 -sf
+scad session start myproject --tag plan22 --prompt "Execute plan 22"
+scad session logs myproject-plan22-Feb28-1400 -sf
 ```
 
 Each session gets:
@@ -33,26 +33,30 @@ Sessions are long-lived. Work on multiple plans, detach and reattach, exit Claud
 
 ```bash
 # Session — container + Claude lifecycle
-scad session start <config>       # launch session (interactive or --prompt for headless)
-scad session stop <run-id>        # stop container (preserves state)
-scad session attach <run-id>      # attach to tmux session inside container
-scad session clean <run-id>       # remove container + clones + session data (destructive)
-scad session status [--all]       # list sessions (running by default, --all for history)
-scad session logs <run-id>        # read agent output
-scad session info <run-id>        # session dashboard
+scad session start <config> --tag <tag>  # launch session (--tag required, e.g., plan07, bugfix)
+scad session stop <run-id>               # stop container (preserves state)
+scad session attach <run-id>             # attach to tmux session inside container
+scad session clean <run-id>              # remove container + clones + session data (destructive)
+scad session status [--all]              # list sessions (running by default, --all for history)
+scad session logs <run-id>               # read agent output
+scad session info <run-id>               # session dashboard (includes cost if available)
 
 # Code — git state between host and clones
-scad code fetch <run-id>          # snapshot clone branches back to host repos
-scad code sync <run-id>           # pull host repo updates into clones
-scad code refresh <run-id>        # push fresh credentials into running container
+scad code fetch <run-id>                 # snapshot clone branches back to host repos
+scad code sync <run-id>                  # pull host repo updates into clones
+scad code refresh <run-id>               # push fresh credentials into running container
+
+# Project
+scad project status <config>             # cross-session project view with cost
 
 # Infrastructure
-scad build <config>               # build/rebuild Docker image
-scad config list                  # list available configs
-scad config view <name>           # print config YAML
-scad config edit <name>           # open config in $EDITOR
-scad config add <path>            # register external config (symlink)
-scad config remove <name>         # unregister config
+scad build <config>                      # build/rebuild Docker image
+scad config list                         # list available configs
+scad config new <name> [--edit]          # scaffold a new config from template
+scad config view <name>                  # print config YAML
+scad config edit <name>                  # open config in $EDITOR
+scad config add <path>                   # register external config (symlink)
+scad config remove <name>               # unregister config
 ```
 
 ## Prerequisites
@@ -125,8 +129,8 @@ claude:
 
 ```bash
 scad build my-project              # builds Docker image (cached after first run)
-scad session start my-project      # creates clones, starts container
-scad session attach my-project-Feb28  # drops into tmux with Claude running
+scad session start my-project --tag initial  # creates clones, starts container
+scad session attach my-project-initial-Feb28-1400  # drops into tmux with Claude running
 ```
 
 ### 3. Work
@@ -136,20 +140,20 @@ Inside the container, Claude has access to all repos and mounts. Detach with `Ct
 ### 4. Get code back
 
 ```bash
-scad code fetch my-project-Feb28   # fetches clone branches into your host repos
+scad code fetch my-project-initial-Feb28-1400   # fetches clone branches into your host repos
 ```
 
 Then review and merge on the host:
 
 ```bash
-git log main..scad-Feb28-1400 --oneline
-git merge scad-Feb28-1400
+git log main..scad-initial-Feb28-1400 --oneline
+git merge scad-initial-Feb28-1400
 ```
 
 ### 5. Clean up
 
 ```bash
-scad session clean my-project-Feb28  # removes container, clones, session data
+scad session clean my-project-initial-Feb28-1400  # removes container, clones, session data
 ```
 
 ## Config reference
@@ -174,7 +178,7 @@ scad session clean my-project-Feb28  # removes container, clones, session data
 
 1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
 2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/worktrees/<run-id>/`. Mounts into container.
-3. **Branch** — Auto-generates branch name (`scad-MonDD-HHMM`) and checks it out in each clone.
+3. **Branch** — Auto-generates branch name (`scad-{tag}-MonDD-HHMM`) and checks it out in each clone.
 4. **Run** — Starts container detached. Entrypoint launches tmux with Claude (interactive) or streams JSON output (headless).
 5. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Survives stop/restart.
 6. **Fetch** — `scad code fetch` snapshots clone branches back to host source repos.
