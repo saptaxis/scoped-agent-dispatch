@@ -35,3 +35,18 @@ def get_host_timezone() -> str:
         if "zoneinfo/" in target:
             return target.split("zoneinfo/", 1)[1]
     return "UTC"
+
+
+def render_claude_json(config: ScadConfig) -> dict:
+    """Return the .claude.json seed content for a container."""
+    workdir_key = config.workdir_key
+    return {
+        "hasCompletedOnboarding": True,
+        "effortCalloutDismissed": True,
+        "installMethod": "native",
+        "projects": {
+            f"/workspace/{workdir_key}": {
+                "hasTrustDialogAccepted": True,
+            }
+        },
+    }

@@ -58,3 +58,43 @@ class TestGetHostTimezone:
             mock_path_cls.side_effect = lambda arg: mock_missing
 
             assert get_host_timezone() == "UTC"
+
+
+from scad.config import ScadConfig
+
+
+class TestRenderClaudeJson:
+    @pytest.fixture
+    def sample_config(self):
+        return ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+        )
+
+    def test_sets_onboarding_complete(self, sample_config):
+        from scad.claude_config import render_claude_json
+        result = render_claude_json(sample_config)
+        assert result["hasCompletedOnboarding"] is True
+
+    def test_sets_effort_callout_dismissed(self, sample_config):
+        from scad.claude_config import render_claude_json
+        result = render_claude_json(sample_config)
+        assert result["effortCalloutDismissed"] is True
+
+    def test_sets_install_method(self, sample_config):
+        from scad.claude_config import render_claude_json
+        result = render_claude_json(sample_config)
+        assert result["installMethod"] == "native"
+
+    def test_trusts_workdir(self, sample_config):
+        from scad.claude_config import render_claude_json
+        result = render_claude_json(sample_config)
+        projects = result["projects"]
+        assert "/workspace/code" in projects
+        assert projects["/workspace/code"]["hasTrustDialogAccepted"] is True
+
+    def test_no_include_coauthored_by(self, sample_config):
+        """render_claude_json does NOT include the broken includeCoAuthoredBy key."""
+        from scad.claude_config import render_claude_json
+        result = render_claude_json(sample_config)
+        assert "includeCoAuthoredBy" not in result
