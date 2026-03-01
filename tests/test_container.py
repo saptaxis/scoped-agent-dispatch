@@ -669,6 +669,7 @@ class TestRunDirectory:
     def test_run_container_mounts_run_dir(self, mock_docker, tmp_path, monkeypatch):
         """run_container mounts ~/.scad/runs/<run-id>/claude/ as /home/scad/.claude/."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
+        monkeypatch.setattr("scad.claude_config.RUNS_DIR", tmp_path / ".scad" / "runs")
 
         runs_dir = tmp_path / ".scad" / "runs" / "test-run" / "claude"
         runs_dir.mkdir(parents=True)

@@ -188,6 +188,11 @@ def create_clones(
     run_dir = RUNS_DIR / run_id / "claude"
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    # Create persistent claude.json for ~/.claude.json bind mount
+    claude_json = RUNS_DIR / run_id / "claude.json"
+    if not claude_json.exists():
+        claude_json.write_text("{}")
+
     return paths
 
 
@@ -450,41 +455,13 @@ def run_container(
     if gitconfig.exists():
         volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
 
-    # Claude auth — mount to staging path (same pattern as gitconfig)
-    # Direct-mount to final path breaks on credential refresh (/login writes
-    # a new file → new inode → container still sees stale mount).
-    # Entrypoint copies from staging path on startup.
-    claude_creds = Path.home() / ".claude" / ".credentials.json"
-    if claude_creds.exists():
-        volumes[str(claude_creds)] = {
-            "bind": "/mnt/host-claude-credentials.json",
-            "mode": "ro",
-        }
-
-    # Persistent run directory — Claude session data
-    run_claude_dir = RUNS_DIR / run_id / "claude"
-    if run_claude_dir.exists():
-        volumes[str(run_claude_dir)] = {"bind": "/home/scad/.claude", "mode": "rw"}
-
-    # CLAUDE.md — global instructions for Claude Code
-    if config.claude.claude_md is False:
-        pass  # explicitly disabled
-    elif config.claude.claude_md is not None:
-        # Custom path specified
-        claude_md_path = Path(config.claude.claude_md).expanduser().resolve()
-        if claude_md_path.exists():
-            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
-    else:
-        # Auto-detect ~/CLAUDE.md
-        claude_md_path = Path.home() / "CLAUDE.md"
-        if claude_md_path.exists():
-            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+    # Claude-related mounts (credentials, claude dir, claude.json, CLAUDE.md, localtime)
+    from scad.claude_config import get_volume_mounts, get_host_timezone
+    volumes.update(get_volume_mounts(config, run_id))
 
     # Environment variables
     # Pass host timezone so git commits, logs, and branch names match host time
-    import time as _time
-    tz = _time.tzname[0] if _time.daylight == 0 else _time.tzname[_time.daylight]
-    environment = {"RUN_ID": run_id, "TZ": tz}
+    environment = {"RUN_ID": run_id, "TZ": get_host_timezone()}
     if prompt:
         environment["AGENT_PROMPT"] = prompt
 
