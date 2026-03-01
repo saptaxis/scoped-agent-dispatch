@@ -7,7 +7,7 @@ from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import docker
-from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions, get_project_status
+from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions, get_project_status, get_session_usage
 
 
 @pytest.fixture
@@ -606,9 +606,9 @@ class TestSessionInfo:
         assert "abc12345" in result.output
 
     @patch("scad.cli.validate_run_id")
-    @patch("scad.cli.get_session_cost")
+    @patch("scad.cli.get_session_usage")
     @patch("scad.cli.get_session_info")
-    def test_info_shows_cost(self, mock_info, mock_cost, mock_validate, runner):
+    def test_info_shows_cost_when_nonzero(self, mock_info, mock_usage, mock_validate, runner):
         mock_info.return_value = {
             "run_id": "demo-Feb28-1400",
             "config": "demo",
@@ -619,7 +619,7 @@ class TestSessionInfo:
             "claude_sessions": [],
             "events": [],
         }
-        mock_cost.return_value = {
+        mock_usage.return_value = {
             "total_cost": 2.34,
             "total_input_tokens": 12450,
             "total_output_tokens": 8200,
@@ -628,6 +628,8 @@ class TestSessionInfo:
         result = runner.invoke(main, ["session", "info", "demo-Feb28-1400"])
         assert result.exit_code == 0
         assert "$2.34" in result.output
+        assert "12,450 input" in result.output
+        assert "Usage:" in result.output
 
     @patch("scad.cli.get_session_info")
     def test_info_not_found(self, mock_info, runner):
@@ -756,16 +758,38 @@ class TestProjectStatus:
             "total_cost": 3.84,
             "sessions": [
                 {"run_id": "demo-plan07-Mar01-1400", "branch": "scad-plan07-Mar01-1400",
-                 "started": "2026-03-01T14:00", "container": "running", "cost": 2.34},
+                 "started": "2026-03-01T14:00", "container": "running", "cost": 2.34,
+                 "usage": None},
                 {"run_id": "demo-bugfix-Mar01-0900", "branch": "scad-bugfix-Mar01-0900",
-                 "started": "2026-03-01T09:00", "container": "stopped", "cost": 1.50},
+                 "started": "2026-03-01T09:00", "container": "stopped", "cost": 1.50,
+                 "usage": None},
             ],
         }
-        result = runner.invoke(main, ["project", "status", "demo"])
+        result = runner.invoke(main, ["project", "status", "demo", "--cost"])
         assert result.exit_code == 0
         assert "demo" in result.output
         assert "2 " in result.output  # total sessions
         assert "$3.84" in result.output
+
+    @patch("scad.cli.get_project_status")
+    def test_no_cost_by_default(self, mock_status, runner):
+        mock_status.return_value = {
+            "config": "demo",
+            "total_sessions": 1,
+            "running": 0,
+            "stopped": 1,
+            "cleaned": 0,
+            "last_active": "2026-03-01T14:00",
+            "total_cost": 0,
+            "sessions": [
+                {"run_id": "demo-test", "config": "demo", "branch": "b",
+                 "started": "2026-03-01T14:00", "container": "stopped", "cost": 0,
+                 "usage": None},
+            ],
+        }
+        result = runner.invoke(main, ["project", "status", "demo"])
+        assert result.exit_code == 0
+        assert "$" not in result.output  # no cost column without --cost flag
 
 
 class TestRunIdValidation:
@@ -869,4 +893,40 @@ class TestGcCommand:
     def test_gc_force(self, runner, monkeypatch):
         monkeypatch.setattr("scad.cli.gc", lambda force: {"orphaned_containers": [], "dead_run_dirs": [], "unused_images": []})
         result = runner.invoke(main, ["gc", "--force"])
+        assert result.exit_code == 0
+
+
+class TestUsageDisplay:
+    """session info shows tokens, project status has --cost opt-in."""
+
+    def test_session_info_shows_tokens(self, runner, monkeypatch):
+        info = {
+            "run_id": "demo-test-Mar01-1400", "config": "demo",
+            "branch": "scad-demo-test-Mar01-1400", "container": "running",
+            "events": [], "clones": [], "claude_sessions": [],
+            "clones_path": None,
+        }
+        usage = {"total_input_tokens": 5000, "total_output_tokens": 3000,
+                 "total_turns": 10, "total_cost": 0}
+        monkeypatch.setattr("scad.cli.get_session_info", lambda rid: info)
+        monkeypatch.setattr("scad.cli.get_session_usage", lambda rid: usage)
+        monkeypatch.setattr("scad.cli.validate_run_id", lambda rid: None)
+
+        result = runner.invoke(main, ["session", "info", "demo-test-Mar01-1400"])
+        assert "5,000 input" in result.output or "5000 input" in result.output
+        assert "$" not in result.output  # no cost when 0
+
+    def test_project_status_no_cost_by_default(self, runner, monkeypatch):
+        status = {
+            "config": "demo", "total_sessions": 1, "running": 0,
+            "stopped": 1, "cleaned": 0, "last_active": "2026-03-01T14:00",
+            "total_cost": 0, "sessions": [
+                {"run_id": "demo-test", "config": "demo", "branch": "b",
+                 "started": "2026-03-01T14:00", "container": "stopped", "cost": 0,
+                 "usage": None}
+            ],
+        }
+        monkeypatch.setattr("scad.cli.get_project_status", lambda name, **kw: status)
+
+        result = runner.invoke(main, ["project", "status", "demo"])
         assert result.exit_code == 0

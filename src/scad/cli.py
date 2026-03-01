@@ -26,7 +26,7 @@ from scad.container import (
     get_all_sessions,
     get_image_info,
     get_project_status,
-    get_session_cost,
+    get_session_usage,
     get_session_info,
     image_exists,
     list_scad_containers,
@@ -102,9 +102,10 @@ def project():
 
 @project.command("status")
 @click.argument("config_name", shell_complete=_complete_config_names)
-def project_status(config_name: str):
+@click.option("--cost", is_flag=True, help="Include cost data (slow — runs ccusage).")
+def project_status(config_name: str, cost: bool):
     """Show cross-session project overview."""
-    status = get_project_status(config_name)
+    status = get_project_status(config_name, include_cost=cost)
 
     if status["total_sessions"] == 0:
         click.echo(f"[scad] No sessions found for config: {config_name}")
@@ -123,20 +124,30 @@ def project_status(config_name: str):
     click.echo(f"Project:     {status['config']}")
     click.echo(f"Sessions:    {status['total_sessions']} ({status_str})")
     click.echo(f"Last active: {_relative_time(status['last_active'])}")
-    if status["total_cost"] > 0:
+    if cost and status["total_cost"] > 0:
         click.echo(f"Total cost:  ${status['total_cost']:.2f}")
 
     # Session table
     click.echo()
-    click.echo(
-        f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS':<10} {'COST'}"
-    )
-    for s in status["sessions"]:
-        started = _relative_time(s["started"])
-        cost = f"${s['cost']:.2f}" if s["cost"] > 0 else "-"
+    if cost:
         click.echo(
-            f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']:<10} {cost}"
+            f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS':<10} {'COST'}"
         )
+        for s in status["sessions"]:
+            started = _relative_time(s["started"])
+            cost_str = f"${s['cost']:.2f}" if s["cost"] > 0 else "-"
+            click.echo(
+                f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']:<10} {cost_str}"
+            )
+    else:
+        click.echo(
+            f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS'}"
+        )
+        for s in status["sessions"]:
+            started = _relative_time(s["started"])
+            click.echo(
+                f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']}"
+            )
 
 
 def run_agent(
@@ -443,15 +454,18 @@ def session_info(run_id: str):
     else:
         click.echo("Events: (none)")
 
-    # Cost (optional — may not be available)
-    cost = get_session_cost(run_id)
-    if cost:
-        total = cost.get("total_cost", 0)
-        inp = cost.get("total_input_tokens", 0)
-        out = cost.get("total_output_tokens", 0)
-        turns = cost.get("total_turns", 0)
+    # Usage (tokens primary, cost only if > 0)
+    usage = get_session_usage(run_id)
+    if usage:
+        inp = usage.get("total_input_tokens", 0)
+        out = usage.get("total_output_tokens", 0)
+        turns = usage.get("total_turns", 0)
+        cost = usage.get("total_cost", 0)
+        usage_str = f"{inp:,} input / {out:,} output tokens, {turns} turns"
+        if cost > 0:
+            usage_str += f" (${cost:.2f})"
         click.echo()
-        click.echo(f"Cost:        ${total:.2f} ({inp:,} input / {out:,} output tokens, {turns} turns)")
+        click.echo(f"Usage:       {usage_str}")
 
 
 @session.command("logs")

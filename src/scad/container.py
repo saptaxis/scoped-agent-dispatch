@@ -718,11 +718,11 @@ def get_session_info(run_id: str) -> dict:
     return info
 
 
-def get_session_cost(run_id: str) -> Optional[dict]:
-    """Get session cost via ccusage or stream-json fallback.
+def get_session_usage(run_id: str) -> Optional[dict]:
+    """Get session usage (tokens, turns, and optionally cost).
 
-    Returns dict with total_cost, total_input_tokens, total_output_tokens, total_turns.
-    Returns None if cost data unavailable.
+    Returns dict with total_input_tokens, total_output_tokens, total_turns, total_cost.
+    total_cost may be 0 for subscription users. Returns None if no data available.
     """
     claude_dir = RUNS_DIR / run_id / "claude"
 
@@ -761,7 +761,7 @@ def get_session_cost(run_id: str) -> Optional[dict]:
     return None
 
 
-def get_project_status(config_name: str) -> dict:
+def get_project_status(config_name: str, include_cost: bool = False) -> dict:
     """Aggregate status across all sessions for a config."""
     all_sessions = get_all_sessions()
     sessions = [s for s in all_sessions if s["config"] == config_name]
@@ -769,8 +769,8 @@ def get_project_status(config_name: str) -> dict:
     total_cost = 0.0
     enriched = []
     for s in sessions:
-        cost_data = get_session_cost(s["run_id"])
-        cost = cost_data["total_cost"] if cost_data else 0.0
+        usage = get_session_usage(s["run_id"]) if include_cost else None
+        cost = usage["total_cost"] if usage else 0.0
         total_cost += cost
         enriched.append({
             "run_id": s["run_id"],
@@ -779,6 +779,7 @@ def get_project_status(config_name: str) -> dict:
             "started": s["started"],
             "container": s["container"],
             "cost": cost,
+            "usage": usage,
         })
 
     running = sum(1 for s in sessions if s["container"] == "running")

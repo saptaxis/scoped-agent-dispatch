@@ -32,7 +32,7 @@ from scad.container import (
     gc,
     get_all_sessions,
     get_session_info,
-    get_session_cost,
+    get_session_usage,
     get_project_status,
     refresh_credentials,
     validate_run_id,
@@ -1253,9 +1253,9 @@ class TestRunContainerTelemetry:
         assert env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] == "1"
 
 
-class TestGetSessionCost:
-    def test_returns_cost_from_ccusage(self, tmp_path, monkeypatch):
-        """get_session_cost parses ccusage JSON output."""
+class TestGetSessionUsage:
+    def test_returns_usage_from_ccusage(self, tmp_path, monkeypatch):
+        """get_session_usage parses ccusage JSON output."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         run_dir = tmp_path / "runs" / "test-run" / "claude"
         run_dir.mkdir(parents=True)
@@ -1272,26 +1272,26 @@ class TestGetSessionCost:
                 returncode=0,
                 stdout=ccusage_output,
             )
-            cost = get_session_cost("test-run")
+            usage = get_session_usage("test-run")
 
-        assert cost is not None
-        assert cost["total_cost"] == 2.34
-        assert cost["total_input_tokens"] == 12450
+        assert usage is not None
+        assert usage["total_cost"] == 2.34
+        assert usage["total_input_tokens"] == 12450
 
     def test_returns_none_on_failure(self, tmp_path, monkeypatch):
-        """get_session_cost returns None if ccusage fails."""
+        """get_session_usage returns None if ccusage fails."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         run_dir = tmp_path / "runs" / "test-run" / "claude"
         run_dir.mkdir(parents=True)
 
         with patch("scad.container.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("npx not found")
-            cost = get_session_cost("test-run")
+            usage = get_session_usage("test-run")
 
-        assert cost is None
+        assert usage is None
 
     def test_fallback_to_stream_json(self, tmp_path, monkeypatch):
-        """get_session_cost falls back to stream-json final record."""
+        """get_session_usage falls back to stream-json final record."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr("scad.container.SCAD_DIR", tmp_path)
         run_dir = tmp_path / "runs" / "test-run" / "claude"
@@ -1308,16 +1308,42 @@ class TestGetSessionCost:
 
         with patch("scad.container.subprocess.run") as mock_run:
             mock_run.side_effect = FileNotFoundError("npx not found")
-            cost = get_session_cost("test-run")
+            usage = get_session_usage("test-run")
 
-        assert cost is not None
-        assert cost["total_cost"] == 1.50
+        assert usage is not None
+        assert usage["total_cost"] == 1.50
+
+    def test_returns_tokens_without_cost(self, tmp_path, monkeypatch):
+        """Stream-json fallback returns tokens even with zero cost."""
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        scad_dir = tmp_path / "scad"
+        monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
+
+        logs_dir = scad_dir / "logs"
+        logs_dir.mkdir(parents=True)
+        stream_log = logs_dir / "test-run.stream.jsonl"
+        stream_log.write_text('{"cost_usd": 0, "input_tokens": 5000, "output_tokens": 3000, "num_turns": 10}\n')
+
+        # Make ccusage fail
+        monkeypatch.setattr("scad.container.subprocess.run",
+            MagicMock(side_effect=FileNotFoundError))
+
+        result = get_session_usage("test-run")
+        assert result is not None
+        assert result["total_input_tokens"] == 5000
+        assert result["total_output_tokens"] == 3000
+        assert result["total_turns"] == 10
+
+    def test_old_function_name_removed(self):
+        """get_session_cost should not exist after rename."""
+        import scad.container
+        assert not hasattr(scad.container, "get_session_cost")
 
 
 class TestGetProjectStatus:
     @patch("scad.container.get_all_sessions")
-    @patch("scad.container.get_session_cost")
-    def test_filters_by_config(self, mock_cost, mock_sessions):
+    def test_filters_by_config(self, mock_sessions):
         """get_project_status returns only sessions matching config name."""
         mock_sessions.return_value = [
             {"run_id": "demo-plan07-Mar01-1400", "config": "demo", "branch": "scad-plan07-Mar01-1400",
@@ -1327,7 +1353,6 @@ class TestGetProjectStatus:
             {"run_id": "demo-bugfix-Feb28-0900", "config": "demo", "branch": "scad-bugfix-Feb28-0900",
              "started": "2026-02-28T09:00", "container": "cleaned", "clones": "-"},
         ]
-        mock_cost.return_value = None
 
         status = get_project_status("demo")
         assert status["config"] == "demo"
@@ -1336,22 +1361,34 @@ class TestGetProjectStatus:
         assert all(s["config"] == "demo" for s in status["sessions"])
 
     @patch("scad.container.get_all_sessions")
-    @patch("scad.container.get_session_cost")
-    def test_aggregates_cost(self, mock_cost, mock_sessions):
-        """get_project_status sums cost across sessions."""
+    @patch("scad.container.get_session_usage")
+    def test_aggregates_cost_with_flag(self, mock_usage, mock_sessions):
+        """get_project_status sums cost across sessions when include_cost=True."""
         mock_sessions.return_value = [
             {"run_id": "demo-a-Mar01-1400", "config": "demo", "branch": "b1",
              "started": "2026-03-01T14:00", "container": "running", "clones": "yes"},
             {"run_id": "demo-b-Mar01-0900", "config": "demo", "branch": "b2",
              "started": "2026-03-01T09:00", "container": "stopped", "clones": "yes"},
         ]
-        mock_cost.side_effect = [
+        mock_usage.side_effect = [
             {"total_cost": 2.34, "total_input_tokens": 1000, "total_output_tokens": 500, "total_turns": 10},
             {"total_cost": 1.50, "total_input_tokens": 800, "total_output_tokens": 400, "total_turns": 8},
         ]
 
-        status = get_project_status("demo")
+        status = get_project_status("demo", include_cost=True)
         assert abs(status["total_cost"] - 3.84) < 0.01
+
+    @patch("scad.container.get_all_sessions")
+    def test_no_cost_without_flag(self, mock_sessions):
+        """get_project_status does not call get_session_usage without include_cost."""
+        mock_sessions.return_value = [
+            {"run_id": "demo-a-Mar01-1400", "config": "demo", "branch": "b1",
+             "started": "2026-03-01T14:00", "container": "running", "clones": "yes"},
+        ]
+
+        status = get_project_status("demo")
+        assert status["total_cost"] == 0.0
+        assert status["sessions"][0]["usage"] is None
 
 
 class TestConsolidatedPaths:
