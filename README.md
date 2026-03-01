@@ -1,6 +1,6 @@
 # scad — scoped agent dispatch
 
-Config-driven CLI for launching Claude Code sessions in isolated Docker containers.
+Config-driven CLI for launching Claude Code agents in isolated Docker containers. Define your project once in YAML, then build, dispatch, monitor, and fetch code back — all from the host.
 
 ## The problem
 
@@ -8,16 +8,16 @@ Running Claude Code on your working tree means it touches your files, your branc
 
 ## What this does
 
-Define your project once in YAML — repos, data mounts, Python deps — then launch isolated sessions:
+`scad` manages the full lifecycle: **config** your project, **build** a Docker image, start a **session** (interactive or headless), manage **code** flow between host and container, and **clean up** when done.
 
 ```bash
-# Interactive — drop into a long-lived Claude session
-scad session start myproject --tag plan22
-scad session attach myproject-plan22-Feb28-1400
-
-# Headless — fire-and-forget with streaming logs
-scad session start myproject --tag plan22 --prompt "Execute plan 22"
-scad session logs myproject-plan22-Feb28-1400 -sf
+scad config new myproject --edit          # scaffold and edit a config
+scad build myproject                      # build Docker image
+scad session start myproject --tag feat1  # launch isolated Claude session
+scad session attach myproject-feat1-Mar02-1400  # drop into tmux
+# ... work, detach (Ctrl+b d), reattach anytime ...
+scad code fetch myproject-feat1-Mar02-1400      # fetch branches back to host
+scad session clean myproject-feat1-Mar02-1400   # tear down when done
 ```
 
 Each session gets:
@@ -26,10 +26,12 @@ Each session gets:
 - **Shared data mounts** for experiment I/O
 - **Full `--dangerously-skip-permissions`** since it's isolated
 - **Persistent Claude session data** across stop/restart
+- **Pre-configured plugins** active from the first prompt
+- **Host timezone** inherited (git commits match your clock)
 
-Sessions are long-lived. Work on multiple plans, detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
+Sessions are long-lived. Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
 
-`scad session status` shows credential expiry warnings when your Claude auth is nearing expiration or has expired.
+Operational visibility: `scad session status` shows running sessions with credential expiry warnings, `scad session info` shows token usage and Claude session history, `scad project status` aggregates across sessions, and `scad gc` cleans orphaned state.
 
 ## CLI
 
@@ -107,7 +109,11 @@ Completes commands, subcommands, run IDs, and config names.
 
 ### 1. Create a config
 
-Configs live in `~/.scad/configs/<name>.yml`:
+```bash
+scad config new my-project --edit   # scaffolds ~/.scad/configs/my-project.yml and opens in $EDITOR
+```
+
+Or write one directly. Configs can also live in your project repo and be registered with `scad config add <path>`:
 
 ```yaml
 name: my-project
@@ -129,16 +135,14 @@ python:
 
 claude:
   dangerously_skip_permissions: true
-  plugins:
-    - superpowers
 ```
 
 ### 2. Build and run
 
 ```bash
-scad build my-project              # builds Docker image (cached after first run)
-scad session start my-project --tag initial  # creates clones, starts container
-scad session attach my-project-initial-Feb28-1400  # drops into tmux with Claude
+scad build my-project                       # builds Docker image (cached after first run)
+scad session start my-project --tag initial # creates clones, starts container
+scad session attach my-project-initial-Mar02-1400  # drops into tmux with Claude
 ```
 
 ### 3. Work
@@ -148,20 +152,20 @@ Inside the container, Claude has access to all repos and mounts. Detach with `Ct
 ### 4. Get code back
 
 ```bash
-scad code fetch my-project-initial-Feb28-1400   # fetches clone branches into your host repos
+scad code fetch my-project-initial-Mar02-1400   # fetches clone branches into your host repos
 ```
 
 Then review and merge on the host:
 
 ```bash
-git log main..scad-my-project-initial-Feb28-1400 --oneline
-git merge scad-my-project-initial-Feb28-1400
+git log main..scad-my-project-initial-Mar02-1400 --oneline
+git merge scad-my-project-initial-Mar02-1400
 ```
 
 ### 5. Clean up
 
 ```bash
-scad session clean my-project-initial-Feb28-1400  # removes container, clones, session data
+scad session clean my-project-initial-Mar02-1400  # removes container, clones, session data
 ```
 
 ## Config reference
