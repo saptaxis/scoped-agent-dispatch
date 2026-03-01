@@ -6,7 +6,7 @@ from click.testing import CliRunner
 from unittest.mock import patch, MagicMock
 
 import docker
-from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions
+from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions, get_project_status
 
 
 @pytest.fixture
@@ -732,3 +732,28 @@ class TestConfigNew:
         assert result.exit_code == 0
         mock_run.assert_called_once()
         assert "nano" in mock_run.call_args[0][0]
+
+
+class TestProjectStatus:
+    @patch("scad.cli.get_project_status")
+    def test_shows_project_overview(self, mock_status, runner):
+        mock_status.return_value = {
+            "config": "demo",
+            "total_sessions": 2,
+            "running": 1,
+            "stopped": 1,
+            "cleaned": 0,
+            "last_active": "2026-03-01T14:00",
+            "total_cost": 3.84,
+            "sessions": [
+                {"run_id": "demo-plan07-Mar01-1400", "branch": "scad-plan07-Mar01-1400",
+                 "started": "2026-03-01T14:00", "container": "running", "cost": 2.34},
+                {"run_id": "demo-bugfix-Mar01-0900", "branch": "scad-bugfix-Mar01-0900",
+                 "started": "2026-03-01T09:00", "container": "stopped", "cost": 1.50},
+            ],
+        }
+        result = runner.invoke(main, ["project", "status", "demo"])
+        assert result.exit_code == 0
+        assert "demo" in result.output
+        assert "2 " in result.output  # total sessions
+        assert "$3.84" in result.output

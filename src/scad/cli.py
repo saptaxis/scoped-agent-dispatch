@@ -24,6 +24,7 @@ from scad.container import (
     generate_run_id,
     get_all_sessions,
     get_image_info,
+    get_project_status,
     get_session_cost,
     get_session_info,
     image_exists,
@@ -89,6 +90,51 @@ def session():
 def code():
     """Git state between host and clones."""
     pass
+
+
+@main.group()
+def project():
+    """Project-level views."""
+    pass
+
+
+@project.command("status")
+@click.argument("config_name", shell_complete=_complete_config_names)
+def project_status(config_name: str):
+    """Show cross-session project overview."""
+    status = get_project_status(config_name)
+
+    if status["total_sessions"] == 0:
+        click.echo(f"[scad] No sessions found for config: {config_name}")
+        return
+
+    # Summary
+    parts = []
+    if status["running"]:
+        parts.append(f"{status['running']} running")
+    if status["stopped"]:
+        parts.append(f"{status['stopped']} stopped")
+    if status["cleaned"]:
+        parts.append(f"{status['cleaned']} cleaned")
+    status_str = ", ".join(parts) if parts else "none"
+
+    click.echo(f"Project:     {status['config']}")
+    click.echo(f"Sessions:    {status['total_sessions']} ({status_str})")
+    click.echo(f"Last active: {_relative_time(status['last_active'])}")
+    if status["total_cost"] > 0:
+        click.echo(f"Total cost:  ${status['total_cost']:.2f}")
+
+    # Session table
+    click.echo()
+    click.echo(
+        f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS':<10} {'COST'}"
+    )
+    for s in status["sessions"]:
+        started = _relative_time(s["started"])
+        cost = f"${s['cost']:.2f}" if s["cost"] > 0 else "-"
+        click.echo(
+            f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']:<10} {cost}"
+        )
 
 
 def run_agent(

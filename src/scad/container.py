@@ -717,6 +717,43 @@ def get_session_cost(run_id: str) -> Optional[dict]:
     return None
 
 
+def get_project_status(config_name: str) -> dict:
+    """Aggregate status across all sessions for a config."""
+    all_sessions = get_all_sessions()
+    sessions = [s for s in all_sessions if s["config"] == config_name]
+
+    total_cost = 0.0
+    enriched = []
+    for s in sessions:
+        cost_data = get_session_cost(s["run_id"])
+        cost = cost_data["total_cost"] if cost_data else 0.0
+        total_cost += cost
+        enriched.append({
+            "run_id": s["run_id"],
+            "config": s["config"],
+            "branch": s["branch"],
+            "started": s["started"],
+            "container": s["container"],
+            "cost": cost,
+        })
+
+    running = sum(1 for s in sessions if s["container"] == "running")
+    stopped = sum(1 for s in sessions if s["container"] == "stopped")
+    cleaned = sum(1 for s in sessions if s["container"] == "cleaned")
+    last_active = sessions[0]["started"] if sessions else ""
+
+    return {
+        "config": config_name,
+        "total_sessions": len(sessions),
+        "running": running,
+        "stopped": stopped,
+        "cleaned": cleaned,
+        "last_active": last_active,
+        "total_cost": total_cost,
+        "sessions": enriched,
+    }
+
+
 def refresh_credentials(run_id: str) -> float:
     """Push fresh credentials into a running container.
 

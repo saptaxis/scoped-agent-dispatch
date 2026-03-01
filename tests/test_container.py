@@ -32,6 +32,7 @@ from scad.container import (
     get_all_sessions,
     get_session_info,
     get_session_cost,
+    get_project_status,
     refresh_credentials,
 )
 
@@ -1318,3 +1319,43 @@ class TestGetSessionCost:
 
         assert cost is not None
         assert cost["total_cost"] == 1.50
+
+
+class TestGetProjectStatus:
+    @patch("scad.container.get_all_sessions")
+    @patch("scad.container.get_session_cost")
+    def test_filters_by_config(self, mock_cost, mock_sessions):
+        """get_project_status returns only sessions matching config name."""
+        mock_sessions.return_value = [
+            {"run_id": "demo-plan07-Mar01-1400", "config": "demo", "branch": "scad-plan07-Mar01-1400",
+             "started": "2026-03-01T14:00", "container": "running", "clones": "yes"},
+            {"run_id": "other-Mar01-1200", "config": "other", "branch": "scad-Mar01-1200",
+             "started": "2026-03-01T12:00", "container": "stopped", "clones": "yes"},
+            {"run_id": "demo-bugfix-Feb28-0900", "config": "demo", "branch": "scad-bugfix-Feb28-0900",
+             "started": "2026-02-28T09:00", "container": "cleaned", "clones": "-"},
+        ]
+        mock_cost.return_value = None
+
+        status = get_project_status("demo")
+        assert status["config"] == "demo"
+        assert status["total_sessions"] == 2
+        assert len(status["sessions"]) == 2
+        assert all(s["config"] == "demo" for s in status["sessions"])
+
+    @patch("scad.container.get_all_sessions")
+    @patch("scad.container.get_session_cost")
+    def test_aggregates_cost(self, mock_cost, mock_sessions):
+        """get_project_status sums cost across sessions."""
+        mock_sessions.return_value = [
+            {"run_id": "demo-a-Mar01-1400", "config": "demo", "branch": "b1",
+             "started": "2026-03-01T14:00", "container": "running", "clones": "yes"},
+            {"run_id": "demo-b-Mar01-0900", "config": "demo", "branch": "b2",
+             "started": "2026-03-01T09:00", "container": "stopped", "clones": "yes"},
+        ]
+        mock_cost.side_effect = [
+            {"total_cost": 2.34, "total_input_tokens": 1000, "total_output_tokens": 500, "total_turns": 10},
+            {"total_cost": 1.50, "total_input_tokens": 800, "total_output_tokens": 400, "total_turns": 8},
+        ]
+
+        status = get_project_status("demo")
+        assert abs(status["total_cost"] - 3.84) < 0.01
