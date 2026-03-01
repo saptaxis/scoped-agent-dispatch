@@ -21,6 +21,7 @@ from scad.container import (
     config_name_for_run,
     create_clones,
     fetch_to_host,
+    gc,
     generate_run_id,
     get_all_sessions,
     get_image_info,
@@ -487,16 +488,43 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
 
 
 @session.command("stop")
-@click.argument("run_id", shell_complete=_complete_run_ids)
-def session_stop(run_id: str):
-    """Stop a running agent."""
-    validate_run_id(run_id)
-    if stop_container(run_id):
-        log_event(run_id, "stop")
-        click.echo(f"[scad] Stopped: {run_id}")
+@click.argument("run_id", required=False, shell_complete=_complete_run_ids)
+@click.option("--all", "stop_all", is_flag=True, help="Stop all running sessions.")
+@click.option("--config", "config_name", help="Stop all sessions for this config.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+def session_stop(run_id, stop_all, config_name, yes):
+    """Stop a running session."""
+    if run_id and (stop_all or config_name):
+        raise click.ClickException("Cannot use run_id with --all or --config.")
+    if not run_id and not stop_all and not config_name:
+        raise click.ClickException("Provide a run_id, --all, or --config.")
+
+    if run_id:
+        validate_run_id(run_id)
+        if stop_container(run_id):
+            log_event(run_id, "stop")
+            click.echo(f"[scad] Stopped: {run_id}")
+        else:
+            click.echo(f"[scad] No running container found for {run_id}", err=True)
+            sys.exit(1)
     else:
-        click.echo(f"[scad] No running container found for {run_id}", err=True)
-        sys.exit(1)
+        sessions = get_all_sessions()
+        targets = [s for s in sessions if s["container"] == "running"]
+        if config_name:
+            targets = [s for s in targets if s["config"] == config_name]
+        if not targets:
+            click.echo("[scad] No running sessions to stop.")
+            return
+        if not yes:
+            click.echo(f"[scad] Will stop {len(targets)} session(s):")
+            for t in targets:
+                click.echo(f"  {t['run_id']}")
+            if not click.confirm("Proceed?"):
+                return
+        for t in targets:
+            stop_container(t["run_id"])
+            log_event(t["run_id"], "stop")
+            click.echo(f"[scad] Stopped: {t['run_id']}")
 
 
 @session.command("attach")
@@ -536,12 +564,40 @@ def session_attach(run_id: str):
 
 
 @session.command("clean")
-@click.argument("run_id", shell_complete=_complete_run_ids)
-def session_clean(run_id: str):
+@click.argument("run_id", required=False, shell_complete=_complete_run_ids)
+@click.option("--all", "clean_all", is_flag=True, help="Clean all sessions.")
+@click.option("--config", "config_name", help="Clean all sessions for this config.")
+@click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
+@click.option("--force", is_flag=True, help="Include running sessions (dangerous).")
+def session_clean(run_id, clean_all, config_name, yes, force):
     """Remove container, clones, and run data for a completed run."""
-    validate_run_id(run_id)
-    clean_run(run_id)
-    click.echo(f"[scad] Cleaned: {run_id}")
+    if run_id and (clean_all or config_name):
+        raise click.ClickException("Cannot use run_id with --all or --config.")
+    if not run_id and not clean_all and not config_name:
+        raise click.ClickException("Provide a run_id, --all, or --config.")
+
+    if run_id:
+        validate_run_id(run_id)
+        clean_run(run_id)
+        click.echo(f"[scad] Cleaned: {run_id}")
+    else:
+        sessions = get_all_sessions()
+        if config_name:
+            sessions = [s for s in sessions if s["config"] == config_name]
+        if not force:
+            sessions = [s for s in sessions if s["container"] != "running"]
+        if not sessions:
+            click.echo("[scad] No sessions to clean.")
+            return
+        if not yes:
+            click.echo(f"[scad] Will clean {len(sessions)} session(s):")
+            for s in sessions:
+                click.echo(f"  {s['run_id']} ({s['container']})")
+            if not click.confirm("Proceed?"):
+                return
+        for s in sessions:
+            clean_run(s["run_id"])
+            click.echo(f"[scad] Cleaned: {s['run_id']}")
 
 
 def _config_for_run(run_id: str) -> "ScadConfig":
@@ -601,3 +657,35 @@ def code_refresh(run_id: str):
     except click.ClickException as e:
         click.echo(f"[scad] {e.message}", err=True)
         sys.exit(1)
+
+
+@main.command("gc")
+@click.option("--force", is_flag=True, help="Actually clean (default is dry-run).")
+def gc_cmd(force: bool):
+    """Find and clean orphaned containers, run dirs, and images."""
+    findings = gc(force=force)
+
+    mode = "Cleaning" if force else "Garbage collection (dry run)"
+    click.echo(f"[scad] {mode}")
+
+    containers = findings["orphaned_containers"]
+    dirs = findings["dead_run_dirs"]
+    images = findings["unused_images"]
+
+    if containers:
+        click.echo(f"  Orphaned containers: {len(containers)}")
+        for c in containers:
+            click.echo(f"    {c['name']} ({c['status']})")
+    if dirs:
+        click.echo(f"  Dead run dirs: {len(dirs)}")
+        for d in dirs:
+            click.echo(f"    {d}")
+    if images:
+        click.echo(f"  Unused images: {len(images)}")
+        for img in images:
+            click.echo(f"    {', '.join(img['tags'])} ({img['id']})")
+
+    if not containers and not dirs and not images:
+        click.echo("  Nothing to clean.")
+    elif not force:
+        click.echo("\nRun with --force to clean up.")

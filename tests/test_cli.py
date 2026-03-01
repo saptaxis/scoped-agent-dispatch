@@ -784,3 +784,89 @@ class TestRunIdValidation:
         result = runner.invoke(main, ["session", "stop", "fake-run-id"])
         assert result.exit_code != 0
         assert "No session found" in result.output
+
+
+class TestBulkOperations:
+    """--all and --config flags for stop and clean."""
+
+    def test_clean_all(self, runner, monkeypatch):
+        sessions = [
+            {"run_id": "demo-a-Mar01-1400", "config": "demo", "container": "stopped"},
+            {"run_id": "demo-b-Mar01-1500", "config": "demo", "container": "stopped"},
+        ]
+        monkeypatch.setattr("scad.cli.get_all_sessions", lambda: sessions)
+        cleaned = []
+        monkeypatch.setattr("scad.cli.clean_run", lambda rid: cleaned.append(rid))
+        monkeypatch.setattr("scad.cli.validate_run_id", lambda rid: None)
+
+        result = runner.invoke(main, ["session", "clean", "--all", "--yes"])
+        assert result.exit_code == 0
+        assert len(cleaned) == 2
+
+    def test_clean_by_config(self, runner, monkeypatch):
+        sessions = [
+            {"run_id": "demo-a-Mar01-1400", "config": "demo", "container": "stopped"},
+            {"run_id": "scad-b-Mar01-1500", "config": "scad", "container": "stopped"},
+        ]
+        monkeypatch.setattr("scad.cli.get_all_sessions", lambda: sessions)
+        cleaned = []
+        monkeypatch.setattr("scad.cli.clean_run", lambda rid: cleaned.append(rid))
+        monkeypatch.setattr("scad.cli.validate_run_id", lambda rid: None)
+
+        result = runner.invoke(main, ["session", "clean", "--config", "demo", "--yes"])
+        assert result.exit_code == 0
+        assert cleaned == ["demo-a-Mar01-1400"]
+
+    def test_clean_all_skips_running_without_force(self, runner, monkeypatch):
+        sessions = [
+            {"run_id": "demo-a-Mar01-1400", "config": "demo", "container": "running"},
+        ]
+        monkeypatch.setattr("scad.cli.get_all_sessions", lambda: sessions)
+        cleaned = []
+        monkeypatch.setattr("scad.cli.clean_run", lambda rid: cleaned.append(rid))
+
+        result = runner.invoke(main, ["session", "clean", "--all", "--yes"])
+        assert result.exit_code == 0
+        assert len(cleaned) == 0  # skipped running
+
+    def test_stop_all(self, runner, monkeypatch):
+        sessions = [
+            {"run_id": "demo-a-Mar01-1400", "config": "demo", "container": "running"},
+            {"run_id": "demo-b-Mar01-1500", "config": "demo", "container": "running"},
+        ]
+        monkeypatch.setattr("scad.cli.get_all_sessions", lambda: sessions)
+        stopped = []
+        monkeypatch.setattr("scad.cli.stop_container", lambda rid: stopped.append(rid) or True)
+        monkeypatch.setattr("scad.cli.validate_run_id", lambda rid: None)
+        monkeypatch.setattr("scad.cli.log_event", lambda *a, **kw: None)
+
+        result = runner.invoke(main, ["session", "stop", "--all", "--yes"])
+        assert result.exit_code == 0
+        assert len(stopped) == 2
+
+    def test_requires_confirmation_without_yes(self, runner, monkeypatch):
+        sessions = [{"run_id": "demo-a", "config": "demo", "container": "stopped"}]
+        monkeypatch.setattr("scad.cli.get_all_sessions", lambda: sessions)
+        monkeypatch.setattr("scad.cli.clean_run", lambda rid: None)
+
+        result = runner.invoke(main, ["session", "clean", "--all"], input="n\n")
+        assert result.exit_code == 0 or "Aborted" in result.output
+
+    def test_run_id_and_all_mutually_exclusive(self, runner):
+        result = runner.invoke(main, ["session", "clean", "some-id", "--all"])
+        assert result.exit_code != 0
+
+
+class TestGcCommand:
+    """scad gc command."""
+
+    def test_gc_dry_run(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.cli.gc", lambda force: {"orphaned_containers": [], "dead_run_dirs": [], "unused_images": []})
+        result = runner.invoke(main, ["gc"])
+        assert result.exit_code == 0
+        assert "dry run" in result.output.lower() or "nothing" in result.output.lower()
+
+    def test_gc_force(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.cli.gc", lambda force: {"orphaned_containers": [], "dead_run_dirs": [], "unused_images": []})
+        result = runner.invoke(main, ["gc", "--force"])
+        assert result.exit_code == 0
