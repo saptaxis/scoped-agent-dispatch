@@ -50,3 +50,52 @@ def render_claude_json(config: ScadConfig) -> dict:
             }
         },
     }
+
+
+def render_settings_json(config: ScadConfig) -> dict:
+    """Return the settings.json seed content for a container."""
+    settings: dict = {
+        "cleanupPeriodDays": 365,
+        "attribution": {"commit": "", "pr": ""},
+        "permissions": {
+            "deny": [
+                "Bash(rm -rf /)",
+                "Bash(sudo *)",
+                "Bash(mkfs*)",
+                "Bash(dd if=*)",
+                "Bash(git push * --force* main)",
+                "Bash(git push * --force* master)",
+                "Bash(git reset --hard*)",
+            ],
+        },
+        "hooks": {
+            "PreToolUse": [
+                {
+                    "matcher": "Bash",
+                    "hooks": [{
+                        "type": "prompt",
+                        "prompt": (
+                            "Block if the command contains rm -rf / or pushes "
+                            "directly to main/master branches. Allow everything else."
+                        ),
+                    }],
+                },
+            ],
+            "Notification": [
+                {
+                    "matcher": "statusline",
+                    "hooks": [{
+                        "type": "command",
+                        "command": "bash /home/scad/statusline.sh",
+                    }],
+                },
+            ],
+        },
+        "enabledPlugins": {p: True for p in config.claude.plugins},
+    }
+
+    if config.claude.dangerously_skip_permissions:
+        settings["permissions"]["defaultMode"] = "bypassPermissions"
+        settings["skipDangerousModePermissionPrompt"] = True
+
+    return settings

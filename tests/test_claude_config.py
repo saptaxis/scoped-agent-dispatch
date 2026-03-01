@@ -98,3 +98,83 @@ class TestRenderClaudeJson:
         from scad.claude_config import render_claude_json
         result = render_claude_json(sample_config)
         assert "includeCoAuthoredBy" not in result
+
+
+class TestRenderSettingsJson:
+    @pytest.fixture
+    def sample_config(self):
+        return ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+        )
+
+    @pytest.fixture
+    def skip_perms_config(self):
+        return ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"dangerously_skip_permissions": True},
+        )
+
+    def test_sets_cleanup_period(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        assert result["cleanupPeriodDays"] == 365
+
+    def test_sets_attribution_empty(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        assert result["attribution"] == {"commit": "", "pr": ""}
+
+    def test_sets_deny_rules(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        deny = result["permissions"]["deny"]
+        assert "Bash(rm -rf /)" in deny
+        assert "Bash(git reset --hard*)" in deny
+
+    def test_sets_pretooluse_hooks(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        hooks = result["hooks"]["PreToolUse"]
+        assert len(hooks) == 1
+        assert hooks[0]["matcher"] == "Bash"
+
+    def test_sets_statusline_hook(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        notification = result["hooks"]["Notification"]
+        assert len(notification) == 1
+        assert "statusline" in notification[0]["matcher"]
+
+    def test_bypass_permissions_when_enabled(self, skip_perms_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(skip_perms_config)
+        assert result["permissions"]["defaultMode"] == "bypassPermissions"
+        assert result["skipDangerousModePermissionPrompt"] is True
+
+    def test_no_bypass_permissions_when_disabled(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        assert "defaultMode" not in result.get("permissions", {})
+        assert "skipDangerousModePermissionPrompt" not in result
+
+    def test_preseeds_enabled_plugins(self, sample_config):
+        from scad.claude_config import render_settings_json
+        result = render_settings_json(sample_config)
+        plugins = result["enabledPlugins"]
+        assert plugins["superpowers@claude-plugins-official"] is True
+        assert plugins["commit-commands@claude-plugins-official"] is True
+        assert plugins["pyright-lsp@claude-plugins-official"] is True
+
+    def test_preseeds_custom_plugins(self):
+        from scad.claude_config import render_settings_json
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"plugins": ["superpowers@claude-plugins-official"]},
+        )
+        result = render_settings_json(config)
+        plugins = result["enabledPlugins"]
+        assert "superpowers@claude-plugins-official" in plugins
+        assert "commit-commands@claude-plugins-official" not in plugins
