@@ -35,6 +35,7 @@ from scad.container import (
     run_container,
     stop_container,
     sync_from_host,
+    validate_run_id,
 )
 
 
@@ -406,6 +407,7 @@ def session_status(show_all: bool):
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def session_info(run_id: str):
     """Show session dashboard."""
+    validate_run_id(run_id)
     try:
         info = get_session_info(run_id)
     except FileNotFoundError as e:
@@ -458,6 +460,7 @@ def session_info(run_id: str):
 @click.option("--stream", "-s", is_flag=True, help="Show Claude stream (tool calls, edits) instead of entrypoint log.")
 def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
     """Read agent log output."""
+    validate_run_id(run_id)
     logs_dir = Path.home() / ".scad" / "logs"
     if stream:
         log_path = logs_dir / f"{run_id}.stream.jsonl"
@@ -487,6 +490,7 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def session_stop(run_id: str):
     """Stop a running agent."""
+    validate_run_id(run_id)
     if stop_container(run_id):
         log_event(run_id, "stop")
         click.echo(f"[scad] Stopped: {run_id}")
@@ -499,6 +503,7 @@ def session_stop(run_id: str):
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def session_attach(run_id: str):
     """Attach to an interactive tmux session."""
+    validate_run_id(run_id)
     container_name = f"scad-{run_id}"
     try:
         client = docker.from_env()
@@ -534,6 +539,7 @@ def session_attach(run_id: str):
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def session_clean(run_id: str):
     """Remove container, clones, and run data for a completed run."""
+    validate_run_id(run_id)
     clean_run(run_id)
     click.echo(f"[scad] Cleaned: {run_id}")
 
@@ -550,6 +556,7 @@ def _config_for_run(run_id: str) -> "ScadConfig":
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def code_fetch(run_id: str):
     """Fetch branches from clones back to source repos."""
+    validate_run_id(run_id)
     try:
         config = _config_for_run(run_id)
         results = fetch_to_host(run_id, config)
@@ -567,6 +574,7 @@ def code_fetch(run_id: str):
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def code_sync(run_id: str):
     """Sync host repo changes into clones (makes new branches available)."""
+    validate_run_id(run_id)
     try:
         config = _config_for_run(run_id)
         results = sync_from_host(run_id, config)
@@ -584,6 +592,7 @@ def code_sync(run_id: str):
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def code_refresh(run_id: str):
     """Push fresh credentials into a running container."""
+    validate_run_id(run_id)
     try:
         hours = refresh_credentials(run_id)
         h = int(hours)

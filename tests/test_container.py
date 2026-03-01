@@ -34,6 +34,7 @@ from scad.container import (
     get_session_cost,
     get_project_status,
     refresh_credentials,
+    validate_run_id,
     _migrate_worktrees,
 )
 
@@ -1445,3 +1446,33 @@ class TestWorktreeMigration:
         scad_dir = tmp_path / ".scad"
         monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
         _migrate_worktrees()  # should not raise
+
+
+class TestValidateRunId:
+    """validate_run_id() raises ClickException for unknown run-ids."""
+
+    def test_valid_run_id_with_run_dir(self, tmp_path, monkeypatch):
+        """No error when run dir exists."""
+        runs_dir = tmp_path / "runs"
+        (runs_dir / "demo-test-Mar01-1400").mkdir(parents=True)
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+
+        validate_run_id("demo-test-Mar01-1400")  # should not raise
+
+    def test_valid_run_id_with_container_only(self, tmp_path, monkeypatch):
+        """No error when container exists but run dir doesn't."""
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: True)
+
+        validate_run_id("demo-test-Mar01-1400")  # should not raise
+
+    def test_invalid_run_id_raises(self, tmp_path, monkeypatch):
+        """ClickException when neither run dir nor container exists."""
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+
+        with pytest.raises(click.ClickException, match="No session found"):
+            validate_run_id("nonexistent-run")

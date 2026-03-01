@@ -45,6 +45,23 @@ def _migrate_worktrees() -> None:
         old_dir.rmdir()
 
 
+def _container_exists(run_id: str) -> bool:
+    """Check if a scad container exists for this run-id."""
+    try:
+        client = docker.from_env()
+        client.containers.get(f"scad-{run_id}")
+        return True
+    except (DockerNotFound, DockerException):
+        return False
+
+
+def validate_run_id(run_id: str) -> None:
+    """Raise ClickException if run_id doesn't correspond to any known session."""
+    run_dir = RUNS_DIR / run_id
+    if not run_dir.exists() and not _container_exists(run_id):
+        raise click.ClickException(f"No session found: {run_id}")
+
+
 def log_event(run_id: str, verb: str, details: str = "") -> None:
     """Append an event to ~/.scad/runs/<run-id>/events.log.
 

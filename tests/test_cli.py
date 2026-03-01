@@ -3,6 +3,7 @@
 import pytest
 import click
 from click.testing import CliRunner
+from pathlib import Path
 from unittest.mock import patch, MagicMock
 
 import docker
@@ -96,8 +97,9 @@ class TestSessionStop:
         assert result.exit_code == 0
         assert "Stopped" in result.output
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.stop_container")
-    def test_stop_not_found(self, mock_stop, runner):
+    def test_stop_not_found(self, mock_stop, mock_validate, runner):
         mock_stop.return_value = False
         result = runner.invoke(main, ["session", "stop", "nonexistent"])
         assert result.exit_code != 0
@@ -117,13 +119,15 @@ class TestSessionLogs:
         assert "line1" in result.output
         assert "line3" in result.output
 
-    def test_logs_not_found(self, runner, tmp_path):
+    @patch("scad.cli.validate_run_id")
+    def test_logs_not_found(self, mock_validate, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
             result = runner.invoke(main, ["session", "logs", "nonexistent"])
         assert result.exit_code != 0
         assert "No log file" in result.output
 
-    def test_logs_respects_line_count(self, runner, tmp_path):
+    @patch("scad.cli.validate_run_id")
+    def test_logs_respects_line_count(self, mock_validate, runner, tmp_path):
         logs_dir = tmp_path / ".scad" / "logs"
         logs_dir.mkdir(parents=True)
         lines = [f"line{i}" for i in range(200)]
@@ -149,7 +153,8 @@ class TestSessionLogs:
         assert "tool_use" in result.output
         assert "Edit" in result.output
 
-    def test_logs_stream_not_found(self, runner, tmp_path):
+    @patch("scad.cli.validate_run_id")
+    def test_logs_stream_not_found(self, mock_validate, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
             result = runner.invoke(main, ["session", "logs", "nonexistent", "--stream"])
         assert result.exit_code != 0
@@ -324,8 +329,9 @@ class TestSessionAttach:
         assert "exec" in call_args
         assert "tmux" in call_args
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.docker.from_env")
-    def test_attach_not_found(self, mock_docker, runner):
+    def test_attach_not_found(self, mock_docker, mock_validate, runner):
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
         mock_docker.return_value = mock_client
@@ -370,8 +376,9 @@ class TestSessionClean:
         assert "Cleaned" in result.output
         mock_clean.assert_called_once_with("test-run")
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.clean_run")
-    def test_clean_nonexistent_is_ok(self, mock_clean, runner, tmp_path):
+    def test_clean_nonexistent_is_ok(self, mock_clean, mock_validate, runner, tmp_path):
         # clean_run is a no-op if nothing exists, so clean always succeeds
         with patch("scad.cli.Path.home", return_value=tmp_path):
             result = runner.invoke(main, ["session", "clean", "nonexistent"])
@@ -575,8 +582,9 @@ class TestShellCompletion:
 
 
 class TestSessionInfo:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.get_session_info")
-    def test_info_shows_dashboard(self, mock_info, runner):
+    def test_info_shows_dashboard(self, mock_info, mock_validate, runner):
         mock_info.return_value = {
             "run_id": "demo-Feb28-1400",
             "config": "demo",
@@ -597,9 +605,10 @@ class TestSessionInfo:
         assert "running" in result.output
         assert "abc12345" in result.output
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.get_session_cost")
     @patch("scad.cli.get_session_info")
-    def test_info_shows_cost(self, mock_info, mock_cost, runner):
+    def test_info_shows_cost(self, mock_info, mock_cost, mock_validate, runner):
         mock_info.return_value = {
             "run_id": "demo-Feb28-1400",
             "config": "demo",
@@ -757,3 +766,21 @@ class TestProjectStatus:
         assert "demo" in result.output
         assert "2 " in result.output  # total sessions
         assert "$3.84" in result.output
+
+
+class TestRunIdValidation:
+    """Commands with run-id arguments validate before acting."""
+
+    def test_clean_invalid_run_id(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", Path("/nonexistent"))
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+        result = runner.invoke(main, ["session", "clean", "fake-run-id"])
+        assert result.exit_code != 0
+        assert "No session found" in result.output
+
+    def test_stop_invalid_run_id(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", Path("/nonexistent"))
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+        result = runner.invoke(main, ["session", "stop", "fake-run-id"])
+        assert result.exit_code != 0
+        assert "No session found" in result.output
