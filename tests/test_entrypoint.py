@@ -123,9 +123,9 @@ class TestEntrypointTemplate:
         assert "/workspace/" in result
 
     def test_disables_coauthored_by(self, jinja_env):
-        """Entrypoint sets coAuthoredBy to false in settings.json."""
+        """Entrypoint sets includeCoAuthoredBy to false in .claude.json."""
         result = _render_entrypoint(jinja_env)
-        assert "coAuthoredBy" in result
+        assert "includeCoAuthoredBy" in result
 
     def test_claude_exit_drops_to_bash(self, jinja_env):
         """Interactive mode: Claude exit drops to bash, not container exit."""

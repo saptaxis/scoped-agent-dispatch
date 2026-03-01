@@ -39,6 +39,7 @@ p = pathlib.Path('$HOME/.claude.json')
 d = json.loads(p.read_text()) if p.exists() else {}
 d['hasCompletedOnboarding'] = True
 d['effortCalloutDismissed'] = True
+d['includeCoAuthoredBy'] = False
 d.setdefault('installMethod', 'native')
 d.setdefault('projects', {}).setdefault('/workspace/{{ workdir_key }}', {})['hasTrustDialogAccepted'] = True
 p.write_text(json.dumps(d, indent=2))
@@ -72,9 +73,6 @@ python3 -c "
 import json, pathlib
 p = pathlib.Path('$CLAUDE_DIR/settings.json')
 d = json.loads(p.read_text())
-
-# Disable co-authored-by
-d.setdefault('cliSettings', {})['coAuthoredBy'] = False
 
 # Prevent auto-cleanup of session data
 d['cleanupPeriodDays'] = 365
