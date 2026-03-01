@@ -162,8 +162,9 @@ class TestSessionLogs:
 
 
 class TestSessionStatus:
+    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.list_scad_containers")
-    def test_status_shows_running(self, mock_running, runner):
+    def test_status_shows_running(self, mock_running, mock_auth, runner):
         mock_running.return_value = [{
             "run_id": "test-Feb26-1430",
             "config": "myconfig",
@@ -177,15 +178,17 @@ class TestSessionStatus:
         assert "test-Feb26-1430" in result.output
         assert "running" in result.output
 
+    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.list_scad_containers")
-    def test_status_empty(self, mock_running, runner):
+    def test_status_empty(self, mock_running, mock_auth, runner):
         mock_running.return_value = []
         result = runner.invoke(main, ["session", "status"])
         assert result.exit_code == 0
         assert "No running sessions" in result.output
 
+    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.get_all_sessions")
-    def test_status_all_shows_history(self, mock_all, runner):
+    def test_status_all_shows_history(self, mock_all, mock_auth, runner):
         mock_all.return_value = [
             {
                 "run_id": "test-Feb28-1400",
@@ -894,6 +897,31 @@ class TestGcCommand:
         monkeypatch.setattr("scad.cli.gc", lambda force: {"orphaned_containers": [], "dead_run_dirs": [], "unused_images": []})
         result = runner.invoke(main, ["gc", "--force"])
         assert result.exit_code == 0
+
+
+class TestCredentialWarning:
+    """session status shows credential expiry warning."""
+
+    def test_warning_when_expiring_soon(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.cli.list_scad_containers", lambda: [])
+        monkeypatch.setattr("scad.cli.check_claude_auth", lambda: (True, 1.5))
+
+        result = runner.invoke(main, ["session", "status"])
+        assert "expire" in result.output.lower() or "1.5h" in result.output
+
+    def test_warning_when_expired(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.cli.list_scad_containers", lambda: [])
+        monkeypatch.setattr("scad.cli.check_claude_auth", lambda: (False, 0))
+
+        result = runner.invoke(main, ["session", "status"])
+        assert "expired" in result.output.lower()
+
+    def test_no_warning_when_plenty_of_time(self, runner, monkeypatch):
+        monkeypatch.setattr("scad.cli.list_scad_containers", lambda: [])
+        monkeypatch.setattr("scad.cli.check_claude_auth", lambda: (True, 8.0))
+
+        result = runner.invoke(main, ["session", "status"])
+        assert "expire" not in result.output.lower()
 
 
 class TestUsageDisplay:

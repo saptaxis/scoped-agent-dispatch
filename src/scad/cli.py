@@ -385,34 +385,41 @@ def session_status(show_all: bool):
         all_runs = get_all_sessions()
         if not all_runs:
             click.echo("[scad] No sessions found.")
-            return
-        click.echo(
-            f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
-            f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
-        )
-        for run in all_runs:
-            started = _relative_time(run["started"]) if run["started"] else "?"
+        else:
             click.echo(
-                f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
-                f"{started:<12} {run['container']:<12} {run['clones']}"
+                f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
+                f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
             )
+            for run in all_runs:
+                started = _relative_time(run["started"]) if run["started"] else "?"
+                click.echo(
+                    f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
+                    f"{started:<12} {run['container']:<12} {run['clones']}"
+                )
     else:
         running = list_scad_containers()
         if not running:
             click.echo("[scad] No running sessions.")
-            return
-        click.echo(
-            f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
-            f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
-        )
-        for run in running:
-            started = _relative_time(run["started"]) if run["started"] else "?"
-            clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "worktrees"
-            clones = "yes" if clone_dir.exists() else "-"
+        else:
             click.echo(
-                f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
-                f"{started:<12} {'running':<12} {clones}"
+                f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
+                f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
             )
+            for run in running:
+                started = _relative_time(run["started"]) if run["started"] else "?"
+                clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "worktrees"
+                clones = "yes" if clone_dir.exists() else "-"
+                click.echo(
+                    f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
+                    f"{started:<12} {'running':<12} {clones}"
+                )
+
+    # Credential expiry warning
+    valid, hours = check_claude_auth()
+    if not valid:
+        click.echo("\n\u2717 Credentials expired \u2014 run: claude /login")
+    elif hours < 2.0:
+        click.echo(f"\n\u26a0 Credentials expire in {hours:.1f}h \u2014 run: scad code refresh <run-id>")
 
 
 @session.command("info")
