@@ -50,6 +50,11 @@ if [ -f /mnt/host-gitconfig ]; then
 fi
 git config --global --add safe.directory '*'
 
+# Configure git-delta for better diffs
+git config --global core.pager delta
+git config --global interactive.diffFilter 'delta --color-only'
+git config --global delta.navigate true
+
 # Copy host Claude credentials if mounted (staging path avoids stale-inode
 # problem when user runs /login on host — new file = new inode, direct mount
 # would keep showing old content)

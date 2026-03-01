@@ -192,6 +192,11 @@ class TestEntrypointTemplate:
         result = _render_entrypoint(jinja_env)
         assert "statusline.sh" in result
 
+    def test_git_delta_config(self, jinja_env):
+        """Entrypoint configures git to use delta as pager."""
+        result = _render_entrypoint(jinja_env)
+        assert "core.pager" in result or "delta" in result
+
 
 class TestDockerfileTemplate:
     def _make_config(self):
@@ -248,6 +253,12 @@ class TestDockerfileTemplate:
         config = self._make_config()
         rendered = self._render_dockerfile(config)
         assert "jq" in rendered
+
+    def test_installs_delta(self):
+        """Dockerfile installs git-delta."""
+        config = self._make_config()
+        rendered = self._render_dockerfile(config)
+        assert "delta" in rendered
 
 
 class TestBootstrapConfTemplate:
