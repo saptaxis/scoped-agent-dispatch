@@ -149,6 +149,39 @@ class TestEntrypointTemplate:
         result = _render_entrypoint(jinja_env)
         assert "settings.json" in result
 
+    def test_bypass_permissions_when_skip_enabled(self, jinja_env):
+        """Entrypoint sets bypassPermissions when dangerously_skip_permissions is true."""
+        result = _render_entrypoint(
+            jinja_env,
+            claude={"dangerously_skip_permissions": True, "additional_flags": None},
+        )
+        assert "bypassPermissions" in result
+        assert "skipDangerousModePermissionPrompt" in result
+
+    def test_no_bypass_permissions_when_skip_disabled(self, jinja_env):
+        """Entrypoint does NOT set bypassPermissions when dangerously_skip_permissions is false."""
+        result = _render_entrypoint(
+            jinja_env,
+            claude={"dangerously_skip_permissions": False, "additional_flags": None},
+        )
+        assert "bypassPermissions" not in result
+
+    def test_deny_rules_always_present(self, jinja_env):
+        """Entrypoint always adds deny rules regardless of permissions mode."""
+        result = _render_entrypoint(jinja_env)
+        assert "deny" in result
+        assert "rm -rf" in result
+
+    def test_pretooluse_hooks(self, jinja_env):
+        """Entrypoint adds PreToolUse safety hooks."""
+        result = _render_entrypoint(jinja_env)
+        assert "PreToolUse" in result
+
+    def test_cleanup_period(self, jinja_env):
+        """Entrypoint sets cleanupPeriodDays to prevent auto-cleanup."""
+        result = _render_entrypoint(jinja_env)
+        assert "cleanupPeriodDays" in result
+
 
 class TestDockerfileTemplate:
     def _make_config(self):

@@ -58,7 +58,7 @@ if [ -f /mnt/host-claude-credentials.json ]; then
     cp /mnt/host-claude-credentials.json "$HOME/.claude/.credentials.json"
 fi
 
-# Disable co-authored-by in Claude settings
+# Configure Claude settings
 CLAUDE_DIR="$HOME/.claude"
 if [ ! -f "$CLAUDE_DIR/settings.json" ]; then
     echo '{}' > "$CLAUDE_DIR/settings.json"
@@ -67,7 +67,41 @@ python3 -c "
 import json, pathlib
 p = pathlib.Path('$CLAUDE_DIR/settings.json')
 d = json.loads(p.read_text())
+
+# Disable co-authored-by
 d.setdefault('cliSettings', {})['coAuthoredBy'] = False
+
+# Prevent auto-cleanup of session data
+d['cleanupPeriodDays'] = 365
+
+{% if claude.dangerously_skip_permissions %}
+# Auto-accept bypass permissions (no interactive prompt)
+d.setdefault('permissions', {})['defaultMode'] = 'bypassPermissions'
+d['skipDangerousModePermissionPrompt'] = True
+{% endif %}
+
+# Deny rules — safety net for destructive commands (always applied)
+d.setdefault('permissions', {})['deny'] = [
+    'Bash(rm -rf /)',
+    'Bash(sudo *)',
+    'Bash(mkfs*)',
+    'Bash(dd if=*)',
+    'Bash(git push * --force* main)',
+    'Bash(git push * --force* master)',
+    'Bash(git reset --hard*)',
+]
+
+# PreToolUse safety hooks
+d.setdefault('hooks', {})['PreToolUse'] = [
+    {
+        'matcher': 'Bash',
+        'hooks': [{
+            'type': 'prompt',
+            'prompt': 'Block if the command contains rm -rf / or pushes directly to main/master branches. Allow everything else.',
+        }],
+    },
+]
+
 p.write_text(json.dumps(d, indent=2))
 "
 
