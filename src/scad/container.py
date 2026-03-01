@@ -20,6 +20,31 @@ SCAD_DIR = Path.home() / ".scad"
 RUNS_DIR = SCAD_DIR / "runs"
 
 
+def _migrate_worktrees() -> None:
+    """Migrate old ~/.scad/worktrees/<run-id>/ to ~/.scad/runs/<run-id>/worktrees/.
+
+    Called on first access. Moves each worktree dir under its matching run dir.
+    Creates a run dir if one doesn't exist (orphaned worktree).
+    Removes ~/.scad/worktrees/ when empty.
+    """
+    old_dir = SCAD_DIR / "worktrees"
+    if not old_dir.exists():
+        return
+
+    for entry in list(old_dir.iterdir()):
+        if not entry.is_dir():
+            continue
+        run_id = entry.name
+        target = RUNS_DIR / run_id / "worktrees"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(str(entry), str(target))
+        click.echo(f"[scad] Migrated worktrees for {run_id}")
+
+    # Remove old dir if empty
+    if old_dir.exists() and not list(old_dir.iterdir()):
+        old_dir.rmdir()
+
+
 def log_event(run_id: str, verb: str, details: str = "") -> None:
     """Append an event to ~/.scad/runs/<run-id>/events.log.
 
@@ -120,6 +145,7 @@ def create_clones(
 
     Returns dict of repo_key -> clone_path (or direct path for non-worktree repos).
     """
+    _migrate_worktrees()
     clone_base = RUNS_DIR / run_id / "worktrees"
     clone_base.mkdir(parents=True, exist_ok=True)
 
@@ -576,6 +602,7 @@ def _parse_events_log(run_id: str) -> dict:
 
 def get_all_sessions() -> list[dict]:
     """Get all sessions with container state. Sorted most-recent-first."""
+    _migrate_worktrees()
     sessions = {}
 
     # 1. Running containers (from Docker)

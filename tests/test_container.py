@@ -34,6 +34,7 @@ from scad.container import (
     get_session_cost,
     get_project_status,
     refresh_credentials,
+    _migrate_worktrees,
 )
 
 
@@ -1400,3 +1401,47 @@ class TestConsolidatedPaths:
         """WORKTREE_DIR constant should not exist after consolidation."""
         import scad.container
         assert not hasattr(scad.container, "WORKTREE_DIR")
+
+
+class TestWorktreeMigration:
+    """Auto-migrate old ~/.scad/worktrees/ to ~/.scad/runs/<run-id>/worktrees/."""
+
+    def test_migrates_worktree_with_matching_run_dir(self, tmp_path, monkeypatch):
+        """Worktree moves under existing run dir."""
+        scad_dir = tmp_path / ".scad"
+        runs_dir = scad_dir / "runs"
+        old_worktrees = scad_dir / "worktrees"
+        monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        # Old layout: worktree exists, run dir exists
+        (old_worktrees / "demo-Mar01-1400" / "code").mkdir(parents=True)
+        (old_worktrees / "demo-Mar01-1400" / "code" / "file.txt").write_text("test")
+        (runs_dir / "demo-Mar01-1400" / "claude").mkdir(parents=True)
+
+        _migrate_worktrees()
+
+        # New layout: worktree under run dir
+        assert (runs_dir / "demo-Mar01-1400" / "worktrees" / "code" / "file.txt").exists()
+        assert not old_worktrees.exists()
+
+    def test_migrates_worktree_without_run_dir(self, tmp_path, monkeypatch):
+        """Orphaned worktree gets a new run dir created."""
+        scad_dir = tmp_path / ".scad"
+        runs_dir = scad_dir / "runs"
+        old_worktrees = scad_dir / "worktrees"
+        monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        (old_worktrees / "orphan-Mar01-1400" / "code").mkdir(parents=True)
+
+        _migrate_worktrees()
+
+        assert (runs_dir / "orphan-Mar01-1400" / "worktrees" / "code").exists()
+        assert not old_worktrees.exists()
+
+    def test_noop_when_no_old_worktrees(self, tmp_path, monkeypatch):
+        """No error when ~/.scad/worktrees/ doesn't exist."""
+        scad_dir = tmp_path / ".scad"
+        monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
+        _migrate_worktrees()  # should not raise
