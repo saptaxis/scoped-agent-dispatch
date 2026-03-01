@@ -29,6 +29,7 @@ from scad.container import (
     fetch_to_host,
     sync_from_host,
     log_event,
+    gc,
     get_all_sessions,
     get_session_info,
     get_session_cost,
@@ -112,13 +113,25 @@ class TestGenerateRunId:
 
 class TestBranchManagement:
     def test_generate_branch_name_format(self):
-        name = generate_branch_name("plan07")
-        assert name.startswith("scad-plan07-")
-        # Format: scad-tag-MonDD-HHMM
+        name = generate_branch_name("demo", "plan07")
+        assert name.startswith("scad-demo-plan07-")
+        # Format: scad-config-tag-MonDD-HHMM
         parts = name.split("-")
-        assert len(parts) == 4
-        assert len(parts[2]) == 5  # MonDD like Feb27
-        assert len(parts[3]) == 4  # HHMM like 1430
+        assert len(parts) == 5
+        assert parts[0] == "scad"
+        assert parts[1] == "demo"
+        assert parts[2] == "plan07"
+        assert len(parts[3]) == 5  # MonDD like Feb27
+        assert len(parts[4]) == 4  # HHMM like 1430
+
+    def test_generate_branch_name_includes_config(self):
+        """Branch name includes config name for shared-repo disambiguation."""
+        branch = generate_branch_name("demo", "plan08")
+        assert branch.startswith("scad-demo-plan08-")
+        parts = branch.split("-")
+        assert parts[0] == "scad"
+        assert parts[1] == "demo"
+        assert parts[2] == "plan08"
 
     @patch("scad.container.subprocess.run")
     def test_check_branch_exists_true(self, mock_run):
@@ -1476,3 +1489,95 @@ class TestValidateRunId:
 
         with pytest.raises(click.ClickException, match="No session found"):
             validate_run_id("nonexistent-run")
+
+
+class TestGarbageCollection:
+    """gc() finds orphaned state and optionally cleans it."""
+
+    def test_finds_orphaned_container(self, tmp_path, monkeypatch):
+        """Container with scad.managed label but no run dir."""
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir()
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        mock_container = MagicMock()
+        mock_container.name = "scad-orphan-Mar01-1400"
+        mock_container.status = "exited"
+        mock_container.labels = {"scad.managed": "true"}
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = [mock_container]
+        mock_client.images.list.return_value = []
+        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+
+        findings = gc(force=False)
+        assert len(findings["orphaned_containers"]) == 1
+        assert findings["orphaned_containers"][0]["name"] == "scad-orphan-Mar01-1400"
+
+    def test_finds_dead_run_dir(self, tmp_path, monkeypatch):
+        """Run dir with no container and no worktrees."""
+        runs_dir = tmp_path / "runs"
+        dead_dir = runs_dir / "dead-Mar01-1400"
+        dead_dir.mkdir(parents=True)
+        (dead_dir / "events.log").write_text("old")
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.images.list.return_value = []
+        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+
+        findings = gc(force=False)
+        assert len(findings["dead_run_dirs"]) == 1
+
+    def test_finds_unused_images(self, tmp_path, monkeypatch):
+        """Image tagged scad-* with no containers using it."""
+        runs_dir = tmp_path / "runs"
+        runs_dir.mkdir()
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        mock_image = MagicMock()
+        mock_image.tags = ["scad-demo:latest"]
+        mock_image.id = "sha256:abc123"
+        mock_image.attrs = {"Created": "2026-02-28T00:00:00Z"}
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.images.list.return_value = [mock_image]
+        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+
+        findings = gc(force=False)
+        assert len(findings["unused_images"]) == 1
+
+    def test_dry_run_does_not_delete(self, tmp_path, monkeypatch):
+        """gc(force=False) reports but doesn't clean."""
+        runs_dir = tmp_path / "runs"
+        dead_dir = runs_dir / "dead-Mar01-1400"
+        dead_dir.mkdir(parents=True)
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.images.list.return_value = []
+        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+
+        gc(force=False)
+        assert dead_dir.exists()  # still there
+
+    def test_force_deletes(self, tmp_path, monkeypatch):
+        """gc(force=True) actually cleans."""
+        runs_dir = tmp_path / "runs"
+        dead_dir = runs_dir / "dead-Mar01-1400"
+        dead_dir.mkdir(parents=True)
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []
+        mock_client.images.list.return_value = []
+        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
+
+        gc(force=True)
+        assert not dead_dir.exists()

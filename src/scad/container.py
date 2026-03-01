@@ -108,10 +108,10 @@ def check_claude_auth() -> tuple[bool, float]:
         return False, 0.0
 
 
-def generate_branch_name(tag: str) -> str:
-    """Auto-generate branch name: scad-{tag}-{MonDD}-{HHMM}."""
+def generate_branch_name(config_name: str, tag: str) -> str:
+    """Auto-generate branch name: scad-{config}-{tag}-{MonDD}-{HHMM}."""
     now = datetime.now()
-    return f"scad-{tag}-{now.strftime('%b%d')}-{now.strftime('%H%M')}"
+    return f"scad-{config_name}-{tag}-{now.strftime('%b%d')}-{now.strftime('%H%M')}"
 
 
 def check_branch_exists(repo_path: Path, branch: str) -> bool:
@@ -130,7 +130,7 @@ def resolve_branch(config: ScadConfig, branch: Optional[str], tag: str = "notag"
     Auto-generated branches get -2, -3 suffix on collision.
     """
     if branch is None:
-        branch = generate_branch_name(tag)
+        branch = generate_branch_name(config.name, tag)
         base = branch
         suffix = 2
         while any(
@@ -824,5 +824,75 @@ def refresh_credentials(run_id: str) -> float:
 
     log_event(run_id, "refresh", "credentials")
     return hours
+
+
+def gc(force: bool = False) -> dict:
+    """Find and optionally clean orphaned state.
+
+    Returns dict with orphaned_containers, dead_run_dirs, unused_images.
+    """
+    client = docker.from_env()
+    findings = {
+        "orphaned_containers": [],
+        "dead_run_dirs": [],
+        "unused_images": [],
+    }
+
+    # Find containers with scad.managed label
+    all_containers = client.containers.list(
+        all=True, filters={"label": "scad.managed=true"}
+    )
+    active_image_ids = set()
+    for container in all_containers:
+        run_id = container.name.removeprefix("scad-")
+        run_dir = RUNS_DIR / run_id
+        active_image_ids.add(container.image.id)
+        if not run_dir.exists() or container.status == "exited":
+            findings["orphaned_containers"].append({
+                "name": container.name,
+                "status": container.status,
+            })
+            if force:
+                try:
+                    container.stop(timeout=5)
+                except Exception:
+                    pass
+                try:
+                    container.remove()
+                except Exception:
+                    pass
+
+    # Find dead run dirs (no container, no worktrees)
+    if RUNS_DIR.exists():
+        for entry in RUNS_DIR.iterdir():
+            if not entry.is_dir():
+                continue
+            run_id = entry.name
+            worktrees = entry / "worktrees"
+            has_worktrees = worktrees.exists() and list(worktrees.iterdir())
+            if not _container_exists(run_id) and not has_worktrees:
+                findings["dead_run_dirs"].append(str(entry))
+                if force:
+                    shutil.rmtree(entry)
+
+    # Find unused images (scad-* tagged, not used by any container)
+    try:
+        all_images = client.images.list()
+        for image in all_images:
+            scad_tags = [t for t in (image.tags or []) if t.startswith("scad-")]
+            if scad_tags and image.id not in active_image_ids:
+                findings["unused_images"].append({
+                    "tags": scad_tags,
+                    "id": image.id[:12],
+                })
+                if force:
+                    try:
+                        client.images.remove(image.id)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    return findings
 
 
