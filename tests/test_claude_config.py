@@ -178,3 +178,122 @@ class TestRenderSettingsJson:
         plugins = result["enabledPlugins"]
         assert "superpowers@claude-plugins-official" in plugins
         assert "commit-commands@claude-plugins-official" not in plugins
+
+
+class TestGetVolumeMounts:
+    @pytest.fixture
+    def sample_config(self):
+        return ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+        )
+
+    def test_mounts_claude_dir(self, sample_config, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        run_dir = tmp_path / "runs" / "test-run"
+        claude_dir = run_dir / "claude"
+        claude_dir.mkdir(parents=True)
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"):
+            mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        assert str(claude_dir) in mounts
+        assert mounts[str(claude_dir)]["bind"] == "/home/scad/.claude"
+        assert mounts[str(claude_dir)]["mode"] == "rw"
+
+    def test_mounts_claude_json(self, sample_config, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        run_dir = tmp_path / "runs" / "test-run"
+        run_dir.mkdir(parents=True)
+        claude_json = run_dir / "claude.json"
+        claude_json.write_text("{}")
+        (run_dir / "claude").mkdir()
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"):
+            mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        assert str(claude_json) in mounts
+        assert mounts[str(claude_json)]["bind"] == "/home/scad/.claude.json"
+
+    def test_mounts_credentials(self, sample_config, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        run_dir = tmp_path / "runs" / "test-run"
+        (run_dir / "claude").mkdir(parents=True)
+        creds = tmp_path / ".claude" / ".credentials.json"
+        creds.parent.mkdir(parents=True)
+        creds.write_text("{}")
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"):
+            mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        assert str(creds) in mounts
+        assert mounts[str(creds)]["bind"] == "/mnt/host-claude-credentials.json"
+        assert mounts[str(creds)]["mode"] == "ro"
+
+    def test_auto_mounts_claude_md(self, sample_config, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        run_dir = tmp_path / "runs" / "test-run"
+        (run_dir / "claude").mkdir(parents=True)
+        claude_md = tmp_path / "CLAUDE.md"
+        claude_md.write_text("# Instructions")
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"):
+            mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        assert str(claude_md) in mounts
+        assert mounts[str(claude_md)]["bind"] == "/home/scad/CLAUDE.md"
+        assert mounts[str(claude_md)]["mode"] == "ro"
+
+    def test_skips_claude_md_if_missing(self, sample_config, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        run_dir = tmp_path / "runs" / "test-run"
+        (run_dir / "claude").mkdir(parents=True)
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"):
+            mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        for path in mounts:
+            assert "CLAUDE.md" not in path
+
+    def test_claude_md_disabled(self, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+            claude={"claude_md": False},
+        )
+        run_dir = tmp_path / "runs" / "test-run"
+        (run_dir / "claude").mkdir(parents=True)
+        (tmp_path / "CLAUDE.md").write_text("# Instructions")
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"):
+            mounts = get_volume_mounts(config, "test-run", home_dir=tmp_path)
+
+        for path in mounts:
+            assert "CLAUDE.md" not in path
+
+    def test_mounts_localtime(self, sample_config, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        run_dir = tmp_path / "runs" / "test-run"
+        (run_dir / "claude").mkdir(parents=True)
+
+        with patch("scad.claude_config.RUNS_DIR", tmp_path / "runs"), \
+             patch("scad.claude_config.Path") as mock_path_cls:
+            mock_localtime = MagicMock()
+            mock_localtime.exists.return_value = True
+            mock_localtime.resolve.return_value = Path("/usr/share/zoneinfo/Asia/Kolkata")
+
+            original_path = Path
+            def path_side_effect(arg):
+                if arg == "/etc/localtime":
+                    return mock_localtime
+                return original_path(arg)
+
+            mock_path_cls.side_effect = path_side_effect
+            mock_path_cls.home.return_value = tmp_path
+
+            mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        localtime_mount = mounts.get(str(Path("/usr/share/zoneinfo/Asia/Kolkata")))
+        assert localtime_mount is not None
+        assert localtime_mount["bind"] == "/etc/localtime"

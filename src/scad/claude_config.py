@@ -99,3 +99,56 @@ def render_settings_json(config: ScadConfig) -> dict:
         settings["skipDangerousModePermissionPrompt"] = True
 
     return settings
+
+
+def get_volume_mounts(
+    config: ScadConfig,
+    run_id: str,
+    home_dir: Path | None = None,
+) -> dict:
+    """Return all Claude-related volume mounts for run_container().
+
+    Includes: claude dir, claude.json, credentials, CLAUDE.md, /etc/localtime.
+    home_dir is for testing -- defaults to Path.home().
+    """
+    if home_dir is None:
+        home_dir = Path.home()
+
+    volumes: dict = {}
+
+    # Persistent claude dir (~/.claude)
+    run_claude_dir = RUNS_DIR / run_id / "claude"
+    if run_claude_dir.exists():
+        volumes[str(run_claude_dir)] = {"bind": "/home/scad/.claude", "mode": "rw"}
+
+    # Persistent claude.json (~/.claude.json)
+    claude_json = RUNS_DIR / run_id / "claude.json"
+    if claude_json.exists():
+        volumes[str(claude_json)] = {"bind": "/home/scad/.claude.json", "mode": "rw"}
+
+    # Credentials -- staging path (entrypoint copies to final location)
+    claude_creds = home_dir / ".claude" / ".credentials.json"
+    if claude_creds.exists():
+        volumes[str(claude_creds)] = {
+            "bind": "/mnt/host-claude-credentials.json",
+            "mode": "ro",
+        }
+
+    # CLAUDE.md -- global instructions
+    if config.claude.claude_md is False:
+        pass  # explicitly disabled
+    elif config.claude.claude_md is not None:
+        claude_md_path = Path(config.claude.claude_md).expanduser().resolve()
+        if claude_md_path.exists():
+            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+    else:
+        claude_md_path = home_dir / "CLAUDE.md"
+        if claude_md_path.exists():
+            volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
+
+    # /etc/localtime -- container inherits host timezone
+    localtime = Path("/etc/localtime")
+    if localtime.exists():
+        volumes[str(localtime.resolve())] = {"bind": "/etc/localtime", "mode": "ro"}
+
+    return volumes
