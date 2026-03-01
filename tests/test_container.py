@@ -93,6 +93,22 @@ class TestRenderBuildContext:
         render_build_context(config, tmp_path)
         assert not (tmp_path / "requirements.txt").exists()
 
+    def test_creates_seed_claude_json(self, sample_config, tmp_path):
+        render_build_context(sample_config, tmp_path)
+        seed = tmp_path / "seed-claude.json"
+        assert seed.exists()
+        data = json.loads(seed.read_text())
+        assert data["hasCompletedOnboarding"] is True
+        assert "includeCoAuthoredBy" not in data
+
+    def test_creates_seed_settings_json(self, sample_config, tmp_path):
+        render_build_context(sample_config, tmp_path)
+        seed = tmp_path / "seed-settings.json"
+        assert seed.exists()
+        data = json.loads(seed.read_text())
+        assert data["attribution"] == {"commit": "", "pr": ""}
+        assert "enabledPlugins" in data
+
 
 class TestGenerateRunId:
     def test_format_with_tag(self):

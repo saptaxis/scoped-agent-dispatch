@@ -301,6 +301,15 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     statusline_src = Path(__file__).parent / "templates" / "statusline.sh"
     shutil.copy2(statusline_src, build_dir / "statusline.sh")
 
+    # Render seed JSON files for entrypoint config seeding
+    from scad.claude_config import render_claude_json, render_settings_json
+
+    seed_claude = render_claude_json(config)
+    (build_dir / "seed-claude.json").write_text(json.dumps(seed_claude, indent=2))
+
+    seed_settings = render_settings_json(config)
+    (build_dir / "seed-settings.json").write_text(json.dumps(seed_settings, indent=2))
+
 
 def list_scad_containers() -> list[dict]:
     """List running scad containers from Docker."""
