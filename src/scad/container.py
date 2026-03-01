@@ -433,6 +433,11 @@ def run_container(
     if api_key:
         environment["ANTHROPIC_API_KEY"] = api_key
 
+    # Disable telemetry in containers — no reason for isolated sessions to phone home
+    environment["DISABLE_TELEMETRY"] = "1"
+    environment["DISABLE_ERROR_REPORTING"] = "1"
+    environment["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
+
     container_name = f"scad-{run_id}"
 
     container = client.containers.run(

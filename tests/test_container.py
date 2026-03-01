@@ -1223,3 +1223,32 @@ class TestRefreshCredentials:
 
         with pytest.raises(click.ClickException, match="not found"):
             refresh_credentials("test-run")
+
+
+class TestRunContainerTelemetry:
+    @patch("scad.container.docker.from_env")
+    def test_disables_telemetry(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """run_container sets telemetry disable env vars."""
+        monkeypatch.setattr("scad.container.WORKTREE_DIR", tmp_path / "worktrees")
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        # Create required dirs
+        run_dir = tmp_path / "runs" / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        worktree_paths = {"code": tmp_path / "worktrees" / "test-run" / "code"}
+
+        run_container(sample_config, "feat", "test-run", worktree_paths)
+
+        call_kwargs = mock_client.containers.run.call_args[1]
+        env = call_kwargs["environment"]
+        assert env["DISABLE_TELEMETRY"] == "1"
+        assert env["DISABLE_ERROR_REPORTING"] == "1"
+        assert env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] == "1"
