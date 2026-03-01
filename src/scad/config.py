@@ -64,11 +64,7 @@ class PythonConfig(BaseModel):
     requirements: Optional[str] = None
 
 
-SCAD_DEFAULT_PLUGINS = [
-    "superpowers@claude-plugins-official",
-    "commit-commands@claude-plugins-official",
-    "pyright-lsp@claude-plugins-official",
-]
+from scad.claude_config import DEFAULT_PLUGINS as SCAD_DEFAULT_PLUGINS
 
 
 class ClaudeConfig(BaseModel):

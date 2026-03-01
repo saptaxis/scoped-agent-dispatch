@@ -187,10 +187,20 @@ scad session clean my-project-initial-Feb28-1400  # removes container, clones, s
 1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
 2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/runs/<run-id>/worktrees/`. Mounts into container.
 3. **Branch** — Auto-generates branch name (`scad-{config}-{tag}-MonDD-HHMM`) and checks it out in each clone.
-4. **Run** — Starts container detached. Entrypoint launches tmux with Claude (interactive) or streams JSON output (headless).
-5. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Survives stop/restart.
-6. **Fetch** — `scad code fetch` snapshots clone branches back to host source repos.
-7. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
+4. **Configure** — `claude_config.py` centralizes all Claude Code configuration: `settings.json` (permissions, `attribution`, `enabledPlugins`), `.claude.json` (persisted across sessions via bind-mount from the run dir), host timezone inheritance (IANA `TZ` env var + `/etc/localtime` mount).
+5. **Run** — Starts container detached. Entrypoint launches tmux with Claude (interactive) or streams JSON output (headless).
+6. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Survives stop/restart.
+7. **Fetch** — `scad code fetch` snapshots clone branches back to host source repos.
+8. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
+
+## Architecture
+
+| Module | Responsibility |
+|--------|---------------|
+| `container.py` | Docker container lifecycle (create, start, stop, clean) |
+| `claude_config.py` | Claude Code configuration — settings.json, mounts, timezone |
+| `config.py` | YAML config loading and validation |
+| `cli.py` | Click CLI commands and argument handling |
 
 ## Data layout
 
@@ -203,6 +213,7 @@ scad session clean my-project-initial-Feb28-1400  # removes container, clones, s
       my-project-code/
       my-project-docs/
     claude/                         # mounted as container ~/.claude/
+    claude.json                     # mounted as container ~/.claude.json
     events.log                      # append-only event history
 ```
 

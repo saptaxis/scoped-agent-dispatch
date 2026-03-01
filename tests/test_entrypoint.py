@@ -85,8 +85,7 @@ class TestEntrypointTemplate:
 
     def test_generates_claude_config_stub(self, jinja_env):
         result = _render_entrypoint(jinja_env)
-        assert "hasCompletedOnboarding" in result
-        assert "installMethod" in result
+        assert "seed-claude.json" in result
         assert ".claude.json" in result
 
     def test_runs_bootstrap(self, jinja_env):
@@ -117,15 +116,15 @@ class TestEntrypointTemplate:
         assert exec_pos < claude_pos
 
     def test_pretrusts_workdir(self, jinja_env):
-        """Entrypoint .claude.json includes hasTrustDialogAccepted for workdir."""
+        """Entrypoint seeds .claude.json from seed file (trust logic in claude_config)."""
         result = _render_entrypoint(jinja_env)
-        assert "hasTrustDialogAccepted" in result
-        assert "/workspace/" in result
+        assert "seed-claude.json" in result
+        assert ".claude.json" in result
 
-    def test_disables_coauthored_by(self, jinja_env):
-        """Entrypoint sets includeCoAuthoredBy to false in .claude.json."""
+    def test_no_include_coauthored_by_in_entrypoint(self, jinja_env):
+        """Entrypoint does NOT contain the broken includeCoAuthoredBy setting."""
         result = _render_entrypoint(jinja_env)
-        assert "includeCoAuthoredBy" in result
+        assert "includeCoAuthoredBy" not in result
 
     def test_claude_exit_drops_to_bash(self, jinja_env):
         """Interactive mode: Claude exit drops to bash, not container exit."""
@@ -145,52 +144,16 @@ class TestEntrypointTemplate:
         assert ".credentials.json" in result
 
     def test_seeds_settings_json(self, jinja_env):
-        """Entrypoint creates settings.json if not present."""
+        """Entrypoint seeds settings.json from rendered seed file."""
         result = _render_entrypoint(jinja_env)
         assert "settings.json" in result
+        assert "seed-settings.json" in result
 
-    def test_bypass_permissions_when_skip_enabled(self, jinja_env):
-        """Entrypoint sets bypassPermissions when dangerously_skip_permissions is true."""
-        result = _render_entrypoint(
-            jinja_env,
-            claude={"dangerously_skip_permissions": True, "additional_flags": None},
-        )
-        assert "bypassPermissions" in result
-        assert "skipDangerousModePermissionPrompt" in result
-
-    def test_no_bypass_permissions_when_skip_disabled(self, jinja_env):
-        """Entrypoint does NOT set bypassPermissions when dangerously_skip_permissions is false."""
-        result = _render_entrypoint(
-            jinja_env,
-            claude={"dangerously_skip_permissions": False, "additional_flags": None},
-        )
-        assert "bypassPermissions" not in result
-
-    def test_deny_rules_always_present(self, jinja_env):
-        """Entrypoint always adds deny rules regardless of permissions mode."""
+    def test_seeds_from_json_files(self, jinja_env):
+        """Entrypoint uses seed JSON files instead of inline Python config."""
         result = _render_entrypoint(jinja_env)
-        assert "deny" in result
-        assert "rm -rf" in result
-
-    def test_pretooluse_hooks(self, jinja_env):
-        """Entrypoint adds PreToolUse safety hooks."""
-        result = _render_entrypoint(jinja_env)
-        assert "PreToolUse" in result
-
-    def test_cleanup_period(self, jinja_env):
-        """Entrypoint sets cleanupPeriodDays to prevent auto-cleanup."""
-        result = _render_entrypoint(jinja_env)
-        assert "cleanupPeriodDays" in result
-
-    def test_statusline_hook(self, jinja_env):
-        """Entrypoint configures statusline hook in settings.json."""
-        result = _render_entrypoint(jinja_env)
-        assert "Notification" in result or "statusline" in result
-
-    def test_statusline_hook_command(self, jinja_env):
-        """Statusline hook points to the statusline script."""
-        result = _render_entrypoint(jinja_env)
-        assert "statusline.sh" in result
+        assert "seed-claude.json" in result
+        assert "seed-settings.json" in result
 
     def test_git_delta_config(self, jinja_env):
         """Entrypoint configures git to use delta as pager."""

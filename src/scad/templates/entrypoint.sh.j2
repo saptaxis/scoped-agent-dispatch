@@ -30,19 +30,15 @@ exec > >(tee -a "$LOG_FILE") 2>&1
 
 echo "[scad] Starting session (run: $RUN_ID)"
 
-# Seed Claude config — pre-trust workdir, skip onboarding
-# Always merge required keys (Claude overwrites .claude.json on first run)
+# Seed Claude config — merge seed values into existing .claude.json
 mkdir -p "$HOME/.claude"
 python3 -c "
 import json, pathlib
-p = pathlib.Path('$HOME/.claude.json')
-d = json.loads(p.read_text()) if p.exists() else {}
-d['hasCompletedOnboarding'] = True
-d['effortCalloutDismissed'] = True
-d['includeCoAuthoredBy'] = False
-d.setdefault('installMethod', 'native')
-d.setdefault('projects', {}).setdefault('/workspace/{{ workdir_key }}', {})['hasTrustDialogAccepted'] = True
-p.write_text(json.dumps(d, indent=2))
+target = pathlib.Path('$HOME/.claude.json')
+seed = json.loads(pathlib.Path('/home/scad/seed-claude.json').read_text())
+existing = json.loads(target.read_text()) if target.exists() else {}
+existing.update(seed)
+target.write_text(json.dumps(existing, indent=2))
 "
 
 # Copy host git config if mounted
@@ -64,59 +60,18 @@ if [ -f /mnt/host-claude-credentials.json ]; then
     cp /mnt/host-claude-credentials.json "$HOME/.claude/.credentials.json"
 fi
 
-# Configure Claude settings
+# Seed Claude settings — merge seed values into existing settings.json
 CLAUDE_DIR="$HOME/.claude"
 if [ ! -f "$CLAUDE_DIR/settings.json" ]; then
     echo '{}' > "$CLAUDE_DIR/settings.json"
 fi
 python3 -c "
 import json, pathlib
-p = pathlib.Path('$CLAUDE_DIR/settings.json')
-d = json.loads(p.read_text())
-
-# Prevent auto-cleanup of session data
-d['cleanupPeriodDays'] = 365
-
-{% if claude.dangerously_skip_permissions %}
-# Auto-accept bypass permissions (no interactive prompt)
-d.setdefault('permissions', {})['defaultMode'] = 'bypassPermissions'
-d['skipDangerousModePermissionPrompt'] = True
-{% endif %}
-
-# Deny rules — safety net for destructive commands (always applied)
-d.setdefault('permissions', {})['deny'] = [
-    'Bash(rm -rf /)',
-    'Bash(sudo *)',
-    'Bash(mkfs*)',
-    'Bash(dd if=*)',
-    'Bash(git push * --force* main)',
-    'Bash(git push * --force* master)',
-    'Bash(git reset --hard*)',
-]
-
-# PreToolUse safety hooks
-d.setdefault('hooks', {})['PreToolUse'] = [
-    {
-        'matcher': 'Bash',
-        'hooks': [{
-            'type': 'prompt',
-            'prompt': 'Block if the command contains rm -rf / or pushes directly to main/master branches. Allow everything else.',
-        }],
-    },
-]
-
-# Statusline hook — live cost/context during interactive sessions
-d.setdefault('hooks', {})['Notification'] = [
-    {
-        'matcher': 'statusline',
-        'hooks': [{
-            'type': 'command',
-            'command': 'bash /home/scad/statusline.sh',
-        }],
-    },
-]
-
-p.write_text(json.dumps(d, indent=2))
+target = pathlib.Path('$CLAUDE_DIR/settings.json')
+seed = json.loads(pathlib.Path('/home/scad/seed-settings.json').read_text())
+existing = json.loads(target.read_text()) if target.exists() else {}
+existing.update(seed)
+target.write_text(json.dumps(existing, indent=2))
 "
 
 # Install Claude plugins (idempotent — skips already-installed)
