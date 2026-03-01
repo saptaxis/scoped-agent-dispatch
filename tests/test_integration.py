@@ -65,11 +65,11 @@ class TestBuildContext:
 class TestRunIdGeneration:
     def test_uniqueness(self):
         """Run IDs generated at different times should contain config name."""
-        rid = generate_run_id("lwg")
+        rid = generate_run_id("lwg", "plan07")
         assert "lwg" in rid
 
     def test_format_readable(self):
-        rid = generate_run_id("lwg")
+        rid = generate_run_id("lwg", "plan07")
         # Should contain month abbreviation
         months = [
             "Jan", "Feb", "Mar", "Apr", "May", "Jun",

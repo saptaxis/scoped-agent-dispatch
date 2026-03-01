@@ -41,12 +41,12 @@ def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
 
 
-def generate_run_id(config_name: str) -> str:
-    """Generate a unique run ID from config name and current timestamp."""
-    now = datetime.now()  # local time, not UTC
-    date_str = now.strftime("%b%d")  # e.g., Feb26
-    time_str = now.strftime("%H%M")  # e.g., 1430
-    return f"{config_name}-{date_str}-{time_str}"
+def generate_run_id(config_name: str, tag: str) -> str:
+    """Generate a unique run ID: {config}-{tag}-{MonDD}-{HHMM}."""
+    now = datetime.now()
+    date_str = now.strftime("%b%d")
+    time_str = now.strftime("%H%M")
+    return f"{config_name}-{tag}-{date_str}-{time_str}"
 
 
 def check_claude_auth() -> tuple[bool, float]:
@@ -67,10 +67,10 @@ def check_claude_auth() -> tuple[bool, float]:
         return False, 0.0
 
 
-def generate_branch_name() -> str:
-    """Auto-generate branch name: scad-MonDD-HHMM."""
-    now = datetime.now()  # local time, not UTC
-    return f"scad-{now.strftime('%b%d')}-{now.strftime('%H%M')}"
+def generate_branch_name(tag: str) -> str:
+    """Auto-generate branch name: scad-{tag}-{MonDD}-{HHMM}."""
+    now = datetime.now()
+    return f"scad-{tag}-{now.strftime('%b%d')}-{now.strftime('%H%M')}"
 
 
 def check_branch_exists(repo_path: Path, branch: str) -> bool:
@@ -82,14 +82,14 @@ def check_branch_exists(repo_path: Path, branch: str) -> bool:
     return bool(result.stdout.strip())
 
 
-def resolve_branch(config: ScadConfig, branch: Optional[str]) -> str:
+def resolve_branch(config: ScadConfig, branch: Optional[str], tag: str = "notag") -> str:
     """Resolve branch name: validate user-specified or auto-generate.
 
     User-specified branch that already exists raises ClickException.
     Auto-generated branches get -2, -3 suffix on collision.
     """
     if branch is None:
-        branch = generate_branch_name()
+        branch = generate_branch_name(tag)
         base = branch
         suffix = 2
         while any(
@@ -544,9 +544,13 @@ def sync_from_host(run_id: str, config: ScadConfig) -> list[dict]:
 
 
 def config_name_for_run(run_id: str) -> Optional[str]:
-    """Extract config name from a run ID (format: <config>-<MonDD>-<HHMM>)."""
-    parts = run_id.rsplit("-", 2)
-    if len(parts) >= 3:
+    """Extract config name from run ID. Checks events.log first, then heuristic."""
+    info = _parse_events_log(run_id)
+    if info.get("config") and info["config"] != "?":
+        return info["config"]
+    # Fallback: first segment of run_id (works for simple config names)
+    parts = run_id.split("-")
+    if len(parts) >= 4:
         return parts[0]
     return None
 

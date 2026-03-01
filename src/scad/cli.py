@@ -91,7 +91,7 @@ def code():
 
 
 def run_agent(
-    config, branch: str, prompt: str = None, rebuild: bool = False
+    config, branch: str, tag: str, prompt: str = None, rebuild: bool = False
 ) -> str:
     """Orchestrate the full agent lifecycle: resolve branch, build, create clones, run."""
     # Pre-flight: check Claude auth
@@ -106,7 +106,7 @@ def run_agent(
             f"Consider running: claude /login"
         )
 
-    run_id = generate_run_id(config.name)
+    run_id = generate_run_id(config.name, tag)
 
     # Build image if needed
     if rebuild or not image_exists(config):
@@ -142,10 +142,11 @@ def run_agent(
 
 @session.command("start")
 @click.argument("config_name", shell_complete=_complete_config_names)
+@click.option("--tag", required=True, help="Session tag (e.g., plan07, bugfix-auth). Use 'notag' to opt out.")
 @click.option("--branch", default=None, help="Branch name (auto-generated if not specified).")
 @click.option("--prompt", default=None, help="Prompt for headless mode.")
 @click.option("--rebuild", is_flag=True, help="Force rebuild the Docker image.")
-def session_start(config_name: str, branch: str, prompt: str, rebuild: bool):
+def session_start(config_name: str, tag: str, branch: str, prompt: str, rebuild: bool):
     """Launch an agent in a new container."""
     try:
         config = load_config(config_name)
@@ -157,9 +158,9 @@ def session_start(config_name: str, branch: str, prompt: str, rebuild: bool):
         sys.exit(2)
 
     try:
-        branch = resolve_branch(config, branch)
+        branch = resolve_branch(config, branch, tag)
         run_id = run_agent(
-            config, branch=branch, prompt=prompt, rebuild=rebuild
+            config, branch=branch, tag=tag, prompt=prompt, rebuild=rebuild
         )
         log_event(run_id, "start", f"config={config.name} branch={branch}")
         if prompt:

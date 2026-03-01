@@ -261,7 +261,7 @@ class TestSessionStart:
     @patch("scad.cli.load_config")
     def test_start_config_not_found(self, mock_load, runner):
         mock_load.side_effect = FileNotFoundError("Config 'bad' not found")
-        result = runner.invoke(main, ["session", "start", "bad"])
+        result = runner.invoke(main, ["session", "start", "bad", "--tag", "test"])
         assert result.exit_code != 0
         assert "not found" in result.output.lower()
 
@@ -273,15 +273,22 @@ class TestSessionStart:
         mock_config.name = "test"
         mock_load.return_value = mock_config
         mock_resolve.return_value = "plan-22"
-        mock_run.return_value = "test-Feb27-1430"
+        mock_run.return_value = "test-plan07-Feb27-1430"
 
         result = runner.invoke(
-            main, ["session", "start", "test", "--branch", "plan-22", "--prompt", "do stuff"]
+            main, ["session", "start", "test", "--tag", "plan07", "--branch", "plan-22", "--prompt", "do stuff"]
         )
         assert result.exit_code == 0
         mock_run.assert_called_once()
         assert mock_run.call_args[1]["branch"] == "plan-22"
+        assert mock_run.call_args[1]["tag"] == "plan07"
         assert mock_run.call_args[1]["prompt"] == "do stuff"
+
+    def test_start_requires_tag(self, runner):
+        """session start errors without --tag."""
+        result = runner.invoke(main, ["session", "start", "test"])
+        assert result.exit_code != 0
+        assert "Missing option" in result.output or "tag" in result.output.lower()
 
     @patch("scad.cli.run_agent")
     @patch("scad.cli.resolve_branch")
@@ -290,12 +297,12 @@ class TestSessionStart:
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
-        mock_resolve.return_value = "scad-Feb27-1430"
-        mock_run.return_value = "test-Feb27-1430"
+        mock_resolve.return_value = "scad-test-Feb27-1430"
+        mock_run.return_value = "test-test-Feb27-1430"
 
-        result = runner.invoke(main, ["session", "start", "test"])
+        result = runner.invoke(main, ["session", "start", "test", "--tag", "test"])
         assert result.exit_code == 0
-        mock_resolve.assert_called_once_with(mock_config, None)
+        mock_resolve.assert_called_once_with(mock_config, None, "test")
 
 
 class TestSessionAttach:
@@ -608,16 +615,16 @@ class TestEventLogging:
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
-        mock_resolve.return_value = "scad-Feb28-1400"
-        mock_run.return_value = "test-Feb28-1400"
+        mock_resolve.return_value = "scad-plan07-Feb28-1400"
+        mock_run.return_value = "test-plan07-Feb28-1400"
 
-        runner.invoke(main, ["session", "start", "test"])
+        runner.invoke(main, ["session", "start", "test", "--tag", "plan07"])
         mock_log.assert_called_once()
         call_args = mock_log.call_args
-        assert call_args[0][0] == "test-Feb28-1400"  # run_id
+        assert call_args[0][0] == "test-plan07-Feb28-1400"  # run_id
         assert call_args[0][1] == "start"  # verb
         assert "config=test" in call_args[0][2]
-        assert "branch=scad-Feb28-1400" in call_args[0][2]
+        assert "branch=scad-plan07-Feb28-1400" in call_args[0][2]
 
     @patch("scad.cli.log_event")
     @patch("scad.cli.stop_container")

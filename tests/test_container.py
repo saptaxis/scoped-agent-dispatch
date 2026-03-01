@@ -89,28 +89,32 @@ class TestRenderBuildContext:
 
 
 class TestGenerateRunId:
-    def test_format(self):
-        run_id = generate_run_id("lwg")
-        assert run_id.startswith("lwg-")
+    def test_format_with_tag(self):
+        run_id = generate_run_id("lwg", "plan07")
+        assert run_id.startswith("lwg-plan07-")
         parts = run_id.split("-")
-        assert len(parts) == 3
+        assert len(parts) == 4  # config-tag-MonDD-HHMM
         assert len(parts[-1]) == 4  # HHMM
         assert len(parts[-2]) == 5  # MonDD
 
-    def test_contains_config_name(self):
-        run_id = generate_run_id("my-project")
-        assert run_id.startswith("my-project-")
+    def test_contains_config_and_tag(self):
+        run_id = generate_run_id("my-project", "bugfix")
+        assert "my-project-bugfix-" in run_id
+
+    def test_notag_default(self):
+        run_id = generate_run_id("demo", "notag")
+        assert "demo-notag-" in run_id
 
 
 class TestBranchManagement:
     def test_generate_branch_name_format(self):
-        name = generate_branch_name()
-        assert name.startswith("scad-")
-        # Format: scad-MonDD-HHMM
+        name = generate_branch_name("plan07")
+        assert name.startswith("scad-plan07-")
+        # Format: scad-tag-MonDD-HHMM
         parts = name.split("-")
-        assert len(parts) == 3
-        assert len(parts[1]) == 5  # MonDD like Feb27
-        assert len(parts[2]) == 4  # HHMM like 1430
+        assert len(parts) == 4
+        assert len(parts[2]) == 5  # MonDD like Feb27
+        assert len(parts[3]) == 4  # HHMM like 1430
 
     @patch("scad.container.subprocess.run")
     def test_check_branch_exists_true(self, mock_run):
