@@ -1237,3 +1237,30 @@ def dispatch(config_name, tag, prompt, no_wait, interactive, attach, fetch, no_b
             click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
         else:
             click.echo(f"[scad]   Attach: scad session attach {run_id}")
+
+
+@main.command()
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def harvest(run_id: str):
+    """Fetch branches + show diff. The 'what did Claude produce?' command."""
+    validate_run_id(run_id)
+    config = _config_for_run(run_id)
+
+    # Fetch
+    results = fetch_to_host(run_id, config)
+    if results:
+        for r in results:
+            click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
+    else:
+        click.echo(f"[scad] Nothing to fetch for {run_id}")
+
+    # Diff
+    try:
+        diffs = diff_from_source(run_id, config)
+        if diffs:
+            click.echo()
+            for repo, diff_text in diffs.items():
+                click.echo(f"--- {repo} ---")
+                click.echo(diff_text)
+    except FileNotFoundError:
+        pass  # Clones already cleaned — skip diff

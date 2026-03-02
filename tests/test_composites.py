@@ -125,3 +125,50 @@ class TestDispatch:
         ])
         assert result.exit_code == 0
         mock_build.assert_called_once()
+
+
+class TestHarvest:
+    """Tests for scad harvest — fetch + diff composite."""
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_fetches_and_diffs(
+        self, mock_config, mock_diff, mock_fetch, mock_validate
+    ):
+        """harvest runs fetch then diff."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_diff.return_value = {"code": "+new line"}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run"])
+        assert result.exit_code == 0
+        mock_fetch.assert_called_once()
+        mock_diff.assert_called_once()
+        assert "Fetched" in result.output
+        assert "+new line" in result.output
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_no_changes(
+        self, mock_config, mock_diff, mock_fetch, mock_validate
+    ):
+        """harvest with no changes shows message."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_fetch.return_value = []
+        mock_diff.return_value = {}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run"])
+        assert result.exit_code == 0
