@@ -5,10 +5,9 @@ import subprocess
 import subprocess as _subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
-
-import time
 
 import click
 import docker
