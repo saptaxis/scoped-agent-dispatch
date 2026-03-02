@@ -297,6 +297,54 @@ class TestSessionJobsCLI:
         assert "No jobs" in result.output
 
 
+class TestBranchPerJob:
+
+    @patch("scad.container.docker.from_env")
+    def test_inject_with_branch_includes_checkout(self, mock_docker, tmp_path):
+        """Inject with --branch includes git checkout in exec command."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            inject_job(
+                run_id="test-run",
+                prompt="Task",
+                headless=True,
+                workdir_key="code",
+                branch="feature-x",
+            )
+
+        exec_cmd = mock_container.exec_run.call_args[0][0]
+        # The bash -c command is the third element (index 2)
+        bash_cmd = exec_cmd[2] if isinstance(exec_cmd, list) else str(exec_cmd)
+        assert "git checkout" in bash_cmd
+        assert "feature-x" in bash_cmd
+
+    @patch("scad.container.docker.from_env")
+    def test_inject_branch_stored_in_metadata(self, mock_docker, tmp_path):
+        """Branch is recorded in job metadata."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            job_id = inject_job(
+                run_id="test-run",
+                prompt="Task",
+                headless=True,
+                workdir_key="code",
+                branch="feature-x",
+            )
+
+        meta = json.loads((tmp_path / "test-run" / "jobs" / f"{job_id}.json").read_text())
+        assert meta["branch"] == "feature-x"
+
+
 class TestWorkspaceAdd:
 
     def test_add_creates_symlink(self, tmp_path):

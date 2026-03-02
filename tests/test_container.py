@@ -749,6 +749,91 @@ class TestFetchToHost:
             fetch_to_host("nonexistent-run", config)
 
 
+class TestFetchToHostMultiBranch:
+    """Tests for multi-branch fetch (branch-per-job)."""
+
+    @patch("scad.container.subprocess.run")
+    def test_fetches_all_branches(self, mock_run, sample_config, tmp_path):
+        """fetch_to_host fetches all non-main branches, not just the checked-out one."""
+        clone_path = tmp_path / "test-run" / "workspace" / "code"
+        clone_path.mkdir(parents=True)
+        (clone_path / ".git").mkdir()
+
+        def side_effect(cmd, **kwargs):
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            cmd_str = " ".join(cmd)
+            if "rev-parse --abbrev-ref HEAD" in cmd_str:
+                result.stdout = "feature-a\n"
+            elif "branch --list --format" in cmd_str:
+                result.stdout = "main\nfeature-a\nfeature-b\n"
+            elif "rev-parse --verify" in cmd_str:
+                if "refs/heads/main" in cmd_str:
+                    result.returncode = 0
+                else:
+                    result.returncode = 1
+            return result
+
+        mock_run.side_effect = side_effect
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            results = fetch_to_host("test-run", sample_config)
+
+        assert len(results) >= 1
+
+    def test_multi_branch_fetch_integration(self, tmp_path, monkeypatch):
+        """fetch_to_host discovers and fetches multiple branches from a single clone."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+
+        # Create source repo
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+
+        # Detect default branch name (master or main depending on git config)
+        default_branch = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Create clone with two branches
+        clone_dir = tmp_path / "runs" / "test-run" / "workspace" / "code"
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", "--local", str(source), str(clone_dir)], check=True, capture_output=True)
+
+        # Create branch-a with a commit
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "branch-a"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "commit", "--allow-empty", "-m", "work-a"], check=True, capture_output=True)
+
+        # Create branch-b from default branch with a commit
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", default_branch], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "branch-b"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "commit", "--allow-empty", "-m", "work-b"], check=True, capture_output=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(source), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        results = fetch_to_host("test-run", config)
+
+        # Both branches should be fetched
+        assert len(results) == 2
+        fetched_branches = {r["branch"] for r in results}
+        assert "branch-a" in fetched_branches
+        assert "branch-b" in fetched_branches
+
+        # Both branches should exist in source
+        for branch_name in ("branch-a", "branch-b"):
+            branches = subprocess.run(
+                ["git", "-C", str(source), "branch", "--list", branch_name],
+                capture_output=True, text=True,
+            )
+            assert branch_name in branches.stdout
+
+
 class TestSyncFromHost:
     def test_syncs_new_branches_into_clone(self, tmp_path, monkeypatch):
         """sync_from_host fetches source repo refs into clone."""

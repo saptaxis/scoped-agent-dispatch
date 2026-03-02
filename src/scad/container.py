@@ -644,49 +644,50 @@ def _resolve_workspace_dir(run_id: str) -> Path:
 def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     """Fetch branches from clones back to source repos.
 
-    For each clone: detach HEAD, fetch branch to source, re-checkout branch.
-    Appends to ~/.scad/runs/<run-id>/events.log.
+    Discovers all non-default branches in each clone and fetches them.
     """
     clone_base = _resolve_workspace_dir(run_id)
 
     results = []
     for key, repo_cfg in config.repos.items():
         clone_path = clone_base / key
-        if not clone_path.exists() or clone_path.is_symlink():
+        if not clone_path.exists() or clone_path.is_symlink() or not (clone_path / ".git").exists():
             continue
 
         source_path = repo_cfg.resolved_path
 
-        # Get current branch name
-        branch = subprocess.run(
+        # Get current branch
+        current = subprocess.run(
             ["git", "-C", str(clone_path), "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, check=True,
         ).stdout.strip()
 
-        if branch == "HEAD":
+        # Get all local branches
+        all_branches_out = subprocess.run(
+            ["git", "-C", str(clone_path), "branch", "--list", "--format=%(refname:short)"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        all_branches = [b.strip() for b in all_branches_out.split("\n") if b.strip()]
+
+        # Filter to non-default branches
+        default = _detect_default_branch(clone_path)
+        branches_to_fetch = [b for b in all_branches if b != default and b != "HEAD"]
+
+        if not branches_to_fetch:
             continue
 
-        # Detach HEAD so source repo can accept the fetch
-        subprocess.run(
-            ["git", "-C", str(clone_path), "checkout", "--detach"],
-            capture_output=True, check=True,
-        )
+        for branch in branches_to_fetch:
+            try:
+                subprocess.run(
+                    ["git", "-C", str(source_path), "fetch",
+                     str(clone_path), f"{branch}:{branch}"],
+                    capture_output=True, text=True, check=True,
+                )
+                results.append({"repo": key, "branch": branch, "source": str(source_path)})
+            except subprocess.CalledProcessError:
+                pass
 
-        # Fetch branch into source repo
-        subprocess.run(
-            ["git", "-C", str(source_path), "fetch", str(clone_path), f"{branch}:{branch}"],
-            capture_output=True, text=True, check=True,
-        )
-
-        # Re-checkout the branch in the clone
-        subprocess.run(
-            ["git", "-C", str(clone_path), "checkout", branch],
-            capture_output=True, check=True,
-        )
-
-        results.append({"repo": key, "branch": branch, "source": str(source_path)})
-
-    # Log to events.log
     for r in results:
         log_event(run_id, "fetch", f"{r['repo']} {r['branch']} → {r['source']}")
 
