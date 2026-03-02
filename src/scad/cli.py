@@ -15,7 +15,7 @@ import click
 import docker
 import yaml
 
-from scad.config import load_config, list_configs, CONFIG_DIR, ScadConfig
+from scad.config import load_config, list_configs, CONFIG_DIR, SCAD_DIR, ScadConfig
 from scad.container import (
     build_image,
     check_claude_auth,
@@ -70,8 +70,8 @@ def _relative_time(iso_str: str) -> str:
 
 
 def _complete_run_ids(ctx, param, incomplete):
-    """Shell completion for run IDs from ~/.scad/runs/."""
-    runs_dir = Path.home() / ".scad" / "runs"
+    """Shell completion for run IDs from SCAD_HOME/runs/."""
+    runs_dir = SCAD_DIR / "runs"
     if not runs_dir.exists():
         return []
     return sorted(
@@ -564,7 +564,7 @@ def session_status(show_all: bool):
             )
             for run in running:
                 started = _relative_time(run["started"]) if run["started"] else "?"
-                clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "workspace"
+                clone_dir = SCAD_DIR / "runs" / run["run_id"] / "workspace"
                 clones = "yes" if clone_dir.exists() else "-"
                 click.echo(
                     f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
@@ -647,7 +647,7 @@ def session_info(run_id: str):
 def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
     """Read agent log output."""
     validate_run_id(run_id)
-    logs_dir = Path.home() / ".scad" / "logs"
+    logs_dir = SCAD_DIR / "logs"
     if job:
         log_path = logs_dir / f"{job}.stream.jsonl"
         not_found_msg = f"No stream log found for job {job}"
@@ -828,7 +828,7 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: 
         inject_thread.join(timeout=2.0)
 
         # Find the newest stream.jsonl for this run
-        logs_dir = Path.home() / ".scad" / "logs"
+        logs_dir = SCAD_DIR / "logs"
         stream_path = None
         if logs_dir.exists():
             candidates = sorted(logs_dir.glob(f"{run_id}-job-*.stream.jsonl"))
@@ -860,7 +860,7 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: 
         click.echo(f"[scad] Completed: {job_id} (exit code {exit_code})")
 
         # Parse stream.jsonl for final result (skip if --tail already showed activity)
-        logs_dir = Path.home() / ".scad" / "logs"
+        logs_dir = SCAD_DIR / "logs"
         stream_path = logs_dir / f"{job_id}.stream.jsonl"
         if stream_path.exists():
             for line in stream_path.read_text().splitlines():

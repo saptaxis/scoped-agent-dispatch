@@ -614,8 +614,9 @@ class TestInjectTail:
         )
         mock_inject.return_value = ("test-run-job-001", 0)
 
-        # Create a stream.jsonl at the expected ~/.scad/logs/ path
-        logs_dir = tmp_path / ".scad" / "logs"
+        # Create a stream.jsonl at the expected SCAD_HOME/logs/ path
+        scad_dir = tmp_path / ".scad"
+        logs_dir = scad_dir / "logs"
         logs_dir.mkdir(parents=True)
         stream_file = logs_dir / "test-run-job-001.stream.jsonl"
         stream_file.write_text(
@@ -623,7 +624,7 @@ class TestInjectTail:
         )
 
         runner = CliRunner()
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, [
                 "session", "inject", "test-run",
                 "--prompt", "Task",
@@ -644,8 +645,9 @@ class TestInjectTail:
         )
         mock_inject.return_value = ("test-run-job-001", 0)
 
-        # Pre-create the stream.jsonl at the expected ~/.scad/logs/ path
-        logs_dir = tmp_path / ".scad" / "logs"
+        # Pre-create the stream.jsonl at the expected SCAD_HOME/logs/ path
+        scad_dir = tmp_path / ".scad"
+        logs_dir = scad_dir / "logs"
         logs_dir.mkdir(parents=True)
         stream_file = logs_dir / "test-run-job-001.stream.jsonl"
         lines = [
@@ -663,7 +665,7 @@ class TestInjectTail:
         stream_file.write_text("\n".join(lines) + "\n")
 
         runner = CliRunner()
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, [
                 "session", "inject", "test-run",
                 "--prompt", "Task",

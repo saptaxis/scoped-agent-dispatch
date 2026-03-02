@@ -1,13 +1,28 @@
 """Config loading and validation."""
 
+import os
 from pathlib import Path
 from typing import Optional
 
 import yaml
 from pydantic import BaseModel, model_validator
 
-SCAD_DIR = Path.home() / ".scad"
-CONFIG_DIR = SCAD_DIR / "configs"
+
+def get_scad_home() -> Path:
+    """Return SCAD_HOME — defaults to ~/.scad, overridable via env var."""
+    env = os.environ.get("SCAD_HOME")
+    if env:
+        return Path(env)
+    return Path.home() / ".scad"
+
+
+def get_config_dir() -> Path:
+    """Return config directory inside SCAD_HOME."""
+    return get_scad_home() / "configs"
+
+
+SCAD_DIR = get_scad_home()
+CONFIG_DIR = get_config_dir()
 
 CONFIG_TEMPLATE = """\
 # scad config: {name}

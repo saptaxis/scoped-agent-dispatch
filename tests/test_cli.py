@@ -138,12 +138,12 @@ class TestSessionStop:
 class TestSessionLogs:
     @patch("scad.cli.validate_run_id")
     def test_logs_shows_file_content(self, mock_validate, runner, tmp_path):
-        with patch("scad.cli.Path.home", return_value=tmp_path):
-            # Create the expected directory structure
-            logs_dir = tmp_path / ".scad" / "logs"
-            logs_dir.mkdir(parents=True)
-            (logs_dir / "test-run.log").write_text("line1\nline2\nline3\n")
+        scad_dir = tmp_path / ".scad"
+        logs_dir = scad_dir / "logs"
+        logs_dir.mkdir(parents=True)
+        (logs_dir / "test-run.log").write_text("line1\nline2\nline3\n")
 
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, ["session", "logs", "test-run"])
         assert result.exit_code == 0
         assert "line1" in result.output
@@ -151,19 +151,21 @@ class TestSessionLogs:
 
     @patch("scad.cli.validate_run_id")
     def test_logs_not_found(self, mock_validate, runner, tmp_path):
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        scad_dir = tmp_path / ".scad"
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, ["session", "logs", "nonexistent"])
         assert result.exit_code != 0
         assert "No log file" in result.output
 
     @patch("scad.cli.validate_run_id")
     def test_logs_respects_line_count(self, mock_validate, runner, tmp_path):
-        logs_dir = tmp_path / ".scad" / "logs"
+        scad_dir = tmp_path / ".scad"
+        logs_dir = scad_dir / "logs"
         logs_dir.mkdir(parents=True)
         lines = [f"line{i}" for i in range(200)]
         (logs_dir / "big-run.log").write_text("\n".join(lines))
 
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, ["session", "logs", "big-run", "-n", "5"])
         assert result.exit_code == 0
         assert "line199" in result.output
@@ -171,14 +173,15 @@ class TestSessionLogs:
 
     @patch("scad.cli.validate_run_id")
     def test_logs_stream_shows_jsonl(self, mock_validate, runner, tmp_path):
-        logs_dir = tmp_path / ".scad" / "logs"
+        scad_dir = tmp_path / ".scad"
+        logs_dir = scad_dir / "logs"
         logs_dir.mkdir(parents=True)
         (logs_dir / "test-run.stream.jsonl").write_text(
             '{"type":"tool_use","tool":"Edit"}\n'
             '{"type":"tool_result","output":"ok"}\n'
         )
 
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, ["session", "logs", "test-run", "--stream"])
         assert result.exit_code == 0
         assert "tool_use" in result.output
@@ -186,7 +189,8 @@ class TestSessionLogs:
 
     @patch("scad.cli.validate_run_id")
     def test_logs_stream_not_found(self, mock_validate, runner, tmp_path):
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        scad_dir = tmp_path / ".scad"
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             result = runner.invoke(main, ["session", "logs", "nonexistent", "--stream"])
         assert result.exit_code != 0
         assert "No stream log" in result.output
@@ -751,19 +755,21 @@ class TestConfigRemove:
 
 class TestShellCompletion:
     def test_run_id_completion_from_runs(self, tmp_path):
-        runs_dir = tmp_path / ".scad" / "runs"
+        scad_dir = tmp_path / ".scad"
+        runs_dir = scad_dir / "runs"
         runs_dir.mkdir(parents=True)
         (runs_dir / "demo-Feb28-1400").mkdir()
         (runs_dir / "scad-Feb28-0900").mkdir()
 
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             results = _complete_run_ids(None, None, "demo")
         completions = [c.value if hasattr(c, "value") else c for c in results]
         assert "demo-Feb28-1400" in completions
         assert "scad-Feb28-0900" not in completions
 
     def test_run_id_completion_empty(self, tmp_path):
-        with patch("scad.cli.Path.home", return_value=tmp_path):
+        scad_dir = tmp_path / ".scad"
+        with patch("scad.cli.SCAD_DIR", scad_dir):
             results = _complete_run_ids(None, None, "")
         assert results == []
 

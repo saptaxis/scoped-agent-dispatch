@@ -19,7 +19,12 @@ DEFAULT_PLUGINS = [
     "pyright-lsp@claude-plugins-official",
 ]
 
-RUNS_DIR = Path.home() / ".scad" / "runs"
+# Import lazily to avoid circular import at module level
+def _get_runs_dir() -> Path:
+    from scad.config import get_scad_home
+    return get_scad_home() / "runs"
+
+RUNS_DIR = _get_runs_dir()
 
 
 def get_host_timezone() -> str:

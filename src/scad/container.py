@@ -14,9 +14,9 @@ import docker
 from docker.errors import DockerException, NotFound as DockerNotFound
 from jinja2 import Environment, PackageLoader
 
-from scad.config import ScadConfig
+from scad.config import ScadConfig, get_scad_home
 
-SCAD_DIR = Path.home() / ".scad"
+SCAD_DIR = get_scad_home()
 RUNS_DIR = SCAD_DIR / "runs"
 
 
@@ -495,7 +495,7 @@ def list_scad_containers() -> list[dict]:
 def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
     """List completed runs from status JSON files."""
     if logs_dir is None:
-        logs_dir = Path.home() / ".scad" / "logs"
+        logs_dir = SCAD_DIR / "logs"
     if not logs_dir.exists():
         return []
     results = []
@@ -599,7 +599,7 @@ def run_container(
         image_tag = f"scad-{config.name}"
 
     client = docker.from_env()
-    logs_dir = Path.home() / ".scad" / "logs"
+    logs_dir = SCAD_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
     # Build volume mounts
@@ -940,7 +940,7 @@ def get_session_info(run_id: str) -> dict:
         ]
 
     # Container-side events (from entrypoint)
-    container_events_log = Path.home() / ".scad" / "logs" / f"{run_id}.events.log"
+    container_events_log = SCAD_DIR / "logs" / f"{run_id}.events.log"
     if container_events_log.exists():
         container_events = [
             line for line in container_events_log.read_text().strip().split("\n") if line

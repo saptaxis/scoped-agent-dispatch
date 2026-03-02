@@ -1,8 +1,10 @@
 """Config loading and validation tests."""
 
+import os
 import pytest
 import yaml
 from pathlib import Path
+from unittest.mock import patch
 from scad.config import ScadConfig, load_config, list_configs, SCAD_DEFAULT_PLUGINS, CONFIG_DIR, SCAD_DIR
 
 
@@ -264,3 +266,28 @@ class TestConfigDirMigration:
         _ensure_config_dir()
         assert configs_dir.exists()
         assert templates_dir.exists()  # NOT deleted
+
+
+class TestScadHome:
+    """Tests for configurable SCAD_HOME."""
+
+    def test_default_scad_home(self):
+        """Default SCAD_HOME is ~/.scad."""
+        from scad.config import get_scad_home
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("SCAD_HOME", None)
+            assert get_scad_home() == Path.home() / ".scad"
+
+    def test_custom_scad_home(self, tmp_path):
+        """SCAD_HOME env var overrides default."""
+        from scad.config import get_scad_home
+        custom = tmp_path / "custom-scad"
+        with patch.dict(os.environ, {"SCAD_HOME": str(custom)}):
+            assert get_scad_home() == custom
+
+    def test_config_dir_uses_scad_home(self, tmp_path):
+        """CONFIG_DIR resolves relative to SCAD_HOME."""
+        from scad.config import get_config_dir
+        custom = tmp_path / "custom-scad"
+        with patch.dict(os.environ, {"SCAD_HOME": str(custom)}):
+            assert get_config_dir() == custom / "configs"
