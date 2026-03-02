@@ -1264,3 +1264,39 @@ def harvest(run_id: str):
                 click.echo(diff_text)
     except FileNotFoundError:
         pass  # Clones already cleaned — skip diff
+
+
+@main.command()
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--no-fetch", is_flag=True, help="Skip fetching (risk losing unfetched branches).")
+@click.option("--keep-session", is_flag=True, help="Keep the session after fetching.")
+@click.option("--force", is_flag=True, help="Clean even if session is running.")
+def finish(run_id: str, no_fetch: bool, keep_session: bool, force: bool):
+    """Fetch branches + clean session. The 'I'm done' command."""
+    validate_run_id(run_id)
+    config = _config_for_run(run_id)
+
+    # Fetch (unless skipped)
+    if not no_fetch:
+        results = fetch_to_host(run_id, config)
+        if results:
+            for r in results:
+                click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
+        try:
+            diffs = diff_from_source(run_id, config)
+            if diffs:
+                click.echo()
+                click.echo("[scad] Changes saved:")
+                for repo, diff_text in diffs.items():
+                    added = diff_text.count("\n+") - diff_text.count("\n+++")
+                    removed = diff_text.count("\n-") - diff_text.count("\n---")
+                    click.echo(f"  {repo}: +{added} -{removed}")
+        except FileNotFoundError:
+            pass
+
+    # Clean (unless --keep-session)
+    if not keep_session:
+        clean_run(run_id)
+        click.echo(f"[scad] Cleaned: {run_id}")
+    else:
+        click.echo(f"[scad] Session kept: {run_id}")

@@ -172,3 +172,66 @@ class TestHarvest:
         runner = CliRunner()
         result = runner.invoke(main, ["harvest", "test-run"])
         assert result.exit_code == 0
+
+
+class TestFinish:
+    """Tests for scad finish — fetch + clean composite."""
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli.clean_run")
+    @patch("scad.cli._config_for_run")
+    def test_finish_fetches_then_cleans(
+        self, mock_config, mock_clean, mock_diff, mock_fetch, mock_validate
+    ):
+        """finish fetches before cleaning."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        mock_fetch.return_value = [{"repo": "code", "branch": "b", "source": "/tmp"}]
+        mock_diff.return_value = {}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["finish", "test-run"])
+        assert result.exit_code == 0
+        mock_fetch.assert_called_once()
+        mock_clean.assert_called_once()
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.clean_run")
+    @patch("scad.cli._config_for_run")
+    def test_finish_no_fetch_skips_fetch(
+        self, mock_config, mock_clean, mock_validate
+    ):
+        """finish --no-fetch skips fetching."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["finish", "test-run", "--no-fetch"])
+        assert result.exit_code == 0
+        mock_clean.assert_called_once()
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_finish_keep_session_skips_clean(
+        self, mock_config, mock_diff, mock_fetch, mock_validate
+    ):
+        """finish --keep-session fetches but doesn't clean."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_fetch.return_value = []
+        mock_diff.return_value = {}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["finish", "test-run", "--keep-session"])
+        assert result.exit_code == 0
