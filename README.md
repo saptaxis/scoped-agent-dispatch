@@ -28,6 +28,7 @@ Each session gets:
 - **Persistent Claude session data** across stop/restart
 - **Pre-configured plugins** active from the first prompt
 - **Host timezone** inherited (git commits match your clock)
+- **Three session modes** — interactive, interactive-with-prompt (Claude starts working on attach), headless (fire-and-forget)
 
 Sessions are long-lived. Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
 
@@ -37,7 +38,9 @@ Operational visibility: `scad session status` shows running sessions with creden
 
 ```bash
 # Session — container + Claude lifecycle
-scad session start <config> --tag <tag>  # launch session (--tag required, e.g., plan07, bugfix)
+scad session start <config> --tag <tag>  # launch interactive session
+scad session start <config> --tag <tag> --prompt "..."  # interactive with prompt (Claude starts working)
+scad session start <config> --tag <tag> --prompt "..." --headless  # fire-and-forget (uses claude -p)
 scad session stop <run-id>               # stop container (preserves state)
 scad session stop --all [--yes]          # stop all running sessions
 scad session stop --config <name> [--yes]  # stop all sessions for a config
@@ -51,7 +54,9 @@ scad session info <run-id>               # session dashboard (tokens/turns, cost
 
 # Code — git state between host and clones
 scad code fetch <run-id>                 # snapshot clone branches back to host repos
-scad code sync <run-id>                  # pull host repo updates into clones
+scad code sync <run-id>                  # sync host refs + fast-forward main
+scad code sync <run-id> --checkout main  # sync and switch to updated main
+scad code sync <run-id> --no-update-main  # fetch only (skip fast-forward)
 scad code refresh <run-id>               # push fresh credentials into running container
 
 # Project
@@ -67,6 +72,7 @@ scad config view <name>                  # print config YAML
 scad config edit <name>                  # open config in $EDITOR
 scad config add <path>                   # register external config (symlink)
 scad config remove <name>               # unregister config
+scad config info <name>                # structured environment summary
 ```
 
 ## Prerequisites
