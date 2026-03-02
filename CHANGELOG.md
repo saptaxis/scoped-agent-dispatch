@@ -1,6 +1,21 @@
 # Changelog
 
-## [0.2.0] — Unreleased
+## [0.2.1] — Unreleased
+
+Composite workflows, Claude Code plugin, small features.
+
+### Added
+- `session inject --wait` — blocking inject with exit code propagation and elapsed timer
+- `session inject --wait --tail` — real-time streaming of Claude activity during wait
+- `scad dispatch` — composite: build-if-needed → start → inject (headless+wait by default)
+- `scad harvest` — composite: code fetch + code diff summary, `--merge` for fast-forward
+- `scad finish` — composite: fetch-first safety + diff + session clean
+- Claude Code plugin — `.claude-plugin/plugin.json` + `skills/scad/SKILL.md` + `skills/scad-plan-adapt/SKILL.md`
+- Crash detection — `session status` shows recently-crashed containers, `session start` checks startup health
+- `python.editable` config option — `pip install -e .` at runtime for pyproject.toml projects
+- Configurable `SCAD_HOME` — env var override for `~/.scad/`, enables test isolation
+
+## [0.2.0] — 2026-03-03
 
 Session injection architecture — separates container lifecycle from Claude execution.
 
