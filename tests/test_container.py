@@ -1005,6 +1005,52 @@ class TestGetSessionInfo:
             get_session_info("nonexistent")
 
 
+class TestSessionInfoSubagents:
+    """Test that session info distinguishes main sessions from subagents."""
+
+    def test_counts_main_sessions_only(self, tmp_path, monkeypatch):
+        """rglob should not count subagent .jsonl files as sessions."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        run_dir = tmp_path / "test-run"
+        run_dir.mkdir()
+        (run_dir / "events.log").write_text("2026-03-02T14:00 start config=test branch=main\n")
+
+        projects = run_dir / "claude" / "projects"
+        project_dir = projects / "%2Fworkspace%2Fcode"
+        project_dir.mkdir(parents=True)
+
+        (project_dir / "abc123.jsonl").write_text("{}\n")
+
+        subagents = project_dir / "abc123" / "subagents"
+        subagents.mkdir(parents=True)
+        (subagents / "agent-1.jsonl").write_text("{}\n")
+        (subagents / "agent-2.jsonl").write_text("{}\n")
+
+        with patch("scad.container.docker.from_env"):
+            info = get_session_info("test-run")
+
+        assert len(info["claude_sessions"]) == 1
+        assert info["subagent_count"] == 2
+
+    def test_no_subagents(self, tmp_path, monkeypatch):
+        """When no subagents exist, count is 0."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        run_dir = tmp_path / "test-run"
+        run_dir.mkdir()
+        (run_dir / "events.log").write_text("2026-03-02T14:00 start config=test branch=main\n")
+
+        projects = run_dir / "claude" / "projects"
+        project_dir = projects / "%2Fworkspace%2Fcode"
+        project_dir.mkdir(parents=True)
+        (project_dir / "abc123.jsonl").write_text("{}\n")
+
+        with patch("scad.container.docker.from_env"):
+            info = get_session_info("test-run")
+
+        assert len(info["claude_sessions"]) == 1
+        assert info["subagent_count"] == 0
+
+
 class TestRefreshCredentials:
     @patch("scad.container.docker.from_env")
     def test_copies_credentials_to_container(self, mock_docker, tmp_path, monkeypatch):

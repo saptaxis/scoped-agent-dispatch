@@ -458,6 +458,8 @@ def session_info(run_id: str):
         click.echo("Claude sessions:")
         for s in info["claude_sessions"]:
             click.echo(f"  {s['id']} ({s['modified']})")
+        if info.get("subagent_count", 0) > 0:
+            click.echo(f"  ({info['subagent_count']} subagent session(s))")
     else:
         click.echo("Claude sessions: (none)")
 

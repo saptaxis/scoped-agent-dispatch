@@ -710,13 +710,20 @@ def get_session_info(run_id: str) -> dict:
     # Claude sessions — glob for .jsonl files in run_dir/claude/projects/
     claude_projects = run_dir / "claude" / "projects"
     info["claude_sessions"] = []
+    info["subagent_count"] = 0
     if claude_projects.exists():
-        for jsonl in claude_projects.rglob("*.jsonl"):
-            stat = jsonl.stat()
-            info["claude_sessions"].append({
-                "id": jsonl.stem,
-                "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
-            })
+        for project_dir in claude_projects.iterdir():
+            if not project_dir.is_dir():
+                continue
+            for jsonl in project_dir.glob("*.jsonl"):
+                stat = jsonl.stat()
+                info["claude_sessions"].append({
+                    "id": jsonl.stem,
+                    "modified": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+                })
+            for subagent_dir in project_dir.rglob("subagents"):
+                if subagent_dir.is_dir():
+                    info["subagent_count"] += len(list(subagent_dir.glob("*.jsonl")))
 
     return info
 
