@@ -136,14 +136,18 @@ def inject_job(
     if branch:
         parts.append(f"git checkout -B {branch}")
 
+    # Write prompt to a temp file inside the container to avoid all quoting issues
+    prompt_file = f"/tmp/{job_id}-prompt.txt"
+    container.exec_run(
+        ["bash", "-c", f"cat > {prompt_file} <<'SCADEOF'\n{prompt}\nSCADEOF"],
+    )
+
     if headless:
-        # Build claude -p command
-        claude_cmd = "claude -p"
+        # Build claude -p command, reading prompt from stdin
+        claude_cmd = f"claude -p --output-format stream-json"
 
         if dangerously_skip_permissions:
             claude_cmd += " --dangerously-skip-permissions"
-
-        claude_cmd += " --output-format stream-json"
 
         if add_dirs:
             for d in add_dirs:
@@ -152,9 +156,7 @@ def inject_job(
         if additional_flags:
             claude_cmd += f" {additional_flags}"
 
-        # Use single quotes around prompt to avoid shell interpretation
-        escaped_prompt = prompt.replace("'", "'\\''")
-        claude_cmd += f" '{escaped_prompt}'"
+        claude_cmd += f" < {prompt_file}"
         claude_cmd += f" > /scad-logs/{job_id}.stream.jsonl 2>&1"
 
         parts.append(claude_cmd)
@@ -165,17 +167,17 @@ def inject_job(
         )
     else:
         # Interactive: add tmux window in the scad session
-        claude_cmd = "claude"
+        # Prompt already written to prompt_file above — read it with $()
+        claude_parts = ["claude"]
         if dangerously_skip_permissions:
-            claude_cmd += " --dangerously-skip-permissions"
+            claude_parts.append("--dangerously-skip-permissions")
         if add_dirs:
             for d in add_dirs:
-                claude_cmd += f" --add-dir /workspace/{d}"
+                claude_parts.append(f"--add-dir /workspace/{d}")
         if additional_flags:
-            claude_cmd += f" {additional_flags}"
-        # Use single quotes around prompt to avoid shell interpretation
-        escaped_prompt = prompt.replace("'", "'\\''")
-        claude_cmd += f" '{escaped_prompt}'"
+            claude_parts.append(additional_flags)
+        claude_parts.append(f'"$(cat {prompt_file})"')
+        claude_cmd = " ".join(claude_parts)
         inner_cmd = " && ".join(parts) + f" && {claude_cmd}; exec bash"
         tmux_cmd = f'tmux new-window -t scad -n {job_id} "bash -c \\"{inner_cmd}\\""'
         container.exec_run(

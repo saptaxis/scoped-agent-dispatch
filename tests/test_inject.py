@@ -29,9 +29,10 @@ class TestInjectJob:
             )
 
         assert job_id.startswith("test-run-job-")
-        mock_container.exec_run.assert_called_once()
-        exec_cmd = mock_container.exec_run.call_args[0][0]
-        assert "claude -p" in exec_cmd or "claude" in str(exec_cmd)
+        # Two exec_run calls: prompt file write + claude command
+        assert mock_container.exec_run.call_count == 2
+        exec_cmd = mock_container.exec_run.call_args_list[1][0][0]
+        assert "claude -p" in str(exec_cmd)
 
     @patch("scad.container.docker.from_env")
     def test_interactive_injection_runs_tmux(self, mock_docker, tmp_path):
