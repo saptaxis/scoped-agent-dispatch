@@ -198,6 +198,20 @@ def inject_job(
     return job_id
 
 
+def list_jobs(run_id: str) -> list[dict]:
+    """List all jobs for a run, sorted by job ID."""
+    jobs_dir = RUNS_DIR / run_id / "jobs"
+    if not jobs_dir.exists():
+        return []
+    jobs = []
+    for job_file in sorted(jobs_dir.glob("*.json")):
+        try:
+            jobs.append(json.loads(job_file.read_text()))
+        except json.JSONDecodeError:
+            continue
+    return jobs
+
+
 def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
 

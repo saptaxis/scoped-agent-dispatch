@@ -31,6 +31,7 @@ from scad.container import (
     get_session_info,
     image_exists,
     inject_job,
+    list_jobs,
     list_scad_containers,
     log_event,
     prune_old_images,
@@ -713,6 +714,25 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str):
         click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
     else:
         click.echo(f"[scad]   Attach: scad session attach {run_id}")
+
+
+@session.command("jobs")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def session_jobs(run_id: str):
+    """List jobs in a session."""
+    validate_run_id(run_id)
+    jobs = list_jobs(run_id)
+
+    if not jobs:
+        click.echo("[scad] No jobs found.")
+        return
+
+    # Header
+    click.echo(f"{'JOB ID':<35} {'MODE':<12} {'BRANCH':<25} {'STARTED'}")
+    for job in jobs:
+        branch = job.get("branch") or "—"
+        started = _relative_time(job.get("started", ""))
+        click.echo(f"{job['job_id']:<35} {job['mode']:<12} {branch:<25} {started}")
 
 
 @session.command("clean")

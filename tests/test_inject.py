@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from scad.container import inject_job, RUNS_DIR
+from scad.container import inject_job, list_jobs, RUNS_DIR
 
 
 class TestInjectJob:
@@ -239,3 +239,59 @@ class TestSessionInjectCLI:
         assert result.exit_code == 0
         _, kwargs = mock_inject.call_args
         assert kwargs.get("headless") is False or not kwargs.get("headless")
+
+
+class TestListJobs:
+    """Tests for list_jobs() — read job metadata from run dir."""
+
+    def test_lists_all_jobs(self, tmp_path):
+        """list_jobs returns all job metadata from the jobs/ dir."""
+        jobs_dir = tmp_path / "test-run" / "jobs"
+        jobs_dir.mkdir(parents=True)
+        (jobs_dir / "test-run-job-001.json").write_text(json.dumps({
+            "job_id": "test-run-job-001", "prompt": "Task A",
+            "mode": "headless", "started": "2026-03-02T15:00:00Z",
+        }))
+        (jobs_dir / "test-run-job-002.json").write_text(json.dumps({
+            "job_id": "test-run-job-002", "prompt": "Task B",
+            "mode": "interactive", "started": "2026-03-02T15:01:00Z",
+        }))
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            jobs = list_jobs("test-run")
+        assert len(jobs) == 2
+        assert jobs[0]["job_id"] == "test-run-job-001"
+        assert jobs[1]["job_id"] == "test-run-job-002"
+
+    def test_empty_when_no_jobs(self, tmp_path):
+        """list_jobs returns empty list if no jobs dir."""
+        (tmp_path / "test-run").mkdir(parents=True)
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            jobs = list_jobs("test-run")
+        assert jobs == []
+
+
+class TestSessionJobsCLI:
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.list_jobs")
+    def test_jobs_shows_table(self, mock_list, mock_validate):
+        mock_list.return_value = [
+            {"job_id": "run-job-001", "mode": "headless", "branch": None, "started": "2026-03-02T15:00:00+00:00"},
+            {"job_id": "run-job-002", "mode": "interactive", "branch": "feat-x", "started": "2026-03-02T15:01:00+00:00"},
+        ]
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "jobs", "test-run"])
+        assert result.exit_code == 0
+        assert "job-001" in result.output
+        assert "job-002" in result.output
+        assert "headless" in result.output
+        assert "interactive" in result.output
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.list_jobs")
+    def test_jobs_empty(self, mock_list, mock_validate):
+        mock_list.return_value = []
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "jobs", "test-run"])
+        assert result.exit_code == 0
+        assert "No jobs" in result.output
