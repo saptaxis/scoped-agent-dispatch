@@ -59,7 +59,8 @@ class TestBuildContext:
         assert "cd /workspace/code" in entrypoint
         assert "git clone" not in entrypoint
         assert "git bundle" not in entrypoint
-        assert "tmux" in entrypoint
+        assert "sleep infinity" in entrypoint
+        assert "session-ready" in entrypoint
 
 
 class TestRunIdGeneration:

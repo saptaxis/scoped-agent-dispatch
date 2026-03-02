@@ -282,31 +282,12 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     )
     (build_dir / "Dockerfile").write_text(dockerfile_content)
 
-    # Build context prompt from focus fields
-    context_parts = []
-    for key, repo in config.repos.items():
-        if repo.focus:
-            context_parts.append(
-                f"Read /workspace/{key}/{repo.focus}/overview.md for project context"
-            )
-    context_prompt = ". ".join(context_parts) if context_parts else None
-
     # Render entrypoint
     entrypoint_template = env.get_template("entrypoint.sh.j2")
-    repos_dict = {
-        k: {"add_dir": v.add_dir}
-        for k, v in config.repos.items()
-    }
     entrypoint_content = entrypoint_template.render(
-        repos=repos_dict,
+        config_name=config.name,
         workdir_key=workdir_key,
         requirements_file=requirements_file,
-        claude={
-            "dangerously_skip_permissions": config.claude.dangerously_skip_permissions,
-            "additional_flags": config.claude.additional_flags,
-        },
-        config_name=config.name,
-        context_prompt=context_prompt,
     )
     (build_dir / "entrypoint.sh").write_text(entrypoint_content)
 
