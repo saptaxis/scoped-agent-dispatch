@@ -1,6 +1,9 @@
 ---
 name: scad-plan-adapt
-description: Use when you need to adapt an implementation plan for execution in a scad container. Rewrites host paths to container paths, adds environment context. Trigger phrases - "make this plan scad-aware", "adapt this plan for scad", "prepare plan for container execution", "scad-adapt this plan".
+description: >
+  Use when adapting implementation plans for scad container execution,
+  when plans reference host paths that need container path translation,
+  or when user says "adapt for scad" or "make scad-aware".
 ---
 
 # Scad Plan Adaptation

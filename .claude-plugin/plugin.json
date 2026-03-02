@@ -1,0 +1,5 @@
+{
+  "name": "scad",
+  "version": "0.2.0",
+  "description": "Isolated Docker dispatch for Claude Code sessions"
+}
