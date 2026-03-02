@@ -167,7 +167,7 @@ def inject_job(
         )
     else:
         # Interactive: add tmux window in the scad session
-        # Prompt already written to prompt_file above — read it with $()
+        # Write a launcher script to avoid nested quoting hell
         claude_parts = ["claude"]
         if dangerously_skip_permissions:
             claude_parts.append("--dangerously-skip-permissions")
@@ -176,12 +176,19 @@ def inject_job(
                 claude_parts.append(f"--add-dir /workspace/{d}")
         if additional_flags:
             claude_parts.append(additional_flags)
+        claude_parts.append("--")  # end options — prompt is positional
         claude_parts.append(f'"$(cat {prompt_file})"')
         claude_cmd = " ".join(claude_parts)
-        inner_cmd = " && ".join(parts) + f" && {claude_cmd}; exec bash"
-        tmux_cmd = f'tmux new-window -t scad -n {job_id} "bash -c \\"{inner_cmd}\\""'
+
+        # Write launcher script inside container
+        launcher = f"/tmp/{job_id}-launch.sh"
+        script = " && ".join(parts) + f" && {claude_cmd}; exec bash"
         container.exec_run(
-            ["bash", "-c", tmux_cmd],
+            ["bash", "-c", f"cat > {launcher} <<'SCADEOF'\n#!/bin/bash\n{script}\nSCADEOF\nchmod +x {launcher}"],
+        )
+        # Create tmux window running the launcher
+        container.exec_run(
+            ["bash", "-c", f"tmux new-window -t scad -n {job_id} {launcher}"],
             detach=True,
         )
 

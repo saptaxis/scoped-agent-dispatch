@@ -174,8 +174,9 @@ class TestInjectJob:
                 add_dirs=["docs"],
             )
 
-        exec_cmd = mock_container.exec_run.call_args[0][0]
-        assert "--add-dir /workspace/docs" in str(exec_cmd)
+        # add_dir flag is in the launcher script (second exec_run call)
+        all_calls = [str(c) for c in mock_container.exec_run.call_args_list]
+        assert any("--add-dir /workspace/docs" in c for c in all_calls)
 
     @patch("scad.container.docker.from_env")
     def test_headless_uses_skip_permissions(self, mock_docker, tmp_path):
