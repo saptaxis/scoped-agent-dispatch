@@ -21,28 +21,39 @@ RUNS_DIR = SCAD_DIR / "runs"
 
 
 def _migrate_worktrees() -> None:
-    """Migrate old ~/.scad/worktrees/<run-id>/ to ~/.scad/runs/<run-id>/worktrees/.
+    """Migrate old worktree layouts to current workspace layout.
 
-    Called on first access. Moves each worktree dir under its matching run dir.
-    Creates a run dir if one doesn't exist (orphaned worktree).
-    Removes ~/.scad/worktrees/ when empty.
+    Phase 1: ~/.scad/worktrees/<run-id>/ -> ~/.scad/runs/<run-id>/worktrees/
+    Phase 2: ~/.scad/runs/<run-id>/worktrees/ -> ~/.scad/runs/<run-id>/workspace/
+
+    Called on first access. Creates run dirs if they don't exist.
     """
+    # Phase 1: Move old top-level worktrees dir into run dirs
     old_dir = SCAD_DIR / "worktrees"
-    if not old_dir.exists():
-        return
+    if old_dir.exists():
+        for entry in list(old_dir.iterdir()):
+            if not entry.is_dir():
+                continue
+            run_id = entry.name
+            target = RUNS_DIR / run_id / "workspace"
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(entry), str(target))
+            click.echo(f"[scad] Migrated worktrees for {run_id}")
 
-    for entry in list(old_dir.iterdir()):
-        if not entry.is_dir():
-            continue
-        run_id = entry.name
-        target = RUNS_DIR / run_id / "worktrees"
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.move(str(entry), str(target))
-        click.echo(f"[scad] Migrated worktrees for {run_id}")
+        # Remove old dir if empty
+        if old_dir.exists() and not list(old_dir.iterdir()):
+            old_dir.rmdir()
 
-    # Remove old dir if empty
-    if old_dir.exists() and not list(old_dir.iterdir()):
-        old_dir.rmdir()
+    # Phase 2: Rename worktrees/ to workspace/ inside existing run dirs
+    if RUNS_DIR.exists():
+        for run_dir in RUNS_DIR.iterdir():
+            if not run_dir.is_dir():
+                continue
+            old_worktrees = run_dir / "worktrees"
+            new_workspace = run_dir / "workspace"
+            if old_worktrees.exists() and not new_workspace.exists():
+                old_worktrees.rename(new_workspace)
+                click.echo(f"[scad] Migrated {run_dir.name}/worktrees → workspace")
 
 
 def _container_exists(run_id: str) -> bool:
@@ -154,22 +165,25 @@ def resolve_branch(config: ScadConfig, branch: Optional[str], tag: str = "notag"
 def create_clones(
     config: ScadConfig, branch: str, run_id: str
 ) -> dict[str, Path]:
-    """Create host-side local clones for each repo with worktree=True.
+    """Create unified workspace directory with clones, symlinks, and data mounts.
 
     Uses git clone --local (hardlinks, near-instant) instead of git worktree
     because worktrees' .git file references the main repo's .git directory,
     which isn't accessible inside Docker containers.
 
-    Returns dict of repo_key -> clone_path (or direct path for non-worktree repos).
+    Non-worktree repos and data mounts are symlinked into the workspace directory
+    so that a single Docker bind mount at /workspace covers everything.
+
+    Returns dict of repo_key -> path inside workspace/.
     """
     _migrate_worktrees()
-    clone_base = RUNS_DIR / run_id / "worktrees"
-    clone_base.mkdir(parents=True, exist_ok=True)
+    workspace = RUNS_DIR / run_id / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
 
     paths = {}
     for key, repo in config.repos.items():
         if repo.worktree:
-            clone_path = clone_base / key
+            clone_path = workspace / key
             subprocess.run(
                 ["git", "clone", "--local",
                  str(repo.resolved_path), str(clone_path)],
@@ -182,7 +196,19 @@ def create_clones(
             )
             paths[key] = clone_path
         else:
-            paths[key] = repo.resolved_path
+            # Symlink non-worktree repos into workspace
+            link_path = workspace / key
+            link_path.symlink_to(repo.resolved_path)
+            paths[key] = link_path
+
+    # Symlink data mounts into workspace
+    for mount in config.mounts:
+        host_path = Path(mount.host).expanduser().resolve()
+        # Use the last component of the container path as the symlink name
+        link_name = Path(mount.container).name
+        link_path = workspace / link_name
+        if not link_path.exists():
+            link_path.symlink_to(host_path)
 
     # Create persistent run directory for Claude session data
     run_dir = RUNS_DIR / run_id / "claude"
@@ -200,11 +226,13 @@ def cleanup_clones(run_id: str) -> None:
     """Remove clones for a completed run.
 
     Does NOT fetch branches back — user does that separately.
-    Just deletes the worktrees subdirectory under the run dir.
+    Just deletes the workspace subdirectory under the run dir.
     """
-    clone_base = RUNS_DIR / run_id / "worktrees"
-    if clone_base.exists():
-        shutil.rmtree(clone_base)
+    # Support both old (worktrees) and new (workspace) layouts
+    for subdir in ("workspace", "worktrees"):
+        clone_base = RUNS_DIR / run_id / subdir
+        if clone_base.exists():
+            shutil.rmtree(clone_base)
 
 
 def clean_run(run_id: str) -> None:
@@ -446,16 +474,9 @@ def run_container(
     # Build volume mounts
     volumes = {}
 
-    # Repos — clone (rw) or direct mount (ro) at /workspace/<key>
-    for key, repo in config.repos.items():
-        host_path = str(worktree_paths[key])
-        mode = "rw" if repo.worktree else "ro"
-        volumes[host_path] = {"bind": f"/workspace/{key}", "mode": mode}
-
-    # Data mounts — read-write
-    for mount in config.mounts:
-        host_path = str(Path(mount.host).expanduser().resolve())
-        volumes[host_path] = {"bind": mount.container, "mode": "rw"}
+    # Single workspace mount — covers clones, symlinked repos, and data mounts
+    workspace_dir = RUNS_DIR / run_id / "workspace"
+    volumes[str(workspace_dir)] = {"bind": "/workspace", "mode": "rw"}
 
     # Logs directory — read-write
     volumes[str(logs_dir)] = {"bind": "/scad-logs", "mode": "rw"}
@@ -506,20 +527,34 @@ def run_container(
     return container.id
 
 
+def _resolve_workspace_dir(run_id: str) -> Path:
+    """Resolve the workspace directory for a run, supporting old and new layouts.
+
+    New layout: runs/<id>/workspace/
+    Old layout: runs/<id>/worktrees/
+    Raises FileNotFoundError if neither exists.
+    """
+    workspace = RUNS_DIR / run_id / "workspace"
+    if workspace.exists():
+        return workspace
+    worktrees = RUNS_DIR / run_id / "worktrees"
+    if worktrees.exists():
+        return worktrees
+    raise FileNotFoundError(f"No clones found for run: {run_id}")
+
+
 def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     """Fetch branches from clones back to source repos.
 
     For each clone: detach HEAD, fetch branch to source, re-checkout branch.
     Appends to ~/.scad/runs/<run-id>/events.log.
     """
-    clone_base = RUNS_DIR / run_id / "worktrees"
-    if not clone_base.exists():
-        raise FileNotFoundError(f"No clones found for run: {run_id}")
+    clone_base = _resolve_workspace_dir(run_id)
 
     results = []
     for key, repo_cfg in config.repos.items():
         clone_path = clone_base / key
-        if not clone_path.exists():
+        if not clone_path.exists() or clone_path.is_symlink():
             continue
 
         source_path = repo_cfg.resolved_path
@@ -586,14 +621,12 @@ def sync_from_host(
 
     Does NOT checkout or merge — just makes refs available.
     """
-    clone_base = RUNS_DIR / run_id / "worktrees"
-    if not clone_base.exists():
-        raise FileNotFoundError(f"No clones found for run: {run_id}")
+    clone_base = _resolve_workspace_dir(run_id)
 
     results = []
     for key, repo_cfg in config.repos.items():
         clone_path = clone_base / key
-        if not clone_path.exists():
+        if not clone_path.exists() or clone_path.is_symlink():
             continue
 
         source_path = repo_cfg.resolved_path
@@ -676,6 +709,11 @@ def _parse_events_log(run_id: str) -> dict:
     return info
 
 
+def _has_workspace_or_worktrees(run_id: str) -> bool:
+    """Check if a run has a workspace or worktrees directory."""
+    return (RUNS_DIR / run_id / "workspace").exists() or (RUNS_DIR / run_id / "worktrees").exists()
+
+
 def get_all_sessions() -> list[dict]:
     """Get all sessions with container state. Sorted most-recent-first."""
     _migrate_worktrees()
@@ -684,14 +722,14 @@ def get_all_sessions() -> list[dict]:
     # 1. Running containers (from Docker)
     for c in list_scad_containers():
         run_id = c["run_id"]
-        clone_dir = RUNS_DIR / run_id / "worktrees"
+        has_clones = _has_workspace_or_worktrees(run_id)
         sessions[run_id] = {
             "run_id": run_id,
             "config": c["config"],
             "branch": c["branch"],
             "started": c["started"],
             "container": "running",
-            "clones": "yes" if clone_dir.exists() else "-",
+            "clones": "yes" if has_clones else "-",
         }
 
     # 2. Scan runs dir for all sessions
@@ -710,8 +748,7 @@ def get_all_sessions() -> list[dict]:
             except (DockerNotFound, DockerException):
                 container_state = "removed"
 
-            clone_dir = RUNS_DIR / run_id / "worktrees"
-            has_clones = clone_dir.exists()
+            has_clones = _has_workspace_or_worktrees(run_id)
 
             if container_state == "removed" and not has_clones:
                 container_state = "cleaned"
@@ -760,11 +797,12 @@ def get_session_info(run_id: str) -> dict:
         container = client.containers.get(f"scad-{run_id}")
         info["container"] = container.status
     except (DockerNotFound, DockerException):
-        clone_dir = RUNS_DIR / run_id / "worktrees"
-        info["container"] = "removed" if clone_dir.exists() else "cleaned"
+        info["container"] = "removed" if _has_workspace_or_worktrees(run_id) else "cleaned"
 
-    # Clone paths
-    clone_dir = RUNS_DIR / run_id / "worktrees"
+    # Clone paths — check workspace first, fall back to worktrees
+    clone_dir = RUNS_DIR / run_id / "workspace"
+    if not clone_dir.exists():
+        clone_dir = RUNS_DIR / run_id / "worktrees"
     if clone_dir.exists():
         info["clones"] = sorted(d.name for d in clone_dir.iterdir() if d.is_dir())
         info["clones_path"] = str(clone_dir)
@@ -963,15 +1001,14 @@ def gc(force: bool = False) -> dict:
                 except Exception:
                     pass
 
-    # Find dead run dirs (no container, no worktrees)
+    # Find dead run dirs (no container, no workspace/worktrees)
     if RUNS_DIR.exists():
         for entry in RUNS_DIR.iterdir():
             if not entry.is_dir():
                 continue
             run_id = entry.name
-            worktrees = entry / "worktrees"
-            has_worktrees = worktrees.exists() and list(worktrees.iterdir())
-            if not _container_exists(run_id) and not has_worktrees:
+            has_workspace = _has_workspace_or_worktrees(run_id)
+            if not _container_exists(run_id) and not has_workspace:
                 findings["dead_run_dirs"].append(str(entry))
                 if force:
                     shutil.rmtree(entry)
