@@ -579,11 +579,15 @@ def session_info(run_id: str):
 @click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
 @click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
 @click.option("--stream", "-s", is_flag=True, help="Show Claude stream (tool calls, edits) instead of entrypoint log.")
-def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
+@click.option("--job", default=None, help="Show logs for a specific job ID.")
+def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
     """Read agent log output."""
     validate_run_id(run_id)
     logs_dir = Path.home() / ".scad" / "logs"
-    if stream:
+    if job:
+        log_path = logs_dir / f"{job}.stream.jsonl"
+        not_found_msg = f"No stream log found for job {job}"
+    elif stream:
         log_path = logs_dir / f"{run_id}.stream.jsonl"
         not_found_msg = f"No stream log found for {run_id}"
     else:
@@ -670,8 +674,8 @@ def session_attach(run_id: str):
     check = container.exec_run("tmux has-session -t scad")
     if check.exit_code != 0:
         click.echo(
-            f"[scad] Container '{run_id}' is running headless. "
-            f"Use 'scad session logs {run_id}' to view output.",
+            f"[scad] No tmux session in '{run_id}'. "
+            f"Inject work first: scad session inject {run_id} --prompt \"...\"",
             err=True,
         )
         sys.exit(1)

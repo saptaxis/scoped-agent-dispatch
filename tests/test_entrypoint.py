@@ -198,7 +198,10 @@ class TestSimplifiedEntrypoint:
         """Entrypoint should not build or run claude command."""
         assert "CLAUDE_CMD" not in rendered_entrypoint
         assert "claude -p" not in rendered_entrypoint
-        assert "tmux new-session" not in rendered_entrypoint
+
+    def test_creates_default_tmux_session(self, rendered_entrypoint):
+        """Entrypoint should start a default tmux session for interactive work."""
+        assert 'tmux new-session -d -s scad' in rendered_entrypoint
 
     def test_logs_session_ready(self, rendered_entrypoint):
         """Entrypoint should log session-ready event."""

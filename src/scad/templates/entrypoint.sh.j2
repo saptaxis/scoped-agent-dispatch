@@ -95,5 +95,8 @@ pip install --no-cache-dir -q -r {{ requirements_file }} 2>&1
 log_event "session-ready"
 echo "[scad] Environment ready — waiting for work"
 
+# Start default tmux session for interactive work
+tmux new-session -d -s scad "bash"
+
 # Wait for injected work or scad stop
 sleep infinity

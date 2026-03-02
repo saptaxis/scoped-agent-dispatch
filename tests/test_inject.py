@@ -156,6 +156,27 @@ class TestInjectJob:
         assert "--add-dir /workspace/docs" in str(exec_cmd)
 
     @patch("scad.container.docker.from_env")
+    def test_interactive_uses_add_dir_flags(self, mock_docker, tmp_path):
+        """Interactive inject includes --add-dir for repos with add_dir=True."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            inject_job(
+                run_id="test-run",
+                prompt="Task",
+                headless=False,
+                workdir_key="code",
+                add_dirs=["docs"],
+            )
+
+        exec_cmd = mock_container.exec_run.call_args[0][0]
+        assert "--add-dir /workspace/docs" in str(exec_cmd)
+
+    @patch("scad.container.docker.from_env")
     def test_headless_uses_skip_permissions(self, mock_docker, tmp_path):
         """Headless inject includes --dangerously-skip-permissions if configured."""
         mock_container = MagicMock()

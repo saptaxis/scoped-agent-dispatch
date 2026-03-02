@@ -152,7 +152,9 @@ def inject_job(
         if additional_flags:
             claude_cmd += f" {additional_flags}"
 
-        claude_cmd += f' "{prompt}"'
+        # Use single quotes around prompt to avoid shell interpretation
+        escaped_prompt = prompt.replace("'", "'\\''")
+        claude_cmd += f" '{escaped_prompt}'"
         claude_cmd += f" > /scad-logs/{job_id}.stream.jsonl 2>&1"
 
         parts.append(claude_cmd)
@@ -162,12 +164,20 @@ def inject_job(
             detach=True,
         )
     else:
-        # Interactive: launch in tmux session
-        claude_cmd = f"claude '{prompt}'"
+        # Interactive: add tmux window in the scad session
+        claude_cmd = "claude"
         if dangerously_skip_permissions:
-            claude_cmd = f"claude --dangerously-skip-permissions '{prompt}'"
+            claude_cmd += " --dangerously-skip-permissions"
+        if add_dirs:
+            for d in add_dirs:
+                claude_cmd += f" --add-dir /workspace/{d}"
+        if additional_flags:
+            claude_cmd += f" {additional_flags}"
+        # Use single quotes around prompt to avoid shell interpretation
+        escaped_prompt = prompt.replace("'", "'\\''")
+        claude_cmd += f" '{escaped_prompt}'"
         inner_cmd = " && ".join(parts) + f" && {claude_cmd}; exec bash"
-        tmux_cmd = f'tmux new-session -d -s {job_id} "bash -c \\"{inner_cmd}\\""'
+        tmux_cmd = f'tmux new-window -t scad -n {job_id} "bash -c \\"{inner_cmd}\\""'
         container.exec_run(
             ["bash", "-c", tmux_cmd],
             detach=True,
