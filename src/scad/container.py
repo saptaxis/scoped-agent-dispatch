@@ -188,7 +188,7 @@ def inject_job(
         )
         # Create tmux window running the launcher
         container.exec_run(
-            ["bash", "-c", f"tmux new-window -t scad -n {job_id} {launcher}"],
+            ["bash", "-c", f"tmux new-window -t scad: -n {job_id} {launcher}"],
             detach=True,
         )
 
