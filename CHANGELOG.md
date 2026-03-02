@@ -3,6 +3,24 @@
 ## [Unreleased]
 
 ### Added
+- `session inject` command — inject Claude processes into running sessions via docker exec
+- `session jobs` command — list injected jobs with status, mode, and branch
+- `code add` / `code remove` — modify session workspace at runtime (symlink or clone)
+- `code diff` — show differences between session clones and source repos
+- Branch-per-job support — `--branch` flag on inject, multi-branch fetch
+- Job tracking — per-job metadata in `~/.scad/runs/<id>/jobs/`, stream logs per job
+
+### Changed
+- Entrypoint simplified to setup-only (~50 lines, was ~140). No Claude launch in entrypoint.
+- All Claude launches now happen via `docker exec` injection from the host
+- Single `workspace/` bind mount replaces per-repo Docker volumes
+- Non-worktree repos and data mounts are symlinked into workspace (was separate Docker volumes)
+- `session start --prompt` is now sugar for start + immediate inject
+- `--headless` is a property of the injection, not the session
+- `code fetch` discovers and fetches all branches (was single branch only)
+- Workspace directory: `runs/<id>/workspace/` (was `runs/<id>/worktrees/`)
+
+### Previously Added (Plan 10)
 - `--prompt` flag now starts interactive session with prompt pre-entered (Claude starts working immediately)
 - `--headless` flag for fire-and-forget mode (requires `--prompt`)
 - `code sync` fast-forwards clone's main branch by default
@@ -14,12 +32,12 @@
 - Subagent count in `session info`
 - Cache token display in `session info` (creation + read)
 
-### Fixed
+### Previously Fixed (Plan 10)
 - ccusage JSON parsing — tokens no longer show 0 in `session info`
 - `session info` no longer counts subagent sessions as top-level Claude sessions
 - 11 CLI tests fixed (missing `validate_run_id` mock)
 
-### Changed
+### Previously Changed (Plan 10)
 - `--prompt` without `--headless` is now interactive (was headless). Add `--headless` for old behavior.
 
 ### Previously Added (Plan 09)
