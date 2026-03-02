@@ -29,6 +29,7 @@ from scad.container import (
     generate_run_id,
     get_all_sessions,
     get_image_info,
+    get_recently_crashed,
     get_project_status,
     get_session_usage,
     get_session_info,
@@ -570,6 +571,14 @@ def session_status(show_all: bool):
                     f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
                     f"{started:<12} {'running':<12} {clones}"
                 )
+
+        # Show recently crashed
+        crashed = get_recently_crashed()
+        if crashed:
+            click.echo()
+            click.echo("[scad] Recently crashed:")
+            for c in crashed:
+                click.echo(f"  {c['run_id']} (exit code {c['exit_code']})")
 
     # Credential expiry warning
     valid, hours = check_claude_auth()

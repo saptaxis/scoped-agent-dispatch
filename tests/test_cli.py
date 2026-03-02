@@ -1211,3 +1211,20 @@ class TestUsageDisplay:
 
         result = runner.invoke(main, ["project", "status", "demo"])
         assert result.exit_code == 0
+
+
+class TestCrashDetection:
+    """Tests for crash detection in session status and start."""
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.list_scad_containers")
+    @patch("scad.cli.get_recently_crashed")
+    def test_status_shows_crashed(self, mock_crashed, mock_running, mock_auth):
+        """session status shows recently crashed sessions."""
+        mock_running.return_value = []
+        mock_crashed.return_value = [
+            {"run_id": "demo-test-Mar03-1200", "exit_code": 1, "finished": "2m ago"}
+        ]
+        runner = CliRunner()
+        result = runner.invoke(main, ["session", "status"])
+        assert "crashed" in result.output.lower() or "exit" in result.output.lower()

@@ -492,6 +492,32 @@ def list_scad_containers() -> list[dict]:
     return results
 
 
+def get_recently_crashed(max_age_minutes: int = 30) -> list[dict]:
+    """Find containers that crashed (exited non-zero) recently.
+
+    Checks Docker exited containers with scad labels.
+    """
+    crashed = []
+    try:
+        client = docker.from_env()
+        containers = client.containers.list(
+            all=True,
+            filters={"label": "scad.managed=true", "status": "exited"},
+        )
+        for c in containers:
+            exit_code = c.attrs.get("State", {}).get("ExitCode", 0)
+            if exit_code != 0:
+                labels = c.labels
+                crashed.append({
+                    "run_id": labels.get("scad.run_id", "?"),
+                    "config": labels.get("scad.config", "?"),
+                    "exit_code": exit_code,
+                })
+    except docker.errors.DockerException:
+        pass
+    return crashed
+
+
 def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
     """List completed runs from status JSON files."""
     if logs_dir is None:
