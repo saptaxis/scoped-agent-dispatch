@@ -419,3 +419,31 @@ class TestWorkspaceRemove:
         with patch("scad.container.RUNS_DIR", tmp_path):
             with pytest.raises(FileNotFoundError):
                 workspace_remove("test-run", "nope")
+
+
+class TestCodeDiff:
+
+    @patch("scad.container.subprocess.run")
+    def test_diff_returns_output(self, mock_run, tmp_path):
+        """diff_from_source returns git diff output."""
+        from scad.container import diff_from_source
+        workspace = tmp_path / "test-run" / "workspace" / "code"
+        workspace.mkdir(parents=True)
+        (workspace / ".git").mkdir()  # Looks like a git repo
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout="diff --git a/file.py b/file.py\n+new line\n",
+        )
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            from scad.config import ScadConfig, RepoConfig
+            config = ScadConfig(
+                name="test",
+                repos={"code": RepoConfig(path=str(tmp_path / "source"), workdir=True)},
+            )
+            results = diff_from_source("test-run", config)
+
+        assert len(results) == 1
+        assert "code" in results
+        assert "+new line" in results["code"]

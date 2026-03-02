@@ -21,6 +21,7 @@ from scad.container import (
     cleanup_clones,
     config_name_for_run,
     create_clones,
+    diff_from_source,
     fetch_to_host,
     gc,
     generate_run_id,
@@ -823,6 +824,28 @@ def code_sync(run_id: str, checkout: str, no_update_main: bool):
     except FileNotFoundError as e:
         click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(2)
+
+
+@code.command("diff")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def code_diff(run_id: str):
+    """Show diff between session clones and source repos."""
+    validate_run_id(run_id)
+    config = _config_for_run(run_id)
+
+    try:
+        diffs = diff_from_source(run_id, config)
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+    if not diffs:
+        click.echo("[scad] No differences.")
+        return
+
+    for repo, diff_text in diffs.items():
+        click.echo(f"\n--- {repo} ---")
+        click.echo(diff_text)
 
 
 @code.command("refresh")
