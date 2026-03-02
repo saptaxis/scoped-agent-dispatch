@@ -500,7 +500,7 @@ def session_status(show_all: bool):
             )
             for run in running:
                 started = _relative_time(run["started"]) if run["started"] else "?"
-                clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "worktrees"
+                clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "workspace"
                 clones = "yes" if clone_dir.exists() else "-"
                 click.echo(
                     f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
