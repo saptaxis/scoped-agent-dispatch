@@ -8,6 +8,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import time
+
 import click
 import docker
 import yaml
@@ -188,16 +190,33 @@ def run_agent(
 
     # Run the container (always detached)
     click.echo(f"[scad] Dispatching agent: {run_id}")
-    container_id = run_container(config, branch, run_id, worktree_paths, prompt, headless=headless)
+    container_id = run_container(config, branch, run_id, worktree_paths)
     click.echo(f"[scad] Container started: {container_id[:12]}")
 
-    if headless:
-        click.echo(f"[scad] Running headless.")
-        click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
-        click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
-        click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
-    elif prompt:
-        click.echo(f"[scad] Session ready with prompt. Run: scad session attach {run_id}")
+    if prompt:
+        # Let entrypoint finish setup before injecting
+        time.sleep(1)
+
+        # Build add_dirs from config repos with add_dir=True
+        add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
+
+        job_id = inject_job(
+            run_id=run_id,
+            prompt=prompt,
+            headless=headless,
+            workdir_key=config.workdir_key,
+            add_dirs=add_dirs,
+            dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+            additional_flags=config.claude.additional_flags,
+        )
+        mode = "headless" if headless else "interactive"
+        click.echo(f"[scad] Injected {mode}: {job_id}")
+        if headless:
+            click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
+            click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
+            click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
+        else:
+            click.echo(f"[scad]   Attach: scad session attach {run_id}")
     else:
         click.echo(f"[scad] Session ready. Run: scad session attach {run_id}")
 

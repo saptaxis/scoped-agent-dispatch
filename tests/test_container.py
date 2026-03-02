@@ -471,6 +471,26 @@ class TestRunContainerWorkspaceMounts:
         assert "BRANCH_NAME" not in env
         assert "RUN_ID" in env
 
+    @patch("scad.container.docker.from_env")
+    def test_no_prompt_or_headless_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """run_container does not set AGENT_PROMPT or HEADLESS — inject handles prompts."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "plan-22", "test-run", worktree_paths)
+
+        env = mock_client.containers.run.call_args[1]["environment"]
+        assert "AGENT_PROMPT" not in env
+        assert "HEADLESS" not in env
+
 
 class TestCheckClaudeAuth:
     def test_missing_credentials(self, tmp_path, monkeypatch):
