@@ -363,6 +363,54 @@ def config_new(config_name: str, edit: bool):
         subprocess.run([editor, str(path)])
 
 
+@config.command("info")
+@click.argument("config_name", shell_complete=_complete_config_names)
+def config_info(config_name: str):
+    """Show structured environment summary for a config."""
+    try:
+        cfg = load_config(config_name)
+    except FileNotFoundError:
+        click.echo(f"[scad] Config not found: {config_name}", err=True)
+        sys.exit(1)
+
+    click.echo(f"Config: {cfg.name}")
+    click.echo(f"Image: scad-{cfg.name}")
+    click.echo()
+
+    click.echo("Repos:")
+    for key, repo in cfg.repos.items():
+        flags = []
+        if repo.workdir:
+            flags.append("workdir")
+        if repo.add_dir:
+            flags.append("add-dir")
+        mode = "rw" if repo.worktree else "ro"
+        flags.append(mode)
+        click.echo(f"  {key}: {repo.path} → /workspace/{key} ({', '.join(flags)})")
+    click.echo()
+
+    if cfg.mounts:
+        click.echo("Mounts:")
+        for mount in cfg.mounts:
+            click.echo(f"  {mount.host} → {mount.container} (rw)")
+        click.echo()
+
+    click.echo(f"Python: {cfg.python.version} (venv: /opt/venv)")
+    if cfg.python.requirements:
+        click.echo(f"Requirements: {cfg.python.requirements} (relative to /workspace/{cfg.workdir_key})")
+    click.echo()
+
+    click.echo("Claude:")
+    if cfg.claude.dangerously_skip_permissions:
+        click.echo("  dangerously_skip_permissions: true")
+    if cfg.claude.plugins:
+        click.echo(f"  plugins: {', '.join(p.split('@')[0] for p in cfg.claude.plugins)}")
+    if cfg.claude.claude_md is not None and cfg.claude.claude_md is not False:
+        click.echo(f"  claude_md: {cfg.claude.claude_md}")
+    if cfg.claude.additional_flags:
+        click.echo(f"  additional_flags: {cfg.claude.additional_flags}")
+
+
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("-v", "--verbose", is_flag=True, help="Show full Docker build output.")

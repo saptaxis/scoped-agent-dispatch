@@ -809,6 +809,59 @@ class TestConfigNew:
         assert "nano" in mock_run.call_args[0][0]
 
 
+class TestConfigInfo:
+    def test_config_info_shows_repos(self, runner, tmp_path, monkeypatch):
+        """config info shows repo path mappings."""
+        monkeypatch.setattr("scad.config.CONFIG_DIR", tmp_path)
+        config_file = tmp_path / "demo.yml"
+        config_file.write_text("""
+name: demo
+repos:
+  code:
+    path: /home/user/code/demo
+    workdir: true
+  docs:
+    path: /home/user/docs
+    add_dir: true
+python:
+  version: "3.11"
+claude:
+  dangerously_skip_permissions: true
+""")
+        result = runner.invoke(main, ["config", "info", "demo"])
+        assert result.exit_code == 0
+        assert "demo" in result.output
+        assert "/workspace/code" in result.output
+        assert "/workspace/docs" in result.output
+        assert "workdir" in result.output.lower()
+        assert "add-dir" in result.output.lower()
+
+    def test_config_info_shows_python(self, runner, tmp_path, monkeypatch):
+        """config info shows Python/venv info."""
+        monkeypatch.setattr("scad.config.CONFIG_DIR", tmp_path)
+        config_file = tmp_path / "demo.yml"
+        config_file.write_text("""
+name: demo
+repos:
+  code:
+    path: /home/user/code/demo
+    workdir: true
+python:
+  version: "3.11"
+  requirements: requirements.txt
+""")
+        result = runner.invoke(main, ["config", "info", "demo"])
+        assert result.exit_code == 0
+        assert "3.11" in result.output
+        assert "/opt/venv" in result.output
+
+    def test_config_info_not_found(self, runner, tmp_path, monkeypatch):
+        """config info with invalid name shows error."""
+        monkeypatch.setattr("scad.config.CONFIG_DIR", tmp_path)
+        result = runner.invoke(main, ["config", "info", "nonexistent"])
+        assert result.exit_code != 0
+
+
 class TestProjectStatus:
     @patch("scad.cli.get_project_status")
     def test_shows_project_overview(self, mock_status, runner):
