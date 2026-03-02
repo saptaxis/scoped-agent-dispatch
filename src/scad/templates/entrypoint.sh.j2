@@ -8,10 +8,17 @@ STREAM_LOG="/scad-logs/${RUN_ID}.stream.jsonl"
 STATUS_FILE="/scad-logs/${RUN_ID}.status.json"
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
+# Log event to events.log (mounted from host via logs dir)
+EVENTS_LOG="/scad-logs/${RUN_ID}.events.log"
+log_event() {
+    echo "$(date -u +%Y-%m-%dT%H:%M) $*" >> "$EVENTS_LOG"
+}
+
 # Write status on exit (SIGTERM from scad stop)
 write_status() {
     set -e
     END_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    log_event "session-finish exit=${EXIT_CODE:-0}"
     cat > "$STATUS_FILE" <<STATUSEOF
 {
   "run_id": "$RUN_ID",
@@ -108,17 +115,21 @@ if [ -n "$HEADLESS" ]; then
     # Headless: fire and forget with stream-json
     echo "[scad] Running headless: $PROMPT"
     echo "[scad] Stream log: $STREAM_LOG"
+    log_event "claude-start mode=headless"
     $CLAUDE_CMD -p --output-format stream-json "$PROMPT" > "$STREAM_LOG" 2>&1
     EXIT_CODE=$?
+    log_event "claude-finish exit=$EXIT_CODE mode=headless"
 elif [ -n "$PROMPT" ]; then
     # Interactive with kickoff prompt: tmux + Claude with prompt pre-entered
     echo "[scad] Starting interactive session with prompt"
+    log_event "claude-start mode=interactive-prompt"
     tmux new-session -d -s scad "$CLAUDE_CMD '$PROMPT'; exec bash"
     # Keep container alive until scad stop
     sleep infinity
 else
     # Interactive: tmux + Claude REPL
     echo "[scad] Starting interactive session"
+    log_event "claude-start mode=interactive"
     {% if context_prompt %}
     tmux new-session -d -s scad "$CLAUDE_CMD '{{ context_prompt }}'; exec bash"
     {% else %}

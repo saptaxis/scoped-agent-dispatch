@@ -171,6 +171,17 @@ class TestEntrypointTemplate:
         content = _render_entrypoint(jinja_env)
         assert 'elif [ -n "$PROMPT" ]' in content
 
+    def test_entrypoint_logs_claude_start(self, jinja_env):
+        """Entrypoint should log Claude start to events.log."""
+        content = _render_entrypoint(jinja_env)
+        assert "events.log" in content
+        assert "claude-start" in content
+
+    def test_entrypoint_logs_claude_finish(self, jinja_env):
+        """Entrypoint should log Claude finish with exit code."""
+        content = _render_entrypoint(jinja_env)
+        assert "claude-finish" in content
+
 
 class TestDockerfileTemplate:
     def _make_config(self):

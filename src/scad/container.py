@@ -745,6 +745,15 @@ def get_session_info(run_id: str) -> dict:
             line for line in events_log.read_text().strip().split("\n") if line
         ]
 
+    # Container-side events (from entrypoint)
+    container_events_log = Path.home() / ".scad" / "logs" / f"{run_id}.events.log"
+    if container_events_log.exists():
+        container_events = [
+            line for line in container_events_log.read_text().strip().split("\n") if line
+        ]
+        info["events"].extend(container_events)
+        info["events"].sort()
+
     # Container state
     try:
         client = docker.from_env()
