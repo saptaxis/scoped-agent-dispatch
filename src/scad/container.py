@@ -144,7 +144,7 @@ def inject_job(
 
     if headless:
         # Build claude -p command, reading prompt from stdin
-        claude_cmd = f"claude -p --output-format stream-json"
+        claude_cmd = "claude -p --verbose --output-format stream-json"
 
         if dangerously_skip_permissions:
             claude_cmd += " --dangerously-skip-permissions"
