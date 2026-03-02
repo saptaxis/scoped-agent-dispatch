@@ -677,17 +677,24 @@ def code_fetch(run_id: str):
 
 @code.command("sync")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def code_sync(run_id: str):
-    """Sync host repo changes into clones (makes new branches available)."""
+@click.option("--checkout", default=None, help="Checkout this branch after sync.")
+@click.option("--no-update-main", is_flag=True, help="Skip fast-forwarding clone's main.")
+def code_sync(run_id: str, checkout: str, no_update_main: bool):
+    """Sync host repo changes into clones. Fast-forwards main by default."""
     validate_run_id(run_id)
     try:
         config = _config_for_run(run_id)
-        results = sync_from_host(run_id, config)
+        results = sync_from_host(run_id, config, update_main=not no_update_main, checkout=checkout)
         if not results:
             click.echo(f"[scad] Nothing to sync for {run_id}")
         else:
             for r in results:
-                click.echo(f"[scad] Synced {r['repo']} from {r['source']}")
+                msg = f"[scad] Synced {r['repo']} from {r['source']}"
+                if r.get("main_updated") is True:
+                    msg += " (main fast-forwarded)"
+                elif r.get("main_updated") is False:
+                    msg += " (main diverged \u2014 skipped)"
+                click.echo(msg)
     except FileNotFoundError as e:
         click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(2)

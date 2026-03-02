@@ -77,7 +77,7 @@ class TestCodeSync:
     @patch("scad.cli._config_for_run")
     def test_sync_shows_results(self, mock_config, mock_sync, mock_validate, runner):
         mock_config.return_value = MagicMock()
-        mock_sync.return_value = [{"repo": "code", "source": "/src"}]
+        mock_sync.return_value = [{"repo": "code", "source": "/src", "main_updated": True}]
         result = runner.invoke(main, ["code", "sync", "test-run"])
         assert result.exit_code == 0
         assert "Synced" in result.output
@@ -91,6 +91,30 @@ class TestCodeSync:
         result = runner.invoke(main, ["code", "sync", "test-run"])
         assert result.exit_code == 0
         assert "Nothing to sync" in result.output
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.sync_from_host")
+    @patch("scad.cli._config_for_run")
+    def test_sync_with_checkout(self, mock_config, mock_sync, mock_validate, runner):
+        mock_config.return_value = MagicMock()
+        mock_sync.return_value = [{"repo": "code", "source": "/src", "main_updated": True}]
+        result = runner.invoke(main, ["code", "sync", "test-run", "--checkout", "main"])
+        assert result.exit_code == 0
+        mock_sync.assert_called_once()
+        _, kwargs = mock_sync.call_args
+        assert kwargs.get("checkout") == "main"
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.sync_from_host")
+    @patch("scad.cli._config_for_run")
+    def test_sync_no_update_main(self, mock_config, mock_sync, mock_validate, runner):
+        mock_config.return_value = MagicMock()
+        mock_sync.return_value = [{"repo": "code", "source": "/src", "main_updated": None}]
+        result = runner.invoke(main, ["code", "sync", "test-run", "--no-update-main"])
+        assert result.exit_code == 0
+        mock_sync.assert_called_once()
+        _, kwargs = mock_sync.call_args
+        assert kwargs.get("update_main") is False
 
 
 class TestSessionStop:

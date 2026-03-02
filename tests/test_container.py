@@ -1651,3 +1651,91 @@ class TestImagePrune:
 
         prune_old_images(mock_client, "demo", "sha256:new")
         mock_client.images.remove.assert_not_called()
+
+
+class TestSyncFromHostImproved:
+    """Test code sync with fast-forward main and checkout."""
+
+    def test_fast_forwards_main(self, tmp_path, monkeypatch):
+        """sync_from_host fast-forwards clone's main by default."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path.mkdir(parents=True)
+
+        config = MagicMock()
+        repo = MagicMock()
+        repo.resolved_path = Path("/src/code")
+        repo.worktree = True
+        config.repos = {"code": repo}
+
+        with patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            results = sync_from_host("test-run", config)
+
+        calls = [str(c) for c in mock_run.call_args_list]
+        assert any("fetch" in str(c) for c in mock_run.call_args_list)
+        assert len(results) > 0
+        assert results[0].get("main_updated") is not None
+
+    def test_no_update_main_skips_fast_forward(self, tmp_path, monkeypatch):
+        """--no-update-main skips the fast-forward step."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path.mkdir(parents=True)
+
+        config = MagicMock()
+        repo = MagicMock()
+        repo.resolved_path = Path("/src/code")
+        repo.worktree = True
+        config.repos = {"code": repo}
+
+        with patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            results = sync_from_host("test-run", config, update_main=False)
+
+        assert len(results) > 0
+        assert results[0].get("main_updated") is None
+
+    def test_checkout_switches_branch(self, tmp_path, monkeypatch):
+        """--checkout switches clone to specified branch after sync."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path.mkdir(parents=True)
+
+        config = MagicMock()
+        repo = MagicMock()
+        repo.resolved_path = Path("/src/code")
+        repo.worktree = True
+        config.repos = {"code": repo}
+
+        with patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+            results = sync_from_host("test-run", config, checkout="main")
+
+        checkout_calls = [c for c in mock_run.call_args_list if "checkout" in str(c)]
+        assert len(checkout_calls) >= 1
+
+    def test_diverged_main_warns_and_skips(self, tmp_path, monkeypatch):
+        """If main has diverged, warn and skip (don't error)."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path.mkdir(parents=True)
+
+        config = MagicMock()
+        repo = MagicMock()
+        repo.resolved_path = Path("/src/code")
+        repo.worktree = True
+        config.repos = {"code": repo}
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0] if args else kwargs.get("args", [])
+            cmd_str = str(cmd)
+            if "main:main" in cmd_str or "master:master" in cmd_str:
+                raise subprocess.CalledProcessError(1, cmd, stderr="non-fast-forward")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("scad.container.subprocess.run", side_effect=side_effect):
+            results = sync_from_host("test-run", config)
+
+        assert len(results) > 0
+        assert results[0].get("main_updated") is False

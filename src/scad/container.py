@@ -560,8 +560,29 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     return results
 
 
-def sync_from_host(run_id: str, config: ScadConfig) -> list[dict]:
-    """Fetch source repo refs into clones. Makes new branches/commits available.
+def _detect_default_branch(clone_path: Path) -> Optional[str]:
+    """Detect the default branch name (main or master)."""
+    for name in ("main", "master"):
+        result = subprocess.run(
+            ["git", "-C", str(clone_path), "rev-parse", "--verify", f"refs/heads/{name}"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            return name
+    return None
+
+
+def sync_from_host(
+    run_id: str,
+    config: ScadConfig,
+    update_main: bool = True,
+    checkout: Optional[str] = None,
+) -> list[dict]:
+    """Fetch source repo refs into clones and optionally fast-forward main.
+
+    Args:
+        update_main: Fast-forward clone's main/master to match host (default True).
+        checkout: Branch to checkout after sync (e.g., "main").
 
     Does NOT checkout or merge — just makes refs available.
     """
@@ -577,17 +598,49 @@ def sync_from_host(run_id: str, config: ScadConfig) -> list[dict]:
 
         source_path = repo_cfg.resolved_path
 
+        # 1. Fetch all refs
         subprocess.run(
             ["git", "-C", str(clone_path), "fetch", str(source_path),
              "+refs/heads/*:refs/remotes/origin/*"],
             capture_output=True, text=True, check=True,
         )
 
-        results.append({"repo": key, "source": str(source_path)})
+        result_entry = {"repo": key, "source": str(source_path), "main_updated": None}
+
+        # 2. Fast-forward main (if requested)
+        if update_main:
+            default_branch = _detect_default_branch(clone_path)
+            if default_branch:
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(clone_path), "fetch", str(source_path),
+                         f"{default_branch}:{default_branch}"],
+                        capture_output=True, text=True, check=True,
+                    )
+                    result_entry["main_updated"] = True
+                except subprocess.CalledProcessError:
+                    click.echo(
+                        f"[scad] Warning: {key}/{default_branch} diverged from host \u2014 skipped fast-forward"
+                    )
+                    result_entry["main_updated"] = False
+
+        # 3. Checkout (if requested)
+        if checkout:
+            subprocess.run(
+                ["git", "-C", str(clone_path), "checkout", checkout],
+                capture_output=True, text=True, check=True,
+            )
+
+        results.append(result_entry)
 
     # Log to events.log
     for r in results:
-        log_event(run_id, "sync", f"{r['repo']} \u2190 {r['source']}")
+        details = f"{r['repo']} \u2190 {r['source']}"
+        if r.get("main_updated") is True:
+            details += " (main updated)"
+        elif r.get("main_updated") is False:
+            details += " (main diverged, skipped)"
+        log_event(run_id, "sync", details)
 
     return results
 
