@@ -3,6 +3,26 @@
 ## [Unreleased]
 
 ### Added
+- `--prompt` flag now starts interactive session with prompt pre-entered (Claude starts working immediately)
+- `--headless` flag for fire-and-forget mode (requires `--prompt`)
+- `code sync` fast-forwards clone's main branch by default
+- `code sync --checkout <branch>` to switch branch after sync
+- `code sync --no-update-main` for fetch-only behavior
+- `scad config info <name>` — structured environment summary for tooling
+- Plan adaptation skill for rewriting plans for container execution
+- Claude-level events in entrypoint (start/finish with timestamps)
+- Subagent count in `session info`
+- Cache token display in `session info` (creation + read)
+
+### Fixed
+- ccusage JSON parsing — tokens no longer show 0 in `session info`
+- `session info` no longer counts subagent sessions as top-level Claude sessions
+- 11 CLI tests fixed (missing `validate_run_id` mock)
+
+### Changed
+- `--prompt` without `--headless` is now interactive (was headless). Add `--headless` for old behavior.
+
+### Previously Added (Plan 09)
 - `.claude` management module — centralized Claude Code configuration
 - Container timezone support (IANA timezone via `TZ` + `/etc/localtime`)
 - Co-authored-by suppression via `attribution` setting
