@@ -44,18 +44,20 @@ class TestRelativeTime:
 
 
 class TestCodeFetch:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
     @patch("scad.cli._config_for_run")
-    def test_fetch_shows_results(self, mock_config, mock_fetch, runner):
+    def test_fetch_shows_results(self, mock_config, mock_fetch, mock_validate, runner):
         mock_config.return_value = MagicMock()
         mock_fetch.return_value = [{"repo": "code", "branch": "feat", "source": "/src"}]
         result = runner.invoke(main, ["code", "fetch", "test-run"])
         assert result.exit_code == 0
         assert "Fetched" in result.output
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
     @patch("scad.cli._config_for_run")
-    def test_fetch_nothing(self, mock_config, mock_fetch, runner):
+    def test_fetch_nothing(self, mock_config, mock_fetch, mock_validate, runner):
         mock_config.return_value = MagicMock()
         mock_fetch.return_value = []
         result = runner.invoke(main, ["code", "fetch", "test-run"])
@@ -70,18 +72,20 @@ class TestCodeFetch:
 
 
 class TestCodeSync:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.sync_from_host")
     @patch("scad.cli._config_for_run")
-    def test_sync_shows_results(self, mock_config, mock_sync, runner):
+    def test_sync_shows_results(self, mock_config, mock_sync, mock_validate, runner):
         mock_config.return_value = MagicMock()
         mock_sync.return_value = [{"repo": "code", "source": "/src"}]
         result = runner.invoke(main, ["code", "sync", "test-run"])
         assert result.exit_code == 0
         assert "Synced" in result.output
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.sync_from_host")
     @patch("scad.cli._config_for_run")
-    def test_sync_nothing(self, mock_config, mock_sync, runner):
+    def test_sync_nothing(self, mock_config, mock_sync, mock_validate, runner):
         mock_config.return_value = MagicMock()
         mock_sync.return_value = []
         result = runner.invoke(main, ["code", "sync", "test-run"])
@@ -90,8 +94,9 @@ class TestCodeSync:
 
 
 class TestSessionStop:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.stop_container")
-    def test_stop_running(self, mock_stop, runner):
+    def test_stop_running(self, mock_stop, mock_validate, runner):
         mock_stop.return_value = True
         result = runner.invoke(main, ["session", "stop", "test-Feb26-1430"])
         assert result.exit_code == 0
@@ -107,7 +112,8 @@ class TestSessionStop:
 
 
 class TestSessionLogs:
-    def test_logs_shows_file_content(self, runner, tmp_path):
+    @patch("scad.cli.validate_run_id")
+    def test_logs_shows_file_content(self, mock_validate, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
             # Create the expected directory structure
             logs_dir = tmp_path / ".scad" / "logs"
@@ -139,7 +145,8 @@ class TestSessionLogs:
         assert "line199" in result.output
         assert "line194" not in result.output
 
-    def test_logs_stream_shows_jsonl(self, runner, tmp_path):
+    @patch("scad.cli.validate_run_id")
+    def test_logs_stream_shows_jsonl(self, mock_validate, runner, tmp_path):
         logs_dir = tmp_path / ".scad" / "logs"
         logs_dir.mkdir(parents=True)
         (logs_dir / "test-run.stream.jsonl").write_text(
@@ -370,8 +377,9 @@ class TestSessionAttach:
 
 
 class TestSessionClean:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.clean_run")
-    def test_clean_removes_run(self, mock_clean, runner, tmp_path):
+    def test_clean_removes_run(self, mock_clean, mock_validate, runner, tmp_path):
         with patch("scad.cli.Path.home", return_value=tmp_path):
             result = runner.invoke(main, ["session", "clean", "test-run"])
 
@@ -663,9 +671,10 @@ class TestEventLogging:
         assert "config=test" in call_args[0][2]
         assert "branch=scad-plan07-Feb28-1400" in call_args[0][2]
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.log_event")
     @patch("scad.cli.stop_container")
-    def test_stop_logs_event(self, mock_stop, mock_log, runner):
+    def test_stop_logs_event(self, mock_stop, mock_log, mock_validate, runner):
         """session stop logs a stop event."""
         mock_stop.return_value = True
         runner.invoke(main, ["session", "stop", "test-run"])
@@ -689,15 +698,17 @@ class TestEventLogging:
 
 
 class TestCodeRefresh:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.refresh_credentials")
-    def test_refresh_shows_time_remaining(self, mock_refresh, runner):
+    def test_refresh_shows_time_remaining(self, mock_refresh, mock_validate, runner):
         mock_refresh.return_value = 4.5
         result = runner.invoke(main, ["code", "refresh", "test-run"])
         assert result.exit_code == 0
         assert "4h 30m" in result.output or "refreshed" in result.output.lower()
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.refresh_credentials")
-    def test_refresh_expired(self, mock_refresh, runner):
+    def test_refresh_expired(self, mock_refresh, mock_validate, runner):
         mock_refresh.side_effect = click.ClickException("Credentials expired")
         result = runner.invoke(main, ["code", "refresh", "test-run"])
         assert result.exit_code != 0
