@@ -89,6 +89,115 @@ def log_event(run_id: str, verb: str, details: str = "") -> None:
         f.write(line + "\n")
 
 
+def _next_job_id(run_id: str) -> str:
+    """Generate sequential job IDs like {run_id}-job-001, {run_id}-job-002, etc."""
+    jobs_dir = RUNS_DIR / run_id / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    existing = sorted(jobs_dir.glob("*.json"))
+    next_num = len(existing) + 1
+    return f"{run_id}-job-{next_num:03d}"
+
+
+def inject_job(
+    run_id: str,
+    prompt: str,
+    headless: bool,
+    workdir_key: str,
+    branch: Optional[str] = None,
+    add_dirs: Optional[list[str]] = None,
+    dangerously_skip_permissions: bool = False,
+    additional_flags: Optional[str] = None,
+) -> str:
+    """Inject a Claude process into a running container via docker exec.
+
+    For headless: runs claude -p in detached mode.
+    For interactive: creates a tmux session with claude.
+
+    Returns the job_id.
+    """
+    container_name = f"scad-{run_id}"
+    client = docker.from_env()
+    container = client.containers.get(container_name)
+
+    if container.status != "running":
+        raise RuntimeError(
+            f"Container {container_name} is not running (status: {container.status})"
+        )
+
+    job_id = _next_job_id(run_id)
+    mode = "headless" if headless else "interactive"
+
+    # Build the bash command
+    parts = [
+        f"cd /workspace/{workdir_key}",
+        "source /opt/venv/bin/activate",
+    ]
+
+    if branch:
+        parts.append(f"git checkout -B {branch}")
+
+    if headless:
+        # Build claude -p command
+        claude_cmd = "claude -p"
+
+        if dangerously_skip_permissions:
+            claude_cmd += " --dangerously-skip-permissions"
+
+        claude_cmd += " --output-format stream-json"
+
+        if add_dirs:
+            for d in add_dirs:
+                claude_cmd += f" --add-dir /workspace/{d}"
+
+        if additional_flags:
+            claude_cmd += f" {additional_flags}"
+
+        claude_cmd += f' "{prompt}"'
+        claude_cmd += f" > /scad-logs/{job_id}.stream.jsonl 2>&1"
+
+        parts.append(claude_cmd)
+        bash_cmd = " && ".join(parts)
+        container.exec_run(
+            ["bash", "-c", bash_cmd],
+            detach=True,
+        )
+    else:
+        # Interactive: launch in tmux session
+        claude_cmd = f"claude '{prompt}'"
+        if dangerously_skip_permissions:
+            claude_cmd = f"claude --dangerously-skip-permissions '{prompt}'"
+        inner_cmd = " && ".join(parts) + f" && {claude_cmd}; exec bash"
+        tmux_cmd = f'tmux new-session -d -s {job_id} "bash -c \\"{inner_cmd}\\""'
+        container.exec_run(
+            ["bash", "-c", tmux_cmd],
+            detach=True,
+        )
+
+    # Write job metadata
+    jobs_dir = RUNS_DIR / run_id / "jobs"
+    jobs_dir.mkdir(parents=True, exist_ok=True)
+    meta = {
+        "job_id": job_id,
+        "run_id": run_id,
+        "prompt": prompt,
+        "mode": mode,
+        "workdir_key": workdir_key,
+        "started": datetime.now(timezone.utc).isoformat(),
+    }
+    if branch:
+        meta["branch"] = branch
+    if add_dirs:
+        meta["add_dirs"] = add_dirs
+
+    job_file = jobs_dir / f"{job_id}.json"
+    job_file.write_text(json.dumps(meta, indent=2))
+
+    # Log event
+    log_event(run_id, "inject", f"job={job_id} mode={mode} prompt={prompt[:80]}")
+
+    return job_id
+
+
 def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
 

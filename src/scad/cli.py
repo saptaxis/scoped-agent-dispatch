@@ -29,6 +29,7 @@ from scad.container import (
     get_session_usage,
     get_session_info,
     image_exists,
+    inject_job,
     list_scad_containers,
     log_event,
     prune_old_images,
@@ -658,6 +659,42 @@ def session_attach(run_id: str):
         ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
     )
     sys.exit(result.returncode)
+
+
+@session.command("inject")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--prompt", required=True, help="Prompt to send to Claude.")
+@click.option("--headless", is_flag=True, help="Fire-and-forget mode (claude -p).")
+@click.option("--branch", default=None, help="Create/checkout branch before running.")
+def session_inject(run_id: str, prompt: str, headless: bool, branch: str):
+    """Inject a Claude process into a running session."""
+    validate_run_id(run_id)
+    config = _config_for_run(run_id)
+
+    # Build add_dirs list from config
+    add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
+
+    try:
+        job_id = inject_job(
+            run_id=run_id,
+            prompt=prompt,
+            headless=headless,
+            workdir_key=config.workdir_key,
+            branch=branch,
+            add_dirs=add_dirs,
+            dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+            additional_flags=config.claude.additional_flags,
+        )
+    except RuntimeError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+    mode = "headless" if headless else "interactive"
+    click.echo(f"[scad] Injected {mode}: {job_id}")
+    if headless:
+        click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+    else:
+        click.echo(f"[scad]   Attach: scad session attach {run_id}")
 
 
 @session.command("clean")
