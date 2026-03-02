@@ -104,14 +104,20 @@ CLAUDE_CMD="$CLAUDE_CMD {{ claude.additional_flags }}"
 # Disable set -e so non-zero Claude exit doesn't skip status writing
 set +e
 
-if [ -n "$PROMPT" ]; then
-    # Headless: fire and forget
+if [ -n "$HEADLESS" ]; then
+    # Headless: fire and forget with stream-json
     echo "[scad] Running headless: $PROMPT"
     echo "[scad] Stream log: $STREAM_LOG"
     $CLAUDE_CMD -p --output-format stream-json "$PROMPT" > "$STREAM_LOG" 2>&1
     EXIT_CODE=$?
+elif [ -n "$PROMPT" ]; then
+    # Interactive with kickoff prompt: tmux + Claude with prompt pre-entered
+    echo "[scad] Starting interactive session with prompt"
+    tmux new-session -d -s scad "$CLAUDE_CMD '$PROMPT'; exec bash"
+    # Keep container alive until scad stop
+    sleep infinity
 else
-    # Interactive: tmux + Claude, drops to bash on exit
+    # Interactive: tmux + Claude REPL
     echo "[scad] Starting interactive session"
     {% if context_prompt %}
     tmux new-session -d -s scad "$CLAUDE_CMD '{{ context_prompt }}'; exec bash"

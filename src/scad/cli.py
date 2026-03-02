@@ -152,7 +152,7 @@ def project_status(config_name: str, cost: bool):
 
 
 def run_agent(
-    config, branch: str, tag: str, prompt: str = None, rebuild: bool = False
+    config, branch: str, tag: str, prompt: str = None, headless: bool = False, rebuild: bool = False
 ) -> str:
     """Orchestrate the full agent lifecycle: resolve branch, build, create clones, run."""
     # Pre-flight: check Claude auth
@@ -187,14 +187,16 @@ def run_agent(
 
     # Run the container (always detached)
     click.echo(f"[scad] Dispatching agent: {run_id}")
-    container_id = run_container(config, branch, run_id, worktree_paths, prompt)
+    container_id = run_container(config, branch, run_id, worktree_paths, prompt, headless=headless)
     click.echo(f"[scad] Container started: {container_id[:12]}")
 
-    if prompt:
+    if headless:
         click.echo(f"[scad] Running headless.")
         click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
         click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
         click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
+    elif prompt:
+        click.echo(f"[scad] Session ready with prompt. Run: scad session attach {run_id}")
     else:
         click.echo(f"[scad] Session ready. Run: scad session attach {run_id}")
 
@@ -205,10 +207,22 @@ def run_agent(
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("--tag", required=True, help="Session tag (e.g., plan07, bugfix-auth). Use 'notag' to opt out.")
 @click.option("--branch", default=None, help="Branch name (auto-generated if not specified).")
-@click.option("--prompt", default=None, help="Prompt for headless mode.")
+@click.option("--prompt", default=None, help="Prompt to kick off Claude (interactive by default, headless with --headless).")
+@click.option("--headless", is_flag=True, help="Fire-and-forget mode (requires --prompt). Uses claude -p.")
 @click.option("--rebuild", is_flag=True, help="Force rebuild the Docker image.")
-def session_start(config_name: str, tag: str, branch: str, prompt: str, rebuild: bool):
+def session_start(config_name: str, tag: str, branch: str, prompt: str, headless: bool, rebuild: bool):
     """Launch an agent in a new container."""
+    if headless and not prompt:
+        raise click.ClickException("--headless requires --prompt.")
+
+    # Determine mode for events.log
+    if headless:
+        mode = "headless"
+    elif prompt:
+        mode = "interactive-prompt"
+    else:
+        mode = "interactive"
+
     try:
         config = load_config(config_name)
     except FileNotFoundError as e:
@@ -221,11 +235,11 @@ def session_start(config_name: str, tag: str, branch: str, prompt: str, rebuild:
     try:
         branch = resolve_branch(config, branch, tag)
         run_id = run_agent(
-            config, branch=branch, tag=tag, prompt=prompt, rebuild=rebuild
+            config, branch=branch, tag=tag, prompt=prompt, headless=headless, rebuild=rebuild
         )
-        log_event(run_id, "start", f"config={config.name} branch={branch}")
-        if prompt:
-            click.echo(f"[scad] Dispatched: {run_id}")
+        log_event(run_id, "start", f"config={config.name} branch={branch} mode={mode}")
+        if headless:
+            click.echo(f"[scad] Dispatched headless: {run_id}")
     except click.ClickException as e:
         click.echo(f"[scad] {e.message}", err=True)
         sys.exit(2)

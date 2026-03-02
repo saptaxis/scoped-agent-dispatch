@@ -432,6 +432,7 @@ def run_container(
     run_id: str,
     worktree_paths: dict[str, Path],
     prompt: Optional[str] = None,
+    headless: bool = False,
     image_tag: Optional[str] = None,
 ) -> str:
     """Run a container for the given config. Returns the container ID."""
@@ -473,6 +474,8 @@ def run_container(
     environment = {"RUN_ID": run_id, "TZ": get_host_timezone()}
     if prompt:
         environment["AGENT_PROMPT"] = prompt
+    if headless:
+        environment["HEADLESS"] = "1"
 
     # Pass through API key if set
     api_key = os.environ.get("ANTHROPIC_API_KEY")

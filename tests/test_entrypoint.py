@@ -160,6 +160,17 @@ class TestEntrypointTemplate:
         result = _render_entrypoint(jinja_env)
         assert "core.pager" in result or "delta" in result
 
+    def test_headless_mode_uses_claude_p(self, jinja_env):
+        """When HEADLESS is set, use claude -p."""
+        content = _render_entrypoint(jinja_env)
+        assert 'if [ -n "$HEADLESS" ]' in content
+        assert "$CLAUDE_CMD -p" in content
+
+    def test_prompt_without_headless_uses_tmux(self, jinja_env):
+        """When PROMPT is set but HEADLESS is not, use tmux with prompt."""
+        content = _render_entrypoint(jinja_env)
+        assert 'elif [ -n "$PROMPT" ]' in content
+
 
 class TestDockerfileTemplate:
     def _make_config(self):

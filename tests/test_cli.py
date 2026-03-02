@@ -319,6 +319,32 @@ class TestSessionStart:
         assert result.exit_code == 0
         mock_resolve.assert_called_once_with(mock_config, None, "test")
 
+    @patch("scad.cli.log_event")
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.resolve_branch")
+    @patch("scad.cli.load_config")
+    def test_headless_requires_prompt(self, mock_load, mock_resolve, mock_run, mock_log, runner):
+        """--headless without --prompt should error."""
+        mock_load.return_value = MagicMock(name="test")
+        result = runner.invoke(main, ["session", "start", "test", "--tag", "t1", "--headless"])
+        assert result.exit_code != 0
+
+    @patch("scad.cli.log_event")
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.resolve_branch")
+    @patch("scad.cli.load_config")
+    def test_prompt_without_headless_is_interactive(self, mock_load, mock_resolve, mock_run, mock_log, runner):
+        """--prompt without --headless passes headless=False."""
+        mock_config = MagicMock()
+        mock_config.name = "test"
+        mock_load.return_value = mock_config
+        mock_resolve.return_value = "scad-test-t1-Mar02-1400"
+        mock_run.return_value = "test-t1-Mar02-1400"
+        runner.invoke(main, ["session", "start", "test", "--tag", "t1", "--prompt", "do stuff"])
+        mock_run.assert_called_once()
+        _, kwargs = mock_run.call_args
+        assert kwargs.get("headless") is False
+
 
 class TestSessionAttach:
     @patch("scad.cli._subprocess.run")
