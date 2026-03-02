@@ -1063,6 +1063,46 @@ def refresh_credentials(run_id: str) -> float:
     return hours
 
 
+def workspace_add(
+    run_id: str, host_path: str, name: str, clone: bool = False
+) -> Path:
+    """Add a directory to the session workspace."""
+    workspace = RUNS_DIR / run_id / "workspace"
+    target = workspace / name
+    source = Path(host_path).expanduser().resolve()
+
+    if target.exists():
+        raise FileExistsError(f"'{name}' already exists in workspace")
+
+    if clone:
+        subprocess.run(
+            ["git", "clone", "--local", str(source), str(target)],
+            check=True,
+        )
+    else:
+        target.symlink_to(source)
+
+    log_event(run_id, "code-add", f"name={name} path={source} clone={clone}")
+    return target
+
+
+def workspace_remove(run_id: str, name: str) -> None:
+    """Remove a directory from the session workspace."""
+    workspace = RUNS_DIR / run_id / "workspace"
+    target = workspace / name
+
+    if not target.exists() and not target.is_symlink():
+        raise FileNotFoundError(f"'{name}' not found in workspace")
+
+    if target.is_symlink():
+        target.unlink()
+    else:
+        import shutil
+        shutil.rmtree(target)
+
+    log_event(run_id, "code-remove", f"name={name}")
+
+
 def gc(force: bool = False) -> dict:
     """Find and optionally clean orphaned state.
 

@@ -295,3 +295,79 @@ class TestSessionJobsCLI:
         result = runner.invoke(main, ["session", "jobs", "test-run"])
         assert result.exit_code == 0
         assert "No jobs" in result.output
+
+
+class TestWorkspaceAdd:
+
+    def test_add_creates_symlink(self, tmp_path):
+        """workspace_add creates a symlink in workspace/."""
+        from scad.container import workspace_add
+        workspace = tmp_path / "test-run" / "workspace"
+        workspace.mkdir(parents=True)
+        source = tmp_path / "data"
+        source.mkdir()
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            workspace_add("test-run", str(source), "experiments")
+
+        link = workspace / "experiments"
+        assert link.is_symlink()
+        assert link.resolve() == source.resolve()
+
+    def test_add_with_clone_flag(self, tmp_path):
+        """workspace_add --clone does git clone instead of symlink."""
+        from scad.container import workspace_add
+        workspace = tmp_path / "test-run" / "workspace"
+        workspace.mkdir(parents=True)
+        source = tmp_path / "repo"
+        source.mkdir()
+
+        with patch("scad.container.RUNS_DIR", tmp_path), \
+             patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0)
+            workspace_add("test-run", str(source), "repo", clone=True)
+
+        mock_run.assert_called()
+        clone_call = mock_run.call_args_list[0][0][0]
+        assert "clone" in clone_call
+
+    def test_add_rejects_duplicate_name(self, tmp_path):
+        """workspace_add raises if name already exists in workspace."""
+        from scad.container import workspace_add
+        workspace = tmp_path / "test-run" / "workspace"
+        workspace.mkdir(parents=True)
+        (workspace / "existing").mkdir()
+        source = tmp_path / "data"
+        source.mkdir()
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            with pytest.raises(FileExistsError):
+                workspace_add("test-run", str(source), "existing")
+
+
+class TestWorkspaceRemove:
+
+    def test_remove_deletes_symlink(self, tmp_path):
+        """workspace_remove removes a symlink from workspace/."""
+        from scad.container import workspace_remove
+        workspace = tmp_path / "test-run" / "workspace"
+        workspace.mkdir(parents=True)
+        source = tmp_path / "data"
+        source.mkdir()
+        (workspace / "experiments").symlink_to(source)
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            workspace_remove("test-run", "experiments")
+
+        assert not (workspace / "experiments").exists()
+        assert source.exists()  # Original not deleted
+
+    def test_remove_nonexistent_raises(self, tmp_path):
+        """workspace_remove raises if name doesn't exist."""
+        from scad.container import workspace_remove
+        workspace = tmp_path / "test-run" / "workspace"
+        workspace.mkdir(parents=True)
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            with pytest.raises(FileNotFoundError):
+                workspace_remove("test-run", "nope")

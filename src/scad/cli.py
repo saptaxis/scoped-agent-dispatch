@@ -41,6 +41,8 @@ from scad.container import (
     stop_container,
     sync_from_host,
     validate_run_id,
+    workspace_add,
+    workspace_remove,
 )
 
 
@@ -835,6 +837,37 @@ def code_refresh(run_id: str):
         click.echo(f"[scad] Credentials refreshed. Time remaining: {h}h {m:02d}m")
     except click.ClickException as e:
         click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(1)
+
+
+@code.command("add")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--path", required=True, help="Host path to add.")
+@click.option("--name", required=True, help="Name in workspace/.")
+@click.option("--clone", is_flag=True, help="Git clone instead of symlink.")
+def code_add(run_id: str, path: str, name: str, clone: bool):
+    """Add a directory to a session's workspace."""
+    validate_run_id(run_id)
+    try:
+        result = workspace_add(run_id, path, name, clone=clone)
+        mode = "cloned" if clone else "symlinked"
+        click.echo(f"[scad] Added {name} ({mode}): {path}")
+    except FileExistsError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+
+@code.command("remove")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--name", required=True, help="Name to remove from workspace/.")
+def code_remove(run_id: str, name: str):
+    """Remove a directory from a session's workspace."""
+    validate_run_id(run_id)
+    try:
+        workspace_remove(run_id, name)
+        click.echo(f"[scad] Removed {name} from workspace")
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(1)
 
 
