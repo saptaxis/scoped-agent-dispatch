@@ -43,6 +43,17 @@ class TestEntrypointTemplate:
         result = _render_entrypoint(jinja_env, requirements_file=None)
         assert "pip install" not in result
 
+    def test_editable_install(self, jinja_env):
+        """Entrypoint runs pip install -e . when python_editable=True."""
+        result = _render_entrypoint(jinja_env, python_editable=True)
+        assert "pip install" in result
+        assert "-e ." in result
+
+    def test_no_editable_install_by_default(self, jinja_env):
+        """Entrypoint does NOT run pip install -e . by default."""
+        result = _render_entrypoint(jinja_env)
+        assert "-e ." not in result
+
     def test_generates_claude_config_stub(self, jinja_env):
         result = _render_entrypoint(jinja_env)
         assert "seed-claude.json" in result

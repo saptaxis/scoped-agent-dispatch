@@ -187,6 +187,24 @@ class TestScadConfig:
         )
         assert config.claude.plugins == []
 
+    def test_python_editable_field(self):
+        """Config supports python.editable field."""
+        from scad.config import RepoConfig
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path="/tmp/code", workdir=True)},
+            python={"version": "3.11", "editable": True},
+        )
+        assert config.python.editable is True
+
+    def test_python_editable_default_false(self):
+        """python.editable defaults to False."""
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+        )
+        assert config.python.editable is False
+
 
 class TestLoadConfig:
     def test_load_from_file(self, tmp_config_dir, sample_config_file):

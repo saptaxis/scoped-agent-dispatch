@@ -91,6 +91,10 @@ source /opt/venv/bin/activate
 echo "[scad] Syncing Python dependencies..."
 pip install --no-cache-dir -q -r {{ requirements_file }} 2>&1
 {% endif %}
+{% if python_editable %}
+echo "[scad] Installing project in editable mode..."
+pip install --no-cache-dir -q -e . 2>&1
+{% endif %}
 
 log_event "session-ready"
 echo "[scad] Environment ready — waiting for work"

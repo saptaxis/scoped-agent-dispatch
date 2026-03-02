@@ -440,6 +440,7 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
         config_name=config.name,
         workdir_key=workdir_key,
         requirements_file=requirements_file,
+        python_editable=config.python.editable,
     )
     (build_dir / "entrypoint.sh").write_text(entrypoint_content)
 

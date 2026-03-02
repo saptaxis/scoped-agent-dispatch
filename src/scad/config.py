@@ -77,6 +77,7 @@ class MountConfig(BaseModel):
 class PythonConfig(BaseModel):
     version: str = "3.11"
     requirements: Optional[str] = None
+    editable: bool = False
 
 
 from scad.claude_config import DEFAULT_PLUGINS as SCAD_DEFAULT_PLUGINS
