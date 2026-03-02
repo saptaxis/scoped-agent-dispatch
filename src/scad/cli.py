@@ -1,10 +1,12 @@
 """CLI entry point."""
 
+import json
 import os
 import subprocess
 import subprocess as _subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -81,6 +83,68 @@ def _complete_run_ids(ctx, param, incomplete):
 def _complete_config_names(ctx, param, incomplete):
     """Shell completion for config names."""
     return sorted(n for n in list_configs() if n.startswith(incomplete))
+
+
+def _format_tool_line(record: dict) -> list[str]:
+    """Extract condensed tool activity lines from a stream record."""
+    lines = []
+    rtype = record.get("type", "")
+    if rtype == "assistant":
+        msg = record.get("message", {})
+        for block in msg.get("content", []):
+            if block.get("type") == "tool_use":
+                tool = block.get("name", "?")
+                inp = block.get("input", {})
+                if tool == "Read":
+                    lines.append(f"[scad] Reading {inp.get('file_path', '?')}...")
+                elif tool == "Edit":
+                    lines.append(f"[scad] Editing {inp.get('file_path', '?')}...")
+                elif tool == "Write":
+                    lines.append(f"[scad] Writing {inp.get('file_path', '?')}...")
+                elif tool == "Bash":
+                    cmd = inp.get("command", "?")[:60]
+                    lines.append(f"[scad] Running: {cmd}...")
+                else:
+                    lines.append(f"[scad] {tool}...")
+    return lines
+
+
+def _tail_stream(stream_path: Path, stop_event: threading.Event):
+    """Tail a stream.jsonl file, printing condensed Claude activity.
+
+    Waits for the file to appear, then reads lines as they are written.
+    After stop_event is set, drains any remaining lines before returning.
+    """
+    while not stream_path.exists():
+        if stop_event.wait(0.5):
+            # Job finished before stream file appeared — try one last time
+            if not stream_path.exists():
+                return
+            break
+    with open(stream_path) as f:
+        while True:
+            line = f.readline()
+            if not line:
+                if stop_event.is_set():
+                    # Drain: read any remaining lines that appeared
+                    remaining = f.read()
+                    if remaining:
+                        for rem_line in remaining.splitlines():
+                            try:
+                                record = json.loads(rem_line.strip())
+                            except json.JSONDecodeError:
+                                continue
+                            for msg in _format_tool_line(record):
+                                click.echo(msg)
+                    break
+                stop_event.wait(0.3)
+                continue
+            try:
+                record = json.loads(line.strip())
+            except json.JSONDecodeError:
+                continue
+            for msg in _format_tool_line(record):
+                click.echo(msg)
 
 
 @click.group()
@@ -710,10 +774,16 @@ def session_attach(run_id: str):
 @click.option("--headless", is_flag=True, help="Fire-and-forget mode (claude -p).")
 @click.option("--branch", default=None, help="Create/checkout branch before running.")
 @click.option("--wait", is_flag=True, help="Block until Claude finishes (headless only).")
-def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: bool):
+@click.option("--tail", is_flag=True, help="Stream Claude's activity during --wait.")
+def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: bool, tail: bool):
     """Inject a Claude process into a running session."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
+
+    # --tail requires --wait
+    if tail and not wait:
+        click.echo("[scad] Error: --tail requires --wait", err=True)
+        sys.exit(1)
 
     # --wait implies headless
     if wait and not headless:
@@ -722,35 +792,81 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: 
     # Build add_dirs list from config
     add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
 
-    try:
-        result = inject_job(
-            run_id=run_id,
-            prompt=prompt,
-            headless=headless,
-            workdir_key=config.workdir_key,
-            branch=branch,
-            add_dirs=add_dirs,
-            dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
-            additional_flags=config.claude.additional_flags,
-            wait=wait,
-        )
-    except (RuntimeError, ValueError) as e:
-        click.echo(f"[scad] Error: {e}", err=True)
-        sys.exit(1)
+    # Common kwargs for inject_job
+    inject_kwargs = dict(
+        run_id=run_id,
+        prompt=prompt,
+        headless=headless,
+        workdir_key=config.workdir_key,
+        branch=branch,
+        add_dirs=add_dirs,
+        dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+        additional_flags=config.claude.additional_flags,
+        wait=wait,
+    )
+
+    # inject_job blocks when wait=True, so we run it in a background thread
+    # and tail the stream file on the main thread.
+    stop_event = None
+
+    if tail:
+        stop_event = threading.Event()
+        inject_result = [None, None]  # [result, exception]
+
+        def _run_inject():
+            try:
+                inject_result[0] = inject_job(**inject_kwargs)
+            except (RuntimeError, ValueError) as e:
+                inject_result[1] = e
+            finally:
+                stop_event.set()
+
+        inject_thread = threading.Thread(target=_run_inject, daemon=True)
+        inject_thread.start()
+
+        # Wait for inject_job to create the job and start claude
+        inject_thread.join(timeout=2.0)
+
+        # Find the newest stream.jsonl for this run
+        logs_dir = Path.home() / ".scad" / "logs"
+        stream_path = None
+        if logs_dir.exists():
+            candidates = sorted(logs_dir.glob(f"{run_id}-job-*.stream.jsonl"))
+            if candidates:
+                stream_path = candidates[-1]
+
+        if stream_path:
+            _tail_stream(stream_path, stop_event)
+        else:
+            click.echo("[scad] Waiting for job to complete...", err=True)
+            stop_event.wait()
+
+        inject_thread.join()
+
+        if inject_result[1]:
+            click.echo(f"[scad] Error: {inject_result[1]}", err=True)
+            sys.exit(1)
+
+        result = inject_result[0]
+    else:
+        try:
+            result = inject_job(**inject_kwargs)
+        except (RuntimeError, ValueError) as e:
+            click.echo(f"[scad] Error: {e}", err=True)
+            sys.exit(1)
 
     if wait:
         job_id, exit_code = result
         click.echo(f"[scad] Completed: {job_id} (exit code {exit_code})")
 
-        # Parse stream.jsonl for final result
-        import json as _json
+        # Parse stream.jsonl for final result (skip if --tail already showed activity)
         logs_dir = Path.home() / ".scad" / "logs"
         stream_path = logs_dir / f"{job_id}.stream.jsonl"
         if stream_path.exists():
             for line in stream_path.read_text().splitlines():
                 try:
-                    record = _json.loads(line)
-                except _json.JSONDecodeError:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
                     continue
                 if record.get("type") == "result":
                     if record.get("is_error"):

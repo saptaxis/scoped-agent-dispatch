@@ -561,3 +561,118 @@ class TestInjectWait:
                     workdir_key="code",
                     wait=True,
                 )
+
+
+class TestInjectTail:
+    """Tests for --tail streaming during --wait."""
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli._config_for_run")
+    def test_tail_requires_wait(self, mock_config, mock_inject, mock_validate):
+        """--tail without --wait should error."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "session", "inject", "test-run",
+            "--prompt", "Task",
+            "--headless",
+            "--tail",
+        ])
+        assert result.exit_code != 0 or "requires --wait" in result.output
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli._config_for_run")
+    def test_wait_tail_accepted(self, mock_config, mock_inject, mock_validate):
+        """--wait --tail is a valid combination."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_inject.return_value = ("test-job-001", 0)
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "session", "inject", "test-run",
+            "--prompt", "Task",
+            "--wait",
+            "--tail",
+        ])
+        assert result.exit_code == 0
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli._config_for_run")
+    def test_tail_thread_starts_and_stops(self, mock_config, mock_inject, mock_validate, tmp_path):
+        """--wait --tail starts a tailing thread that stops after inject_job returns."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_inject.return_value = ("test-run-job-001", 0)
+
+        # Create a stream.jsonl at the expected ~/.scad/logs/ path
+        logs_dir = tmp_path / ".scad" / "logs"
+        logs_dir.mkdir(parents=True)
+        stream_file = logs_dir / "test-run-job-001.stream.jsonl"
+        stream_file.write_text(
+            '{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"/tmp/x"}}]}}\n'
+        )
+
+        runner = CliRunner()
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, [
+                "session", "inject", "test-run",
+                "--prompt", "Task",
+                "--wait",
+                "--tail",
+            ])
+        assert result.exit_code == 0
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli._config_for_run")
+    def test_tail_displays_tool_activity(self, mock_config, mock_inject, mock_validate, tmp_path):
+        """--tail should display condensed tool activity from stream.jsonl."""
+        import json as _json
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_inject.return_value = ("test-run-job-001", 0)
+
+        # Pre-create the stream.jsonl at the expected ~/.scad/logs/ path
+        logs_dir = tmp_path / ".scad" / "logs"
+        logs_dir.mkdir(parents=True)
+        stream_file = logs_dir / "test-run-job-001.stream.jsonl"
+        lines = [
+            _json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/workspace/code/main.py"}}
+            ]}}),
+            _json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "pytest tests/ -v"}}
+            ]}}),
+            _json.dumps({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": "/workspace/code/utils.py"}}
+            ]}}),
+            _json.dumps({"type": "result", "result": "Done"}),
+        ]
+        stream_file.write_text("\n".join(lines) + "\n")
+
+        runner = CliRunner()
+        with patch("scad.cli.Path.home", return_value=tmp_path):
+            result = runner.invoke(main, [
+                "session", "inject", "test-run",
+                "--prompt", "Task",
+                "--wait",
+                "--tail",
+            ])
+
+        assert result.exit_code == 0
+        # The tail output should mention the tools used
+        assert "Reading" in result.output or "Read" in result.output
+        assert "Running" in result.output or "Bash" in result.output or "pytest" in result.output
+        assert "Editing" in result.output or "Edit" in result.output
