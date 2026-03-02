@@ -470,3 +470,94 @@ class TestCodeDiff:
         assert len(results) == 1
         assert "code" in results
         assert "+new line" in results["code"]
+
+
+class TestInjectWait:
+    """Tests for --wait blocking behavior."""
+
+    @patch("scad.container.docker.from_env")
+    def test_wait_does_not_detach(self, mock_docker, tmp_path):
+        """When wait=True, docker exec is NOT detached."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        # exec_run returns (exit_code, output) when not detached
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            job_id = inject_job(
+                run_id="test-run",
+                prompt="Task",
+                headless=True,
+                workdir_key="code",
+                wait=True,
+            )
+
+        # The claude exec call (second call) should NOT have detach=True
+        claude_call = mock_container.exec_run.call_args_list[1]
+        assert claude_call[1].get("detach") is not True
+
+    @patch("scad.container.docker.from_env")
+    def test_wait_returns_exit_code(self, mock_docker, tmp_path):
+        """Wait mode returns the exit code from docker exec."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            result = inject_job(
+                run_id="test-run",
+                prompt="Task",
+                headless=True,
+                workdir_key="code",
+                wait=True,
+            )
+
+        # When wait=True, returns (job_id, exit_code) instead of just job_id
+        assert isinstance(result, tuple)
+        assert result[1] == 0
+
+    @patch("scad.container.docker.from_env")
+    def test_no_wait_still_detaches(self, mock_docker, tmp_path):
+        """Without wait, inject still detaches (existing behavior)."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            result = inject_job(
+                run_id="test-run",
+                prompt="Task",
+                headless=True,
+                workdir_key="code",
+            )
+
+        # Without wait, returns just job_id (string)
+        assert isinstance(result, str)
+        # The claude exec call should have detach=True
+        claude_call = mock_container.exec_run.call_args_list[1]
+        assert claude_call[1].get("detach") is True
+
+    @patch("scad.container.docker.from_env")
+    def test_wait_with_interactive_raises(self, mock_docker, tmp_path):
+        """wait=True with headless=False raises ValueError."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            with pytest.raises(ValueError, match="wait.*headless"):
+                inject_job(
+                    run_id="test-run",
+                    prompt="Task",
+                    headless=False,
+                    workdir_key="code",
+                    wait=True,
+                )

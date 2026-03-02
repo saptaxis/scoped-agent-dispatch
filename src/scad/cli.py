@@ -709,16 +709,21 @@ def session_attach(run_id: str):
 @click.option("--prompt", required=True, help="Prompt to send to Claude.")
 @click.option("--headless", is_flag=True, help="Fire-and-forget mode (claude -p).")
 @click.option("--branch", default=None, help="Create/checkout branch before running.")
-def session_inject(run_id: str, prompt: str, headless: bool, branch: str):
+@click.option("--wait", is_flag=True, help="Block until Claude finishes (headless only).")
+def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: bool):
     """Inject a Claude process into a running session."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
+
+    # --wait implies headless
+    if wait and not headless:
+        headless = True
 
     # Build add_dirs list from config
     add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
 
     try:
-        job_id = inject_job(
+        result = inject_job(
             run_id=run_id,
             prompt=prompt,
             headless=headless,
@@ -727,17 +732,42 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str):
             add_dirs=add_dirs,
             dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
             additional_flags=config.claude.additional_flags,
+            wait=wait,
         )
-    except RuntimeError as e:
+    except (RuntimeError, ValueError) as e:
         click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(1)
 
-    mode = "headless" if headless else "interactive"
-    click.echo(f"[scad] Injected {mode}: {job_id}")
-    if headless:
-        click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+    if wait:
+        job_id, exit_code = result
+        click.echo(f"[scad] Completed: {job_id} (exit code {exit_code})")
+
+        # Parse stream.jsonl for final result
+        import json as _json
+        logs_dir = Path.home() / ".scad" / "logs"
+        stream_path = logs_dir / f"{job_id}.stream.jsonl"
+        if stream_path.exists():
+            for line in stream_path.read_text().splitlines():
+                try:
+                    record = _json.loads(line)
+                except _json.JSONDecodeError:
+                    continue
+                if record.get("type") == "result":
+                    if record.get("is_error"):
+                        click.echo(f"[scad] Error: {record.get('result', 'unknown error')}", err=True)
+                    else:
+                        click.echo(record.get("result", ""))
+                    break
+
+        sys.exit(exit_code)
     else:
-        click.echo(f"[scad]   Attach: scad session attach {run_id}")
+        job_id = result
+        mode = "headless" if headless else "interactive"
+        click.echo(f"[scad] Injected {mode}: {job_id}")
+        if headless:
+            click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+        else:
+            click.echo(f"[scad]   Attach: scad session attach {run_id}")
 
 
 @session.command("jobs")

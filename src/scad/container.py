@@ -107,14 +107,17 @@ def inject_job(
     add_dirs: Optional[list[str]] = None,
     dangerously_skip_permissions: bool = False,
     additional_flags: Optional[str] = None,
-) -> str:
+    wait: bool = False,
+) -> "str | tuple[str, int]":
     """Inject a Claude process into a running container via docker exec.
 
-    For headless: runs claude -p in detached mode.
+    For headless: runs claude -p in detached mode (or blocking if wait=True).
     For interactive: creates a tmux session with claude.
 
-    Returns the job_id.
+    Returns the job_id when wait=False, or (job_id, exit_code) when wait=True.
     """
+    if wait and not headless:
+        raise ValueError("wait=True requires headless=True")
     container_name = f"scad-{run_id}"
     client = docker.from_env()
     container = client.containers.get(container_name)
@@ -161,10 +164,15 @@ def inject_job(
 
         parts.append(claude_cmd)
         bash_cmd = " && ".join(parts)
-        container.exec_run(
-            ["bash", "-c", bash_cmd],
-            detach=True,
-        )
+        if wait:
+            exit_code, _output = container.exec_run(
+                ["bash", "-c", bash_cmd],
+            )
+        else:
+            container.exec_run(
+                ["bash", "-c", bash_cmd],
+                detach=True,
+            )
     else:
         # Interactive: add tmux window in the scad session
         # Write a launcher script to avoid nested quoting hell
@@ -214,6 +222,8 @@ def inject_job(
     # Log event
     log_event(run_id, "inject", f"job={job_id} mode={mode} prompt={prompt[:80]}")
 
+    if wait:
+        return (job_id, exit_code)
     return job_id
 
 
