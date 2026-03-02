@@ -28,7 +28,7 @@ Each session gets:
 - **Persistent Claude session data** across stop/restart
 - **Pre-configured plugins** active from the first prompt
 - **Host timezone** inherited (git commits match your clock)
-- **Three session modes** — interactive, interactive-with-prompt (Claude starts working on attach), headless (fire-and-forget)
+- **Injection model** — start a session once, then inject Claude processes via `docker exec` (interactive or headless, with optional `--branch`)
 
 Sessions are long-lived. Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
 
@@ -38,9 +38,13 @@ Operational visibility: `scad session status` shows running sessions with creden
 
 ```bash
 # Session — container + Claude lifecycle
-scad session start <config> --tag <tag>  # launch interactive session
-scad session start <config> --tag <tag> --prompt "..."  # interactive with prompt (Claude starts working)
-scad session start <config> --tag <tag> --prompt "..." --headless  # fire-and-forget (uses claude -p)
+scad session start <config> --tag <tag>  # launch session (setup only, no Claude)
+scad session start <config> --tag <tag> --prompt "..."  # start + immediate inject (sugar)
+scad session start <config> --tag <tag> --prompt "..." --headless  # start + headless inject
+scad session inject <run-id> --prompt "..."  # inject Claude into running session (interactive)
+scad session inject <run-id> --prompt "..." --headless  # inject headless (fire-and-forget)
+scad session inject <run-id> --prompt "..." --branch feat  # inject on a new branch
+scad session jobs <run-id>               # list injected jobs with status, mode, branch
 scad session stop <run-id>               # stop container (preserves state)
 scad session stop --all [--yes]          # stop all running sessions
 scad session stop --config <name> [--yes]  # stop all sessions for a config
@@ -57,6 +61,10 @@ scad code fetch <run-id>                 # snapshot clone branches back to host 
 scad code sync <run-id>                  # sync host refs + fast-forward main
 scad code sync <run-id> --checkout main  # sync and switch to updated main
 scad code sync <run-id> --no-update-main  # fetch only (skip fast-forward)
+scad code add <run-id> --path <dir> --name <name>  # symlink a directory into workspace
+scad code add <run-id> --path <dir> --name <name> --clone  # git clone into workspace
+scad code remove <run-id> --name <name>  # remove a directory from workspace
+scad code diff <run-id>                  # show diff between session clones and source repos
 scad code refresh <run-id>               # push fresh credentials into running container
 
 # Project
@@ -195,13 +203,14 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 ## How it works
 
 1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
-2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/runs/<run-id>/worktrees/`. Mounts into container.
+2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/runs/<run-id>/workspace/`. Non-worktree repos and data mounts are symlinked.
 3. **Branch** — Auto-generates branch name (`scad-{config}-{tag}-MonDD-HHMM`) and checks it out in each clone.
 4. **Configure** — `claude_config.py` centralizes all Claude Code configuration: `settings.json` (permissions, `attribution`, `enabledPlugins`), `.claude.json` (persisted across sessions via bind-mount from the run dir), host timezone inheritance (IANA `TZ` env var + `/etc/localtime` mount).
-5. **Run** — Starts container detached. Entrypoint launches tmux with Claude (interactive) or streams JSON output (headless).
-6. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Survives stop/restart.
-7. **Fetch** — `scad code fetch` snapshots clone branches back to host source repos.
-8. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
+5. **Run** — Starts container detached. Entrypoint performs setup only (git config, tmux init) — no Claude launch.
+6. **Inject** — `scad session inject` runs Claude inside the container via `docker exec`. Each injection is a tracked job with its own mode (interactive/headless), optional branch, and log stream.
+7. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Job metadata lives in `~/.scad/runs/<run-id>/jobs/`. Survives stop/restart.
+8. **Fetch** — `scad code fetch` discovers all branches across clones and snapshots them back to host repos.
+9. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
 
 ## Architecture
 
@@ -219,9 +228,11 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
   configs/                          # project YAML configs
     my-project.yml
   runs/<run-id>/                    # one directory = one session
-    worktrees/                      # git clones (one per repo)
-      my-project-code/
-      my-project-docs/
+    workspace/                      # single bind mount into container
+      my-project-code/              # git clone (workdir repo)
+      my-project-docs/              # git clone or symlink (add_dir repo)
+    jobs/                           # per-job metadata (one file per inject)
+      <job-id>.json
     claude/                         # mounted as container ~/.claude/
     claude.json                     # mounted as container ~/.claude.json
     events.log                      # append-only event history

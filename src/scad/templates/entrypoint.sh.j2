@@ -2,15 +2,12 @@
 set -euo pipefail
 
 RUN_ID="${RUN_ID:?RUN_ID not set}"
-PROMPT="${AGENT_PROMPT:-}"
-HEADLESS="${HEADLESS:-}"
 LOG_FILE="/scad-logs/${RUN_ID}.log"
-STREAM_LOG="/scad-logs/${RUN_ID}.stream.jsonl"
 STATUS_FILE="/scad-logs/${RUN_ID}.status.json"
+EVENTS_LOG="/scad-logs/${RUN_ID}.events.log"
 START_TIME=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-# Log event to events.log (mounted from host via logs dir)
-EVENTS_LOG="/scad-logs/${RUN_ID}.events.log"
+# Log event to events.log
 log_event() {
     echo "$(date -u +%Y-%m-%dT%H:%M) $*" >> "$EVENTS_LOG"
 }
@@ -60,9 +57,7 @@ git config --global core.pager delta
 git config --global interactive.diffFilter 'delta --color-only'
 git config --global delta.navigate true
 
-# Copy host Claude credentials if mounted (staging path avoids stale-inode
-# problem when user runs /login on host — new file = new inode, direct mount
-# would keep showing old content)
+# Copy host Claude credentials if mounted
 if [ -f /mnt/host-claude-credentials.json ]; then
     mkdir -p "$HOME/.claude"
     cp /mnt/host-claude-credentials.json "$HOME/.claude/.credentials.json"
@@ -87,7 +82,7 @@ if [ -f "$HOME/bootstrap-claude.sh" ]; then
     bash "$HOME/bootstrap-claude.sh" || echo "[scad] Warning: plugin bootstrap had errors"
 fi
 
-# Working directory (clone already mounted by host)
+# Working directory
 cd /workspace/{{ workdir_key }}
 
 # Activate venv and sync deps
@@ -97,45 +92,11 @@ echo "[scad] Syncing Python dependencies..."
 pip install --no-cache-dir -q -r {{ requirements_file }} 2>&1
 {% endif %}
 
-# Build claude command
-CLAUDE_CMD="claude"
-{% if claude.dangerously_skip_permissions %}
-CLAUDE_CMD="$CLAUDE_CMD --dangerously-skip-permissions"
-{% endif %}
-{% for key, repo in repos.items() if repo.add_dir %}
-CLAUDE_CMD="$CLAUDE_CMD --add-dir /workspace/{{ key }}"
-{% endfor %}
-{% if claude.additional_flags %}
-CLAUDE_CMD="$CLAUDE_CMD {{ claude.additional_flags }}"
-{% endif %}
+log_event "session-ready"
+echo "[scad] Environment ready — waiting for work"
 
-# Disable set -e so non-zero Claude exit doesn't skip status writing
-set +e
+# Start default tmux session for interactive work
+tmux new-session -d -s scad "bash"
 
-if [ -n "$HEADLESS" ]; then
-    # Headless: fire and forget with stream-json
-    echo "[scad] Running headless: $PROMPT"
-    echo "[scad] Stream log: $STREAM_LOG"
-    log_event "claude-start mode=headless"
-    $CLAUDE_CMD -p --output-format stream-json "$PROMPT" > "$STREAM_LOG" 2>&1
-    EXIT_CODE=$?
-    log_event "claude-finish exit=$EXIT_CODE mode=headless"
-elif [ -n "$PROMPT" ]; then
-    # Interactive with kickoff prompt: tmux + Claude with prompt pre-entered
-    echo "[scad] Starting interactive session with prompt"
-    log_event "claude-start mode=interactive-prompt"
-    tmux new-session -d -s scad "$CLAUDE_CMD '$PROMPT'; exec bash"
-    # Keep container alive until scad stop
-    sleep infinity
-else
-    # Interactive: tmux + Claude REPL
-    echo "[scad] Starting interactive session"
-    log_event "claude-start mode=interactive"
-    {% if context_prompt %}
-    tmux new-session -d -s scad "$CLAUDE_CMD '{{ context_prompt }}'; exec bash"
-    {% else %}
-    tmux new-session -d -s scad "$CLAUDE_CMD; exec bash"
-    {% endif %}
-    # Keep container alive until scad stop
-    sleep infinity
-fi
+# Wait for injected work or scad stop
+sleep infinity

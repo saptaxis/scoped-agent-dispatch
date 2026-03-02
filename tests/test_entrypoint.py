@@ -13,12 +13,9 @@ def _render_entrypoint(jinja_env, **overrides):
     """Helper to render entrypoint with sensible defaults."""
     template = jinja_env.get_template("entrypoint.sh.j2")
     defaults = dict(
-        repos={"code": {"add_dir": False}},
         workdir_key="code",
         requirements_file=None,
-        claude={"dangerously_skip_permissions": True, "additional_flags": None},
         config_name="test",
-        context_prompt=None,
     )
     defaults.update(overrides)
     return template.render(**defaults)
@@ -46,43 +43,6 @@ class TestEntrypointTemplate:
         result = _render_entrypoint(jinja_env, requirements_file=None)
         assert "pip install" not in result
 
-    def test_renders_skip_permissions(self, jinja_env):
-        result = _render_entrypoint(jinja_env)
-        assert "--dangerously-skip-permissions" in result
-
-    def test_renders_add_dir(self, jinja_env):
-        result = _render_entrypoint(
-            jinja_env,
-            repos={
-                "code": {"add_dir": False},
-                "docs": {"add_dir": True},
-            },
-        )
-        assert "--add-dir /workspace/docs" in result
-        assert "--add-dir /workspace/code" not in result
-
-    def test_headless_uses_stream_json(self, jinja_env):
-        result = _render_entrypoint(jinja_env)
-        assert "--output-format stream-json" in result
-        assert "STREAM_LOG" in result
-        assert ".stream.jsonl" in result
-
-    def test_interactive_tmux_session(self, jinja_env):
-        result = _render_entrypoint(jinja_env)
-        assert "tmux new-session -d -s scad" in result
-
-    def test_interactive_context_prompt(self, jinja_env):
-        result = _render_entrypoint(
-            jinja_env,
-            context_prompt="Read /workspace/docs/overview.md for project context",
-        )
-        assert "tmux new-session -d -s scad" in result
-        assert "Read /workspace/docs/overview.md for project context" in result
-
-    def test_interactive_no_context_prompt(self, jinja_env):
-        result = _render_entrypoint(jinja_env, context_prompt=None)
-        assert 'tmux new-session -d -s scad "$CLAUDE_CMD; exec bash"' in result
-
     def test_generates_claude_config_stub(self, jinja_env):
         result = _render_entrypoint(jinja_env)
         assert "seed-claude.json" in result
@@ -97,23 +57,13 @@ class TestEntrypointTemplate:
         assert "STATUS_FILE" in result
         assert "exit_code" in result
 
-    def test_set_e_disabled_around_claude(self, jinja_env):
-        result = _render_entrypoint(jinja_env)
-        set_plus_e = result.find("set +e")
-        # Find the actual claude execution (not the CLAUDE_CMD= assignment)
-        claude_pos = result.find("$CLAUDE_CMD -p")
-        assert set_plus_e != -1
-        assert set_plus_e < claude_pos
-        # Status writing is handled by EXIT trap with set -e
-        assert "trap write_status EXIT" in result
-        assert "STATUS_FILE" in result
-
     def test_log_file_capture_early(self, jinja_env):
+        """Log capture starts before any setup steps."""
         result = _render_entrypoint(jinja_env)
         exec_pos = result.find("exec >")
-        claude_pos = result.find("$CLAUDE_CMD")
+        setup_pos = result.find("seed-claude.json")
         assert exec_pos != -1
-        assert exec_pos < claude_pos
+        assert exec_pos < setup_pos
 
     def test_pretrusts_workdir(self, jinja_env):
         """Entrypoint seeds .claude.json from seed file (trust logic in claude_config)."""
@@ -125,11 +75,6 @@ class TestEntrypointTemplate:
         """Entrypoint does NOT contain the broken includeCoAuthoredBy setting."""
         result = _render_entrypoint(jinja_env)
         assert "includeCoAuthoredBy" not in result
-
-    def test_claude_exit_drops_to_bash(self, jinja_env):
-        """Interactive mode: Claude exit drops to bash, not container exit."""
-        result = _render_entrypoint(jinja_env)
-        assert "exec bash" in result
 
     def test_sleep_infinity(self, jinja_env):
         """Container stays alive via sleep infinity, not tmux wait loop."""
@@ -159,28 +104,6 @@ class TestEntrypointTemplate:
         """Entrypoint configures git to use delta as pager."""
         result = _render_entrypoint(jinja_env)
         assert "core.pager" in result or "delta" in result
-
-    def test_headless_mode_uses_claude_p(self, jinja_env):
-        """When HEADLESS is set, use claude -p."""
-        content = _render_entrypoint(jinja_env)
-        assert 'if [ -n "$HEADLESS" ]' in content
-        assert "$CLAUDE_CMD -p" in content
-
-    def test_prompt_without_headless_uses_tmux(self, jinja_env):
-        """When PROMPT is set but HEADLESS is not, use tmux with prompt."""
-        content = _render_entrypoint(jinja_env)
-        assert 'elif [ -n "$PROMPT" ]' in content
-
-    def test_entrypoint_logs_claude_start(self, jinja_env):
-        """Entrypoint should log Claude start to events.log."""
-        content = _render_entrypoint(jinja_env)
-        assert "events.log" in content
-        assert "claude-start" in content
-
-    def test_entrypoint_logs_claude_finish(self, jinja_env):
-        """Entrypoint should log Claude finish with exit code."""
-        content = _render_entrypoint(jinja_env)
-        assert "claude-finish" in content
 
 
 class TestDockerfileTemplate:
@@ -244,6 +167,57 @@ class TestDockerfileTemplate:
         config = self._make_config()
         rendered = self._render_dockerfile(config)
         assert "delta" in rendered
+
+
+@pytest.fixture
+def rendered_entrypoint(jinja_env):
+    """Render entrypoint with minimal template variables for simplified template."""
+    template = jinja_env.get_template("entrypoint.sh.j2")
+    return template.render(
+        config_name="test",
+        workdir_key="code",
+        requirements_file=None,
+    )
+
+
+class TestSimplifiedEntrypoint:
+    """Tests for setup-only entrypoint (no Claude launch)."""
+
+    def test_no_mode_branching(self, rendered_entrypoint):
+        """Entrypoint should not branch on HEADLESS or PROMPT."""
+        assert 'if [ -n "$HEADLESS" ]' not in rendered_entrypoint
+        assert 'if [ -n "$PROMPT" ]' not in rendered_entrypoint
+        assert "AGENT_PROMPT" not in rendered_entrypoint
+
+    def test_ends_with_sleep_infinity(self, rendered_entrypoint):
+        """Entrypoint should end with sleep infinity."""
+        lines = rendered_entrypoint.strip().split("\n")
+        assert lines[-1].strip() == "sleep infinity"
+
+    def test_no_claude_command(self, rendered_entrypoint):
+        """Entrypoint should not build or run claude command."""
+        assert "CLAUDE_CMD" not in rendered_entrypoint
+        assert "claude -p" not in rendered_entrypoint
+
+    def test_creates_default_tmux_session(self, rendered_entrypoint):
+        """Entrypoint should start a default tmux session for interactive work."""
+        assert 'tmux new-session -d -s scad' in rendered_entrypoint
+
+    def test_logs_session_ready(self, rendered_entrypoint):
+        """Entrypoint should log session-ready event."""
+        assert "session-ready" in rendered_entrypoint
+
+    def test_still_seeds_config(self, rendered_entrypoint):
+        """Setup steps remain: seed claude.json, settings.json, git, creds, plugins."""
+        assert "seed-claude.json" in rendered_entrypoint
+        assert "seed-settings.json" in rendered_entrypoint
+        assert "host-gitconfig" in rendered_entrypoint
+        assert "host-claude-credentials" in rendered_entrypoint
+        assert "bootstrap-claude.sh" in rendered_entrypoint
+
+    def test_still_activates_venv(self, rendered_entrypoint):
+        """Venv activation and pip install remain."""
+        assert "/opt/venv/bin/activate" in rendered_entrypoint
 
 
 class TestBootstrapConfTemplate:

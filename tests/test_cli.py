@@ -370,6 +370,139 @@ class TestSessionStart:
         assert kwargs.get("headless") is False
 
 
+class TestRunAgentInjectIntegration:
+    """Test that run_agent() uses inject_job() when prompt is given."""
+
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.run_container")
+    @patch("scad.cli.create_clones")
+    @patch("scad.cli.image_exists")
+    @patch("scad.cli.check_claude_auth")
+    @patch("scad.cli.generate_run_id")
+    @patch("time.sleep")
+    def test_prompt_triggers_inject(self, mock_sleep, mock_gen_id, mock_auth, mock_img,
+                                     mock_clones, mock_run_container, mock_inject):
+        """run_agent with prompt calls inject_job after container start."""
+        from scad.cli import run_agent
+        mock_auth.return_value = (True, 10.0)
+        mock_gen_id.return_value = "test-t1-Mar02-1400"
+        mock_img.return_value = True
+        mock_clones.return_value = {"code": Path("/tmp/ws/code")}
+        mock_run_container.return_value = "abc123def456"
+        mock_inject.return_value = "test-t1-Mar02-1400-job-001"
+
+        config = MagicMock()
+        config.name = "test"
+        config.workdir_key = "code"
+        config.repos = {"code": MagicMock(add_dir=False)}
+        config.claude.dangerously_skip_permissions = True
+        config.claude.additional_flags = "--verbose"
+
+        run_agent(config, branch="feat", tag="t1", prompt="do stuff", headless=True)
+
+        # run_container should NOT receive prompt or headless
+        _, rc_kwargs = mock_run_container.call_args
+        assert "prompt" not in rc_kwargs
+        assert "headless" not in rc_kwargs
+
+        # inject_job should be called with correct args
+        mock_inject.assert_called_once()
+        _, ij_kwargs = mock_inject.call_args
+        assert ij_kwargs["run_id"] == "test-t1-Mar02-1400"
+        assert ij_kwargs["prompt"] == "do stuff"
+        assert ij_kwargs["headless"] is True
+        assert ij_kwargs["workdir_key"] == "code"
+        assert ij_kwargs["dangerously_skip_permissions"] is True
+        assert ij_kwargs["additional_flags"] == "--verbose"
+
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.run_container")
+    @patch("scad.cli.create_clones")
+    @patch("scad.cli.image_exists")
+    @patch("scad.cli.check_claude_auth")
+    @patch("scad.cli.generate_run_id")
+    def test_no_prompt_skips_inject(self, mock_gen_id, mock_auth, mock_img,
+                                     mock_clones, mock_run_container, mock_inject):
+        """run_agent without prompt does not call inject_job."""
+        from scad.cli import run_agent
+        mock_auth.return_value = (True, 10.0)
+        mock_gen_id.return_value = "test-t1-Mar02-1400"
+        mock_img.return_value = True
+        mock_clones.return_value = {"code": Path("/tmp/ws/code")}
+        mock_run_container.return_value = "abc123def456"
+
+        config = MagicMock()
+        config.name = "test"
+        config.workdir_key = "code"
+        config.repos = {"code": MagicMock(add_dir=False)}
+
+        run_agent(config, branch="feat", tag="t1")
+
+        mock_inject.assert_not_called()
+
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.run_container")
+    @patch("scad.cli.create_clones")
+    @patch("scad.cli.image_exists")
+    @patch("scad.cli.check_claude_auth")
+    @patch("scad.cli.generate_run_id")
+    @patch("time.sleep")
+    def test_prompt_builds_add_dirs(self, mock_sleep, mock_gen_id, mock_auth, mock_img,
+                                     mock_clones, mock_run_container, mock_inject):
+        """run_agent passes add_dirs from repos with add_dir=True."""
+        from scad.cli import run_agent
+        mock_auth.return_value = (True, 10.0)
+        mock_gen_id.return_value = "test-t1-Mar02-1400"
+        mock_img.return_value = True
+        mock_clones.return_value = {"code": Path("/tmp/ws/code"), "docs": Path("/tmp/ws/docs")}
+        mock_run_container.return_value = "abc123def456"
+        mock_inject.return_value = "test-t1-Mar02-1400-job-001"
+
+        config = MagicMock()
+        config.name = "test"
+        config.workdir_key = "code"
+        config.repos = {
+            "code": MagicMock(add_dir=False),
+            "docs": MagicMock(add_dir=True),
+        }
+        config.claude.dangerously_skip_permissions = False
+        config.claude.additional_flags = None
+
+        run_agent(config, branch="feat", tag="t1", prompt="work on docs")
+
+        _, ij_kwargs = mock_inject.call_args
+        assert ij_kwargs["add_dirs"] == ["docs"]
+
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.run_container")
+    @patch("scad.cli.create_clones")
+    @patch("scad.cli.image_exists")
+    @patch("scad.cli.check_claude_auth")
+    @patch("scad.cli.generate_run_id")
+    @patch("time.sleep")
+    def test_prompt_sleeps_before_inject(self, mock_sleep, mock_gen_id, mock_auth, mock_img,
+                                          mock_clones, mock_run_container, mock_inject):
+        """run_agent sleeps briefly before injecting to let entrypoint set up."""
+        from scad.cli import run_agent
+        mock_auth.return_value = (True, 10.0)
+        mock_gen_id.return_value = "test-t1-Mar02-1400"
+        mock_img.return_value = True
+        mock_clones.return_value = {"code": Path("/tmp/ws/code")}
+        mock_run_container.return_value = "abc123def456"
+        mock_inject.return_value = "test-t1-Mar02-1400-job-001"
+
+        config = MagicMock()
+        config.name = "test"
+        config.workdir_key = "code"
+        config.repos = {"code": MagicMock(add_dir=False)}
+        config.claude.dangerously_skip_permissions = False
+        config.claude.additional_flags = None
+
+        run_agent(config, branch="feat", tag="t1", prompt="hello")
+
+        mock_sleep.assert_called_once_with(1)
+
+
 class TestSessionAttach:
     @patch("scad.cli._subprocess.run")
     @patch("scad.cli.docker.from_env")

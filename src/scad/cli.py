@@ -5,6 +5,7 @@ import subprocess
 import subprocess as _subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -20,6 +21,7 @@ from scad.container import (
     cleanup_clones,
     config_name_for_run,
     create_clones,
+    diff_from_source,
     fetch_to_host,
     gc,
     generate_run_id,
@@ -29,6 +31,8 @@ from scad.container import (
     get_session_usage,
     get_session_info,
     image_exists,
+    inject_job,
+    list_jobs,
     list_scad_containers,
     log_event,
     prune_old_images,
@@ -38,6 +42,8 @@ from scad.container import (
     stop_container,
     sync_from_host,
     validate_run_id,
+    workspace_add,
+    workspace_remove,
 )
 
 
@@ -187,16 +193,33 @@ def run_agent(
 
     # Run the container (always detached)
     click.echo(f"[scad] Dispatching agent: {run_id}")
-    container_id = run_container(config, branch, run_id, worktree_paths, prompt, headless=headless)
+    container_id = run_container(config, branch, run_id, worktree_paths)
     click.echo(f"[scad] Container started: {container_id[:12]}")
 
-    if headless:
-        click.echo(f"[scad] Running headless.")
-        click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
-        click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
-        click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
-    elif prompt:
-        click.echo(f"[scad] Session ready with prompt. Run: scad session attach {run_id}")
+    if prompt:
+        # Let entrypoint finish setup before injecting
+        time.sleep(1)
+
+        # Build add_dirs from config repos with add_dir=True
+        add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
+
+        job_id = inject_job(
+            run_id=run_id,
+            prompt=prompt,
+            headless=headless,
+            workdir_key=config.workdir_key,
+            add_dirs=add_dirs,
+            dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+            additional_flags=config.claude.additional_flags,
+        )
+        mode = "headless" if headless else "interactive"
+        click.echo(f"[scad] Injected {mode}: {job_id}")
+        if headless:
+            click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
+            click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
+            click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
+        else:
+            click.echo(f"[scad]   Attach: scad session attach {run_id}")
     else:
         click.echo(f"[scad] Session ready. Run: scad session attach {run_id}")
 
@@ -477,7 +500,7 @@ def session_status(show_all: bool):
             )
             for run in running:
                 started = _relative_time(run["started"]) if run["started"] else "?"
-                clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "worktrees"
+                clone_dir = Path.home() / ".scad" / "runs" / run["run_id"] / "workspace"
                 clones = "yes" if clone_dir.exists() else "-"
                 click.echo(
                     f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
@@ -556,11 +579,15 @@ def session_info(run_id: str):
 @click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
 @click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
 @click.option("--stream", "-s", is_flag=True, help="Show Claude stream (tool calls, edits) instead of entrypoint log.")
-def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
+@click.option("--job", default=None, help="Show logs for a specific job ID.")
+def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
     """Read agent log output."""
     validate_run_id(run_id)
     logs_dir = Path.home() / ".scad" / "logs"
-    if stream:
+    if job:
+        log_path = logs_dir / f"{job}.stream.jsonl"
+        not_found_msg = f"No stream log found for job {job}"
+    elif stream:
         log_path = logs_dir / f"{run_id}.stream.jsonl"
         not_found_msg = f"No stream log found for {run_id}"
     else:
@@ -570,6 +597,23 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool):
     if not log_path.exists():
         click.echo(f"[scad] {not_found_msg}", err=True)
         sys.exit(1)
+
+    # --job without --stream: parse stream.jsonl and show final result
+    if job and not stream:
+        import json as _json
+        for line in log_path.read_text().splitlines():
+            try:
+                record = _json.loads(line)
+            except _json.JSONDecodeError:
+                continue
+            if record.get("type") == "result":
+                if record.get("is_error"):
+                    click.echo(f"[scad] Job failed: {record.get('result', 'unknown error')}", err=True)
+                else:
+                    click.echo(record.get("result", ""))
+                return
+        click.echo("[scad] Job still running (no result yet).", err=True)
+        return
 
     if follow:
         import subprocess
@@ -647,8 +691,8 @@ def session_attach(run_id: str):
     check = container.exec_run("tmux has-session -t scad")
     if check.exit_code != 0:
         click.echo(
-            f"[scad] Container '{run_id}' is running headless. "
-            f"Use 'scad session logs {run_id}' to view output.",
+            f"[scad] No tmux session in '{run_id}'. "
+            f"Inject work first: scad session inject {run_id} --prompt \"...\"",
             err=True,
         )
         sys.exit(1)
@@ -658,6 +702,61 @@ def session_attach(run_id: str):
         ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
     )
     sys.exit(result.returncode)
+
+
+@session.command("inject")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--prompt", required=True, help="Prompt to send to Claude.")
+@click.option("--headless", is_flag=True, help="Fire-and-forget mode (claude -p).")
+@click.option("--branch", default=None, help="Create/checkout branch before running.")
+def session_inject(run_id: str, prompt: str, headless: bool, branch: str):
+    """Inject a Claude process into a running session."""
+    validate_run_id(run_id)
+    config = _config_for_run(run_id)
+
+    # Build add_dirs list from config
+    add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
+
+    try:
+        job_id = inject_job(
+            run_id=run_id,
+            prompt=prompt,
+            headless=headless,
+            workdir_key=config.workdir_key,
+            branch=branch,
+            add_dirs=add_dirs,
+            dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+            additional_flags=config.claude.additional_flags,
+        )
+    except RuntimeError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+    mode = "headless" if headless else "interactive"
+    click.echo(f"[scad] Injected {mode}: {job_id}")
+    if headless:
+        click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+    else:
+        click.echo(f"[scad]   Attach: scad session attach {run_id}")
+
+
+@session.command("jobs")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def session_jobs(run_id: str):
+    """List jobs in a session."""
+    validate_run_id(run_id)
+    jobs = list_jobs(run_id)
+
+    if not jobs:
+        click.echo("[scad] No jobs found.")
+        return
+
+    # Header
+    click.echo(f"{'JOB ID':<35} {'MODE':<12} {'BRANCH':<25} {'STARTED'}")
+    for job in jobs:
+        branch = job.get("branch") or "—"
+        started = _relative_time(job.get("started", ""))
+        click.echo(f"{job['job_id']:<35} {job['mode']:<12} {branch:<25} {started}")
 
 
 @session.command("clean")
@@ -748,6 +847,28 @@ def code_sync(run_id: str, checkout: str, no_update_main: bool):
         sys.exit(2)
 
 
+@code.command("diff")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+def code_diff(run_id: str):
+    """Show diff between session clones and source repos."""
+    validate_run_id(run_id)
+    config = _config_for_run(run_id)
+
+    try:
+        diffs = diff_from_source(run_id, config)
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+    if not diffs:
+        click.echo("[scad] No differences.")
+        return
+
+    for repo, diff_text in diffs.items():
+        click.echo(f"\n--- {repo} ---")
+        click.echo(diff_text)
+
+
 @code.command("refresh")
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def code_refresh(run_id: str):
@@ -760,6 +881,37 @@ def code_refresh(run_id: str):
         click.echo(f"[scad] Credentials refreshed. Time remaining: {h}h {m:02d}m")
     except click.ClickException as e:
         click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(1)
+
+
+@code.command("add")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--path", required=True, help="Host path to add.")
+@click.option("--name", required=True, help="Name in workspace/.")
+@click.option("--clone", is_flag=True, help="Git clone instead of symlink.")
+def code_add(run_id: str, path: str, name: str, clone: bool):
+    """Add a directory to a session's workspace."""
+    validate_run_id(run_id)
+    try:
+        result = workspace_add(run_id, path, name, clone=clone)
+        mode = "cloned" if clone else "symlinked"
+        click.echo(f"[scad] Added {name} ({mode}): {path}")
+    except FileExistsError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+
+@code.command("remove")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.option("--name", required=True, help="Name to remove from workspace/.")
+def code_remove(run_id: str, name: str):
+    """Remove a directory from a session's workspace."""
+    validate_run_id(run_id)
+    try:
+        workspace_remove(run_id, name)
+        click.echo(f"[scad] Removed {name} from workspace")
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(1)
 
 

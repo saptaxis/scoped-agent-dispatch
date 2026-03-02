@@ -221,11 +221,13 @@ class TestCloneLifecycle:
         paths = create_clones(config, "plan-22", "test-run-id")
 
         assert "code" in paths
-        expected = tmp_path / ".scad" / "runs" / "test-run-id" / "worktrees" / "code"
+        expected = tmp_path / ".scad" / "runs" / "test-run-id" / "workspace" / "code"
         assert paths["code"] == expected
 
     @patch("scad.container.subprocess.run")
-    def test_create_clones_skips_non_worktree(self, mock_run, tmp_path):
+    def test_create_clones_symlinks_non_worktree(self, mock_run, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
+        (tmp_path / "ref").mkdir()
         config = ScadConfig(
             name="test",
             repos={
@@ -233,18 +235,19 @@ class TestCloneLifecycle:
                 "ref": {"path": str(tmp_path / "ref"), "worktree": False},
             },
         )
-        with patch("scad.container.Path.home", return_value=tmp_path):
-            paths = create_clones(config, "plan-22", "test-run-id")
+        paths = create_clones(config, "plan-22", "test-run-id")
 
-        # ref repo should return its original path, not a clone
-        assert paths["ref"] == (tmp_path / "ref").resolve()
+        # ref repo should be a symlink inside workspace, pointing to original path
+        assert paths["ref"].is_symlink()
+        assert paths["ref"].resolve() == (tmp_path / "ref").resolve()
+        assert "workspace" in str(paths["ref"])
         # Two subprocess calls for code (clone + checkout), zero for ref
         assert mock_run.call_count == 2
 
     @patch("scad.container.shutil.rmtree")
     def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
-        clone_base = tmp_path / ".scad" / "runs" / "test-run-id" / "worktrees"
+        clone_base = tmp_path / ".scad" / "runs" / "test-run-id" / "workspace"
         clone_base.mkdir(parents=True)
 
         cleanup_clones("test-run-id")
@@ -376,36 +379,41 @@ class TestStopContainer:
         assert result is False
 
 
-class TestRunContainerWorktreeMounts:
+class TestRunContainerWorkspaceMounts:
     @patch("scad.container.docker.from_env")
-    def test_mounts_worktree_at_workspace(self, mock_docker, sample_config, tmp_path):
+    def test_single_workspace_mount(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """run_container mounts a single workspace dir at /workspace."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "abc123"
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        worktree_paths = {"code": tmp_path / "worktrees" / "code"}
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
 
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
             run_container(sample_config, "plan-22", "test-run", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
-        wt_mount = volumes.get(str(worktree_paths["code"]))
-        assert wt_mount is not None
-        assert wt_mount["bind"] == "/workspace/code"
-        assert wt_mount["mode"] == "rw"
+        workspace_dir = str(tmp_path / "runs" / "test-run" / "workspace")
+        ws_mount = volumes.get(workspace_dir)
+        assert ws_mount is not None
+        assert ws_mount["bind"] == "/workspace"
+        assert ws_mount["mode"] == "rw"
 
     @patch("scad.container.docker.from_env")
-    def test_no_mnt_repos_mount(self, mock_docker, sample_config, tmp_path):
+    def test_no_per_repo_mounts(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """run_container does NOT create per-repo volume mounts."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "abc123"
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        worktree_paths = {"code": tmp_path / "worktrees" / "code"}
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
 
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
@@ -413,46 +421,47 @@ class TestRunContainerWorktreeMounts:
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
         for bind_info in volumes.values():
-            assert not bind_info["bind"].startswith("/mnt/repos")
+            # No per-repo /workspace/<key> mounts — only /workspace root
+            if bind_info["bind"].startswith("/workspace"):
+                assert bind_info["bind"] == "/workspace"
 
     @patch("scad.container.docker.from_env")
-    def test_direct_mount_is_readonly(self, mock_docker, tmp_path):
+    def test_no_separate_data_mounts(self, mock_docker, tmp_path, monkeypatch):
+        """Data mounts are symlinked in workspace, not separate Docker volumes."""
+        from scad.config import MountConfig
         config = ScadConfig(
             name="test",
-            repos={
-                "code": {"path": str(tmp_path / "code"), "workdir": True, "worktree": True},
-                "ref": {"path": str(tmp_path / "ref"), "worktree": False},
-            },
+            repos={"code": {"path": str(tmp_path / "code"), "workdir": True, "worktree": True}},
+            mounts=[MountConfig(host=str(tmp_path / "data"), container="/data/experiments")],
         )
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "abc123"
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        worktree_paths = {
-            "code": tmp_path / "worktrees" / "code",
-            "ref": (tmp_path / "ref").resolve(),
-        }
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
 
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
             run_container(config, "plan-22", "test-run", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
-        ref_mount = volumes.get(str((tmp_path / "ref").resolve()))
-        assert ref_mount is not None
-        assert ref_mount["mode"] == "ro"
+        # No mount at /data/experiments — data comes via symlink in workspace
+        for bind_info in volumes.values():
+            assert bind_info["bind"] != "/data/experiments"
 
     @patch("scad.container.docker.from_env")
-    def test_no_branch_name_env(self, mock_docker, sample_config, tmp_path):
+    def test_no_branch_name_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
         mock_container = MagicMock()
         mock_container.id = "abc123"
         mock_client.containers.run.return_value = mock_container
         mock_docker.return_value = mock_client
 
-        worktree_paths = {"code": tmp_path / "worktrees" / "code"}
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
 
         with patch("scad.container.Path.home", return_value=tmp_path):
             (tmp_path / ".scad" / "logs").mkdir(parents=True)
@@ -461,6 +470,26 @@ class TestRunContainerWorktreeMounts:
         env = mock_client.containers.run.call_args[1]["environment"]
         assert "BRANCH_NAME" not in env
         assert "RUN_ID" in env
+
+    @patch("scad.container.docker.from_env")
+    def test_no_prompt_or_headless_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """run_container does not set AGENT_PROMPT or HEADLESS — inject handles prompts."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_client = MagicMock()
+        mock_container = MagicMock()
+        mock_container.id = "abc123"
+        mock_client.containers.run.return_value = mock_container
+        mock_docker.return_value = mock_client
+
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
+
+        with patch("scad.container.Path.home", return_value=tmp_path):
+            (tmp_path / ".scad" / "logs").mkdir(parents=True)
+            run_container(sample_config, "plan-22", "test-run", worktree_paths)
+
+        env = mock_client.containers.run.call_args[1]["environment"]
+        assert "AGENT_PROMPT" not in env
+        assert "HEADLESS" not in env
 
 
 class TestCheckClaudeAuth:
@@ -582,7 +611,7 @@ class TestCleanRun:
     @patch("scad.container.docker")
     def test_removes_clones(self, mock_docker, tmp_path, monkeypatch):
         run_dir = tmp_path / "runs" / "test-run"
-        clone_dir = run_dir / "worktrees"
+        clone_dir = run_dir / "workspace"
         clone_dir.mkdir(parents=True)
         (clone_dir / "somefile").touch()
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -620,7 +649,7 @@ class TestFetchToHost:
         subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
 
         # Create clone with a branch and commit
-        clone_dir = tmp_path / "runs" / "test-run" / "worktrees" / "code"
+        clone_dir = tmp_path / "runs" / "test-run" / "workspace" / "code"
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--local", str(source), str(clone_dir)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "test-branch"], check=True, capture_output=True)
@@ -649,14 +678,14 @@ class TestFetchToHost:
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
 
         sources = {}
-        worktrees_base = tmp_path / "runs" / "test-run" / "worktrees"
-        worktrees_base.mkdir(parents=True)
+        workspace_base = tmp_path / "runs" / "test-run" / "workspace"
+        workspace_base.mkdir(parents=True)
         for name in ["code", "docs"]:
             src = tmp_path / f"source-{name}"
             src.mkdir()
             subprocess.run(["git", "init", str(src)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(src), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
-            clone = worktrees_base / name
+            clone = workspace_base / name
             subprocess.run(["git", "clone", "--local", str(src), str(clone)], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(clone), "checkout", "-b", "feat"], check=True, capture_output=True)
             subprocess.run(["git", "-C", str(clone), "commit", "--allow-empty", "-m", "work"], check=True, capture_output=True)
@@ -683,7 +712,7 @@ class TestFetchToHost:
         source.mkdir()
         subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
-        clone_dir = tmp_path / "runs" / "test-run" / "worktrees" / "code"
+        clone_dir = tmp_path / "runs" / "test-run" / "workspace" / "code"
         clone_dir.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--local", str(source), str(clone_dir)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "feat"], check=True, capture_output=True)
@@ -720,6 +749,91 @@ class TestFetchToHost:
             fetch_to_host("nonexistent-run", config)
 
 
+class TestFetchToHostMultiBranch:
+    """Tests for multi-branch fetch (branch-per-job)."""
+
+    @patch("scad.container.subprocess.run")
+    def test_fetches_all_branches(self, mock_run, sample_config, tmp_path):
+        """fetch_to_host fetches all non-main branches, not just the checked-out one."""
+        clone_path = tmp_path / "test-run" / "workspace" / "code"
+        clone_path.mkdir(parents=True)
+        (clone_path / ".git").mkdir()
+
+        def side_effect(cmd, **kwargs):
+            result = MagicMock(returncode=0, stdout="", stderr="")
+            cmd_str = " ".join(cmd)
+            if "rev-parse --abbrev-ref HEAD" in cmd_str:
+                result.stdout = "feature-a\n"
+            elif "branch --list --format" in cmd_str:
+                result.stdout = "main\nfeature-a\nfeature-b\n"
+            elif "rev-parse --verify" in cmd_str:
+                if "refs/heads/main" in cmd_str:
+                    result.returncode = 0
+                else:
+                    result.returncode = 1
+            return result
+
+        mock_run.side_effect = side_effect
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            results = fetch_to_host("test-run", sample_config)
+
+        assert len(results) >= 1
+
+    def test_multi_branch_fetch_integration(self, tmp_path, monkeypatch):
+        """fetch_to_host discovers and fetches multiple branches from a single clone."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+
+        # Create source repo
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+
+        # Detect default branch name (master or main depending on git config)
+        default_branch = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Create clone with two branches
+        clone_dir = tmp_path / "runs" / "test-run" / "workspace" / "code"
+        clone_dir.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", "--local", str(source), str(clone_dir)], check=True, capture_output=True)
+
+        # Create branch-a with a commit
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "branch-a"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "commit", "--allow-empty", "-m", "work-a"], check=True, capture_output=True)
+
+        # Create branch-b from default branch with a commit
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", default_branch], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "checkout", "-b", "branch-b"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(clone_dir), "commit", "--allow-empty", "-m", "work-b"], check=True, capture_output=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(source), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+
+        results = fetch_to_host("test-run", config)
+
+        # Both branches should be fetched
+        assert len(results) == 2
+        fetched_branches = {r["branch"] for r in results}
+        assert "branch-a" in fetched_branches
+        assert "branch-b" in fetched_branches
+
+        # Both branches should exist in source
+        for branch_name in ("branch-a", "branch-b"):
+            branches = subprocess.run(
+                ["git", "-C", str(source), "branch", "--list", branch_name],
+                capture_output=True, text=True,
+            )
+            assert branch_name in branches.stdout
+
+
 class TestSyncFromHost:
     def test_syncs_new_branches_into_clone(self, tmp_path, monkeypatch):
         """sync_from_host fetches source repo refs into clone."""
@@ -732,7 +846,7 @@ class TestSyncFromHost:
         subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
 
         # Clone it
-        clone = tmp_path / "runs" / "test-run" / "worktrees" / "code"
+        clone = tmp_path / "runs" / "test-run" / "workspace" / "code"
         clone.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--local", str(source), str(clone)], check=True, capture_output=True)
 
@@ -766,7 +880,7 @@ class TestSyncFromHost:
         source.mkdir()
         subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
         subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
-        clone = tmp_path / "runs" / "test-run" / "worktrees" / "code"
+        clone = tmp_path / "runs" / "test-run" / "workspace" / "code"
         clone.parent.mkdir(parents=True, exist_ok=True)
         subprocess.run(["git", "clone", "--local", str(source), str(clone)], check=True, capture_output=True)
 
@@ -880,7 +994,7 @@ class TestGetAllSessions:
         (run_dir / "events.log").write_text(
             "2026-02-28T14:00 start config=demo branch=scad-Feb28-1400\n"
         )
-        (run_dir / "worktrees").mkdir(parents=True)
+        (run_dir / "workspace").mkdir(parents=True)
 
         results = get_all_sessions()
         assert len(results) == 1
@@ -900,7 +1014,7 @@ class TestGetAllSessions:
         (run_dir / "events.log").write_text(
             "2026-02-27T09:00 start config=demo branch=scad-Feb27-0900\n"
         )
-        (run_dir / "worktrees").mkdir(parents=True)
+        (run_dir / "workspace").mkdir(parents=True)
 
         results = get_all_sessions()
         assert len(results) == 1
@@ -970,7 +1084,7 @@ class TestGetSessionInfo:
         run_dir = tmp_path / "runs" / "demo-Feb28-1400"
         run_dir.mkdir(parents=True)
         (run_dir / "events.log").write_text("2026-02-28T14:00 start config=demo branch=feat\n")
-        clone_dir = run_dir / "worktrees"
+        clone_dir = run_dir / "workspace"
         (clone_dir / "demo-code").mkdir(parents=True)
         (clone_dir / "demo-docs").mkdir(parents=True)
 
@@ -1163,7 +1277,7 @@ class TestRunContainerTelemetry:
         run_dir = tmp_path / "runs" / "test-run" / "claude"
         run_dir.mkdir(parents=True)
 
-        worktree_paths = {"code": tmp_path / "worktrees" / "test-run" / "code"}
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
 
         run_container(sample_config, "feat", "test-run", worktree_paths)
 
@@ -1394,10 +1508,10 @@ class TestGetProjectStatus:
 
 
 class TestConsolidatedPaths:
-    """After consolidation, clones live under ~/.scad/runs/<run-id>/worktrees/."""
+    """After consolidation, clones live under ~/.scad/runs/<run-id>/workspace/."""
 
     def test_create_clones_uses_run_dir(self, tmp_path, monkeypatch):
-        """create_clones() puts clones in RUNS_DIR/<run-id>/worktrees/."""
+        """create_clones() puts clones in RUNS_DIR/<run-id>/workspace/."""
         runs_dir = tmp_path / "runs"
         monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
 
@@ -1415,21 +1529,21 @@ class TestConsolidatedPaths:
         )
         paths = create_clones(config, "test-branch", "demo-test-Mar01-1400")
 
-        clone_path = runs_dir / "demo-test-Mar01-1400" / "worktrees" / "code"
+        clone_path = runs_dir / "demo-test-Mar01-1400" / "workspace" / "code"
         assert clone_path.exists()
         assert paths["code"] == clone_path
 
-    def test_cleanup_clones_removes_worktrees_subdir(self, tmp_path, monkeypatch):
-        """cleanup_clones() removes the worktrees subdir under run dir."""
+    def test_cleanup_clones_removes_workspace_subdir(self, tmp_path, monkeypatch):
+        """cleanup_clones() removes the workspace subdir under run dir."""
         runs_dir = tmp_path / "runs"
         monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
 
-        worktrees = runs_dir / "demo-test-Mar01-1400" / "worktrees" / "code"
-        worktrees.mkdir(parents=True)
-        (worktrees / "file.txt").write_text("test")
+        workspace = runs_dir / "demo-test-Mar01-1400" / "workspace" / "code"
+        workspace.mkdir(parents=True)
+        (workspace / "file.txt").write_text("test")
 
         cleanup_clones("demo-test-Mar01-1400")
-        assert not (runs_dir / "demo-test-Mar01-1400" / "worktrees").exists()
+        assert not (runs_dir / "demo-test-Mar01-1400" / "workspace").exists()
         # Run dir itself still exists (has events.log, claude data)
         assert (runs_dir / "demo-test-Mar01-1400").exists()
 
@@ -1439,7 +1553,7 @@ class TestConsolidatedPaths:
         monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
 
         run_dir = runs_dir / "demo-test-Mar01-1400"
-        (run_dir / "worktrees" / "code").mkdir(parents=True)
+        (run_dir / "workspace" / "code").mkdir(parents=True)
         (run_dir / "claude").mkdir(parents=True)
         (run_dir / "events.log").write_text("test")
 
@@ -1457,10 +1571,10 @@ class TestConsolidatedPaths:
 
 
 class TestWorktreeMigration:
-    """Auto-migrate old ~/.scad/worktrees/ to ~/.scad/runs/<run-id>/worktrees/."""
+    """Auto-migrate old layouts to ~/.scad/runs/<run-id>/workspace/."""
 
-    def test_migrates_worktree_with_matching_run_dir(self, tmp_path, monkeypatch):
-        """Worktree moves under existing run dir."""
+    def test_migrates_old_toplevel_worktrees(self, tmp_path, monkeypatch):
+        """Phase 1: ~/.scad/worktrees/<run-id>/ moves to runs/<id>/workspace/."""
         scad_dir = tmp_path / ".scad"
         runs_dir = scad_dir / "runs"
         old_worktrees = scad_dir / "worktrees"
@@ -1474,12 +1588,12 @@ class TestWorktreeMigration:
 
         _migrate_worktrees()
 
-        # New layout: worktree under run dir
-        assert (runs_dir / "demo-Mar01-1400" / "worktrees" / "code" / "file.txt").exists()
+        # New layout: workspace under run dir
+        assert (runs_dir / "demo-Mar01-1400" / "workspace" / "code" / "file.txt").exists()
         assert not old_worktrees.exists()
 
-    def test_migrates_worktree_without_run_dir(self, tmp_path, monkeypatch):
-        """Orphaned worktree gets a new run dir created."""
+    def test_migrates_orphaned_worktree(self, tmp_path, monkeypatch):
+        """Phase 1: Orphaned worktree gets a new run dir with workspace/."""
         scad_dir = tmp_path / ".scad"
         runs_dir = scad_dir / "runs"
         old_worktrees = scad_dir / "worktrees"
@@ -1490,13 +1604,30 @@ class TestWorktreeMigration:
 
         _migrate_worktrees()
 
-        assert (runs_dir / "orphan-Mar01-1400" / "worktrees" / "code").exists()
+        assert (runs_dir / "orphan-Mar01-1400" / "workspace" / "code").exists()
         assert not old_worktrees.exists()
+
+    def test_migrates_worktrees_subdir_to_workspace(self, tmp_path, monkeypatch):
+        """Phase 2: runs/<id>/worktrees/ renames to runs/<id>/workspace/."""
+        scad_dir = tmp_path / ".scad"
+        runs_dir = scad_dir / "runs"
+        monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+
+        # Old consolidated layout with worktrees/ subdir
+        (runs_dir / "demo-Mar01-1400" / "worktrees" / "code").mkdir(parents=True)
+        (runs_dir / "demo-Mar01-1400" / "worktrees" / "code" / "file.txt").write_text("test")
+
+        _migrate_worktrees()
+
+        assert (runs_dir / "demo-Mar01-1400" / "workspace" / "code" / "file.txt").exists()
+        assert not (runs_dir / "demo-Mar01-1400" / "worktrees").exists()
 
     def test_noop_when_no_old_worktrees(self, tmp_path, monkeypatch):
         """No error when ~/.scad/worktrees/ doesn't exist."""
         scad_dir = tmp_path / ".scad"
         monkeypatch.setattr("scad.container.SCAD_DIR", scad_dir)
+        monkeypatch.setattr("scad.container.RUNS_DIR", scad_dir / "runs")
         _migrate_worktrees()  # should not raise
 
 
@@ -1659,7 +1790,7 @@ class TestSyncFromHostImproved:
     def test_fast_forwards_main(self, tmp_path, monkeypatch):
         """sync_from_host fast-forwards clone's main by default."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
-        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path = tmp_path / "test-run" / "workspace" / "code"
         clone_path.mkdir(parents=True)
 
         config = MagicMock()
@@ -1680,7 +1811,7 @@ class TestSyncFromHostImproved:
     def test_no_update_main_skips_fast_forward(self, tmp_path, monkeypatch):
         """--no-update-main skips the fast-forward step."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
-        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path = tmp_path / "test-run" / "workspace" / "code"
         clone_path.mkdir(parents=True)
 
         config = MagicMock()
@@ -1699,7 +1830,7 @@ class TestSyncFromHostImproved:
     def test_checkout_switches_branch(self, tmp_path, monkeypatch):
         """--checkout switches clone to specified branch after sync."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
-        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path = tmp_path / "test-run" / "workspace" / "code"
         clone_path.mkdir(parents=True)
 
         config = MagicMock()
@@ -1718,7 +1849,7 @@ class TestSyncFromHostImproved:
     def test_diverged_main_warns_and_skips(self, tmp_path, monkeypatch):
         """If main has diverged, warn and skip (don't error)."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
-        clone_path = tmp_path / "test-run" / "worktrees" / "code"
+        clone_path = tmp_path / "test-run" / "workspace" / "code"
         clone_path.mkdir(parents=True)
 
         config = MagicMock()
@@ -1739,3 +1870,47 @@ class TestSyncFromHostImproved:
 
         assert len(results) > 0
         assert results[0].get("main_updated") is False
+
+
+class TestUnifiedWorkspace:
+    """Tests for unified workspace mount model."""
+
+    @patch("scad.container.subprocess.run")
+    def test_create_clones_uses_workspace_dir(self, mock_run, sample_config, tmp_path):
+        """Clones go into runs/<id>/workspace/ instead of worktrees/."""
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
+        # Should use workspace/ subdirectory
+        for key in paths:
+            assert "workspace" in str(paths[key])
+            assert "worktrees" not in str(paths[key])
+
+    @patch("scad.container.subprocess.run")
+    def test_create_clones_symlinks_non_worktree_repos(self, mock_run, sample_config, tmp_path):
+        """Non-worktree repos get symlinked into workspace/ instead of using direct paths."""
+        from scad.config import RepoConfig
+        sample_config.repos["docs"] = RepoConfig(
+            path=str(tmp_path / "docs-source"), add_dir=True, worktree=False
+        )
+        (tmp_path / "docs-source").mkdir()
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
+        docs_path = tmp_path / "test-run-001" / "workspace" / "docs"
+        assert docs_path.is_symlink()
+        assert docs_path.resolve() == (tmp_path / "docs-source").resolve()
+
+    @patch("scad.container.subprocess.run")
+    def test_create_clones_symlinks_data_mounts(self, mock_run, sample_config, tmp_path):
+        """Data mounts from config.mounts get symlinked into workspace/."""
+        from scad.config import MountConfig
+        data_dir = tmp_path / "experiments"
+        data_dir.mkdir()
+        sample_config.mounts = [MountConfig(host=str(data_dir), container="/data/experiments")]
+        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
+        workspace = tmp_path / "test-run-001" / "workspace"
+        symlinks = [p for p in workspace.iterdir() if p.is_symlink()]
+        assert any(s.resolve() == data_dir.resolve() for s in symlinks)
