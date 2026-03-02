@@ -476,7 +476,11 @@ def session_info(run_id: str):
         out = usage.get("total_output_tokens", 0)
         turns = usage.get("total_turns", 0)
         cost = usage.get("total_cost", 0)
+        cache_create = usage.get("cache_creation_tokens", 0)
+        cache_read = usage.get("cache_read_tokens", 0)
         usage_str = f"{inp:,} input / {out:,} output tokens, {turns} turns"
+        if cache_create or cache_read:
+            usage_str += f" (cache: {cache_create:,} create, {cache_read:,} read)"
         if cost > 0:
             usage_str += f" (${cost:.2f})"
         click.echo()

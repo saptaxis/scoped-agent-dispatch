@@ -1128,6 +1128,87 @@ class TestRunContainerTelemetry:
         assert env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] == "1"
 
 
+class TestGetSessionUsageParsing:
+    """Test ccusage JSON parsing and key mapping."""
+
+    @patch("scad.container.subprocess.run")
+    def test_unwraps_sessions_wrapper(self, mock_run, tmp_path, monkeypatch):
+        """ccusage returns {"sessions": [...]} — extract first session."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        run_dir = tmp_path / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "sessions": [{
+                    "inputTokens": 50000,
+                    "outputTokens": 12000,
+                    "cacheCreationTokens": 5000,
+                    "cacheReadTokens": 3000,
+                    "turns": 42,
+                    "costUsd": 1.23,
+                    "model": "claude-sonnet-4-5-20250514",
+                    "lastActivity": "2026-03-02T14:30:00Z",
+                }],
+                "totals": {"inputTokens": 50000, "outputTokens": 12000}
+            }),
+        )
+
+        result = get_session_usage("test-run")
+        assert result is not None
+        assert result["total_input_tokens"] == 50000
+        assert result["total_output_tokens"] == 12000
+        assert result["total_turns"] == 42
+        assert result["total_cost"] == 1.23
+        assert result["cache_creation_tokens"] == 5000
+        assert result["cache_read_tokens"] == 3000
+
+    @patch("scad.container.subprocess.run")
+    def test_handles_legacy_flat_dict(self, mock_run, tmp_path, monkeypatch):
+        """If ccusage returns flat dict with total_* keys, still works."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        run_dir = tmp_path / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({
+                "total_input_tokens": 1000,
+                "total_output_tokens": 500,
+                "total_turns": 5,
+                "total_cost": 0.0,
+            }),
+        )
+
+        result = get_session_usage("test-run")
+        assert result is not None
+        assert result["total_input_tokens"] == 1000
+        assert result["total_output_tokens"] == 500
+
+    @patch("scad.container.subprocess.run")
+    def test_handles_list_of_sessions(self, mock_run, tmp_path, monkeypatch):
+        """If ccusage returns bare list, extract first."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
+        run_dir = tmp_path / "test-run" / "claude"
+        run_dir.mkdir(parents=True)
+
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps([{
+                "inputTokens": 2000,
+                "outputTokens": 800,
+                "turns": 10,
+            }]),
+        )
+
+        result = get_session_usage("test-run")
+        assert result is not None
+        assert result["total_input_tokens"] == 2000
+        assert result["total_output_tokens"] == 800
+        assert result["total_turns"] == 10
+
+
 class TestGetSessionUsage:
     def test_returns_usage_from_ccusage(self, tmp_path, monkeypatch):
         """get_session_usage parses ccusage JSON output."""

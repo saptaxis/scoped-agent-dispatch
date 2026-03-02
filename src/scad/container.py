@@ -721,6 +721,22 @@ def get_session_info(run_id: str) -> dict:
     return info
 
 
+def _normalize_ccusage(data: dict) -> dict:
+    """Normalize ccusage output to standard keys."""
+    if "total_input_tokens" in data:
+        return data
+    return {
+        "total_input_tokens": data.get("inputTokens", 0),
+        "total_output_tokens": data.get("outputTokens", 0),
+        "total_turns": data.get("turns", 0),
+        "total_cost": data.get("costUsd", 0),
+        "cache_creation_tokens": data.get("cacheCreationTokens", 0),
+        "cache_read_tokens": data.get("cacheReadTokens", 0),
+        "model": data.get("model"),
+        "last_activity": data.get("lastActivity"),
+    }
+
+
 def get_session_usage(run_id: str) -> Optional[dict]:
     """Get session usage (tokens, turns, and optionally cost).
 
@@ -737,10 +753,17 @@ def get_session_usage(run_id: str) -> Optional[dict]:
         )
         if result.returncode == 0 and result.stdout.strip():
             data = json.loads(result.stdout)
-            if isinstance(data, list) and data:
-                return data[0]
+            # Unwrap {"sessions": [...]} wrapper
+            if isinstance(data, dict) and "sessions" in data:
+                sessions = data["sessions"]
+                if sessions:
+                    return _normalize_ccusage(sessions[0])
+            # Handle bare list
+            elif isinstance(data, list) and data:
+                return _normalize_ccusage(data[0])
+            # Handle flat dict
             elif isinstance(data, dict):
-                return data
+                return _normalize_ccusage(data)
     except (FileNotFoundError, subprocess.TimeoutExpired, json.JSONDecodeError):
         pass
 
@@ -757,6 +780,8 @@ def get_session_usage(run_id: str) -> Optional[dict]:
                         "total_input_tokens": record.get("input_tokens", 0),
                         "total_output_tokens": record.get("output_tokens", 0),
                         "total_turns": record.get("num_turns", 0),
+                        "cache_creation_tokens": 0,
+                        "cache_read_tokens": 0,
                     }
         except (json.JSONDecodeError, KeyError):
             pass
