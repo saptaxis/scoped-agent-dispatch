@@ -1091,3 +1091,149 @@ def gc_cmd(force: bool):
         click.echo("  Nothing to clean.")
     elif not force:
         click.echo("\nRun with --force to clean up.")
+
+
+@main.command()
+@click.argument("config_name", shell_complete=_complete_config_names)
+@click.option("--tag", required=True, help="Session tag.")
+@click.option("--prompt", required=True, help="Prompt to send to Claude.")
+@click.option("--no-wait", is_flag=True, help="Fire-and-forget (don't block).")
+@click.option("--interactive", is_flag=True, help="Interactive mode (tmux).")
+@click.option("--attach", is_flag=True, help="Attach after interactive inject.")
+@click.option("--fetch", is_flag=True, help="Auto-fetch results after completion (implies --wait).")
+@click.option("--no-build", is_flag=True, help="Skip image build check.")
+@click.option("--tail", is_flag=True, help="Stream Claude activity during wait.")
+def dispatch(config_name, tag, prompt, no_wait, interactive, attach, fetch, no_build, tail):
+    """Start a session and dispatch work. Composites: build -> start -> inject."""
+    # --- Flag validation ---
+    if fetch and no_wait:
+        raise click.ClickException("--fetch and --no-wait are mutually exclusive.")
+    if attach and not interactive:
+        raise click.ClickException("--attach requires --interactive.")
+    if attach and no_wait:
+        raise click.ClickException("--attach and --no-wait are mutually exclusive.")
+
+    # --- Determine headless/wait ---
+    headless = not interactive
+    wait = not no_wait and headless
+    if fetch:
+        wait = True
+
+    # --- Load config ---
+    try:
+        config = load_config(config_name)
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(2)
+    except Exception as e:
+        click.echo(f"[scad] Config validation error: {e}", err=True)
+        sys.exit(2)
+
+    # --- Pre-flight: auth check ---
+    valid, hours = check_claude_auth()
+    if not valid:
+        raise click.ClickException(
+            "Claude auth expired or missing. Run: claude /login"
+        )
+    if hours < 1.0:
+        click.echo(
+            f"[scad] Warning: Claude auth expires in {hours * 60:.0f} minutes. "
+            f"Consider running: claude /login"
+        )
+
+    # --- Build image if needed ---
+    if not no_build and not image_exists(config):
+        image_tag = f"scad-{config.name}"
+        click.echo(f"[scad] Building image {image_tag}...")
+        with tempfile.TemporaryDirectory() as build_dir:
+            for line in build_image(config, Path(build_dir)):
+                if line.startswith("Step "):
+                    click.echo(f"[scad] {line}")
+        click.echo(f"[scad] Image built: {image_tag}")
+
+    # --- Start session (container + clones) ---
+    try:
+        branch = resolve_branch(config, None, tag)
+        run_id = run_agent(config, branch=branch, tag=tag)
+        log_event(run_id, "start", f"config={config.name} branch={branch} mode=dispatch")
+    except click.ClickException as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
+    except docker.errors.DockerException as e:
+        click.echo(f"[scad] Docker error: {e}", err=True)
+        sys.exit(3)
+
+    # --- Wait for entrypoint setup ---
+    time.sleep(1)
+
+    # --- Inject work ---
+    add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
+
+    inject_kwargs = dict(
+        run_id=run_id,
+        prompt=prompt,
+        headless=headless,
+        workdir_key=config.workdir_key,
+        add_dirs=add_dirs,
+        dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+        additional_flags=config.claude.additional_flags,
+        wait=wait,
+    )
+
+    try:
+        result = inject_job(**inject_kwargs)
+    except (RuntimeError, ValueError) as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+
+    # --- Handle results ---
+    if wait:
+        job_id, exit_code = result
+        click.echo(f"[scad] Completed: {job_id} (exit code {exit_code})")
+
+        # Parse stream.jsonl for final result
+        logs_dir = SCAD_DIR / "logs"
+        stream_path = logs_dir / f"{job_id}.stream.jsonl"
+        if stream_path.exists():
+            for line in stream_path.read_text().splitlines():
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("type") == "result":
+                    if record.get("is_error"):
+                        click.echo(f"[scad] Error: {record.get('result', 'unknown error')}", err=True)
+                    else:
+                        click.echo(record.get("result", ""))
+                    break
+
+        # Auto-fetch if requested
+        if fetch:
+            try:
+                results = fetch_to_host(run_id, config)
+                if results:
+                    for r in results:
+                        click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} -> {r['source']}")
+                else:
+                    click.echo(f"[scad] Nothing to fetch for {run_id}")
+            except Exception as e:
+                click.echo(f"[scad] Fetch error: {e}", err=True)
+
+        if not fetch:
+            click.echo(f"[scad] Harvest results: scad code fetch {run_id}")
+    elif interactive and attach:
+        click.echo(f"[scad] Attaching to session {run_id}...")
+        container_name = f"scad-{run_id}"
+        attach_result = _subprocess.run(
+            ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
+        )
+        sys.exit(attach_result.returncode)
+    else:
+        job_id = result
+        mode = "headless" if headless else "interactive"
+        click.echo(f"[scad] Dispatched {mode}: {job_id}")
+        click.echo(f"[scad]   Session: {run_id}")
+        if headless:
+            click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+        else:
+            click.echo(f"[scad]   Attach: scad session attach {run_id}")
