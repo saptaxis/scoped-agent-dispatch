@@ -2,9 +2,23 @@
 
 ## [Unreleased]
 
-Composite workflows, Claude Code plugin, small features.
+Composite workflows, Claude Code plugin, small features. Stable release prep.
 
 ### Added
+- `dispatch --plan <path>` — auto-generate execution prompt from plan file
+- `session logs --job` — human-readable tool activity view (was result-only)
+- `harvest --diff` — opt-in full diff (default changed to git log --oneline)
+
+### Changed
+- `harvest` default output is now `git log --oneline` (readable) instead of full unified diff
+
+### Fixed
+- Interactive inject `tmux new-window` silent failure — removed `detach=True`, now checks exit code
+- Plugin skill (`skills/scad/SKILL.md`) updated to match current CLI (removed stale `--interactive` flag, added missing commands)
+- Documented `.yml`-only config convention in README
+- Clarified PyPI package name vs CLI command in pyproject.toml
+
+### Added (Plan 13)
 - `session inject --wait` — blocking inject with exit code propagation and elapsed timer
 - `session inject --wait --tail` — real-time streaming of Claude activity during wait
 - `scad dispatch` — composite: build-if-needed → start → inject (headless+wait by default)
