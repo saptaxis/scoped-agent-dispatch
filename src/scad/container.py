@@ -241,6 +241,59 @@ def list_jobs(run_id: str) -> list[dict]:
     return jobs
 
 
+def send_to_job(
+    run_id: str,
+    text: str,
+    job_id: Optional[str] = None,
+    timeout: int = 30,
+) -> None:
+    """Send input to a running interactive Claude process via tmux send-keys.
+
+    If job_id is None, auto-selects the only interactive job.
+    Raises RuntimeError if container not running, no interactive jobs,
+    or multiple interactive jobs without explicit job_id.
+    """
+    container_name = f"scad-{run_id}"
+    client = docker.from_env()
+    container = client.containers.get(container_name)
+
+    if container.status != "running":
+        raise RuntimeError(
+            f"Container {container_name} is not running (status: {container.status})"
+        )
+
+    # Find the target job
+    if job_id is None:
+        jobs = list_jobs(run_id)
+        interactive = [j for j in jobs if j.get("mode") == "interactive"]
+        if not interactive:
+            raise RuntimeError(f"No interactive jobs in session {run_id}")
+        if len(interactive) > 1:
+            ids = ", ".join(j["job_id"] for j in interactive)
+            raise RuntimeError(
+                f"Multiple interactive jobs in session {run_id}: {ids}. "
+                f"Use --job to specify which one."
+            )
+        job_id = interactive[0]["job_id"]
+
+    # Write text to a temp file to avoid quoting issues with send-keys
+    text_file = f"/tmp/{job_id}-send.txt"
+    container.exec_run(
+        ["bash", "-c", f"cat > {text_file} <<'SCADEOF'\n{text}\nSCADEOF"],
+    )
+
+    # Send the text via tmux — paste from file to avoid quoting issues
+    # tmux load-buffer loads file into paste buffer, then paste-buffer pastes it
+    container.exec_run(
+        ["bash", "-c",
+         f"tmux load-buffer -b scadsend {text_file} && "
+         f"tmux paste-buffer -b scadsend -t scad:{job_id} && "
+         f"tmux send-keys -t scad:{job_id} Enter"],
+    )
+
+    log_event(run_id, "send", f"job={job_id} text={text[:80]}")
+
+
 def _get_jinja_env() -> Environment:
     return Environment(loader=PackageLoader("scad", "templates"))
 

@@ -36,6 +36,7 @@ from scad.container import (
     image_exists,
     inject_job,
     list_jobs,
+    send_to_job,
     list_scad_containers,
     log_event,
     prune_old_images,
@@ -912,6 +913,21 @@ def session_jobs(run_id: str):
         branch = job.get("branch") or "—"
         started = _relative_time(job.get("started", ""))
         click.echo(f"{job['job_id']:<35} {job['mode']:<12} {branch:<25} {started}")
+
+
+@session.command("send")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("text")
+@click.option("--job", "job_id", default=None, help="Target a specific job (required if multiple interactive jobs).")
+def session_send(run_id: str, text: str, job_id: str):
+    """Send input to a running interactive Claude."""
+    validate_run_id(run_id)
+    try:
+        send_to_job(run_id, text, job_id=job_id)
+        click.echo(f"[scad] Sent to {run_id}" + (f" (job {job_id})" if job_id else ""))
+    except RuntimeError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
 
 
 @session.command("clean")

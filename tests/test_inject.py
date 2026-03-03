@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from scad.container import inject_job, list_jobs, RUNS_DIR
+from scad.container import inject_job, list_jobs, send_to_job, RUNS_DIR
 
 
 class TestInjectJob:
@@ -678,3 +678,140 @@ class TestInjectTail:
         assert "Reading" in result.output or "Read" in result.output
         assert "Running" in result.output or "Bash" in result.output or "pytest" in result.output
         assert "Editing" in result.output or "Edit" in result.output
+
+
+class TestSendToJob:
+    """Tests for send_to_job() — send input to running interactive Claude."""
+
+    @patch("scad.container.docker.from_env")
+    def test_send_keys_to_tmux(self, mock_docker, tmp_path):
+        """send_to_job sends text via tmux send-keys."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            jobs_dir = tmp_path / "test-run" / "jobs"
+            jobs_dir.mkdir(parents=True)
+            (jobs_dir / "test-run-job-001.json").write_text(json.dumps({
+                "job_id": "test-run-job-001",
+                "mode": "interactive",
+                "started": "2026-03-03T12:00:00Z",
+            }))
+            send_to_job("test-run", "summarize what you did")
+
+        # Should call exec_run with tmux send-keys
+        calls = [str(c) for c in mock_container.exec_run.call_args_list]
+        assert any("send-keys" in c for c in calls)
+
+    @patch("scad.container.docker.from_env")
+    def test_send_errors_if_no_interactive_jobs(self, mock_docker, tmp_path):
+        """send_to_job raises if no interactive jobs exist."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            jobs_dir = tmp_path / "test-run" / "jobs"
+            jobs_dir.mkdir(parents=True)
+            (jobs_dir / "test-run-job-001.json").write_text(json.dumps({
+                "job_id": "test-run-job-001",
+                "mode": "headless",
+                "started": "2026-03-03T12:00:00Z",
+            }))
+            with pytest.raises(RuntimeError, match="No interactive"):
+                send_to_job("test-run", "hello")
+
+    @patch("scad.container.docker.from_env")
+    def test_send_errors_if_multiple_interactive_no_job_id(self, mock_docker, tmp_path):
+        """send_to_job raises if multiple interactive jobs and no job_id specified."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            jobs_dir = tmp_path / "test-run" / "jobs"
+            jobs_dir.mkdir(parents=True)
+            for i in range(1, 3):
+                (jobs_dir / f"test-run-job-00{i}.json").write_text(json.dumps({
+                    "job_id": f"test-run-job-00{i}",
+                    "mode": "interactive",
+                    "started": "2026-03-03T12:00:00Z",
+                }))
+            with pytest.raises(RuntimeError, match="Multiple interactive"):
+                send_to_job("test-run", "hello")
+
+    @patch("scad.container.docker.from_env")
+    def test_send_with_explicit_job_id(self, mock_docker, tmp_path):
+        """send_to_job with explicit job_id targets that job."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = (0, b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            jobs_dir = tmp_path / "test-run" / "jobs"
+            jobs_dir.mkdir(parents=True)
+            for i in range(1, 3):
+                (jobs_dir / f"test-run-job-00{i}.json").write_text(json.dumps({
+                    "job_id": f"test-run-job-00{i}",
+                    "mode": "interactive",
+                    "started": "2026-03-03T12:00:00Z",
+                }))
+            send_to_job("test-run", "hello", job_id="test-run-job-002")
+
+        calls = [str(c) for c in mock_container.exec_run.call_args_list]
+        assert any("send-keys" in c and "job-002" in c for c in calls)
+
+    @patch("scad.container.docker.from_env")
+    def test_send_container_not_running_raises(self, mock_docker, tmp_path):
+        """send_to_job raises if container is not running."""
+        mock_container = MagicMock()
+        mock_container.status = "exited"
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "jobs").mkdir(parents=True)
+            with pytest.raises(RuntimeError, match="not running"):
+                send_to_job("test-run", "hello")
+
+
+class TestSessionSendCLI:
+    """Tests for session send CLI command."""
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.send_to_job")
+    def test_send_basic(self, mock_send, mock_validate):
+        """session send passes text to send_to_job."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "session", "send", "test-run", "summarize what you did",
+        ])
+        assert result.exit_code == 0
+        mock_send.assert_called_once_with("test-run", "summarize what you did", job_id=None)
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.send_to_job")
+    def test_send_with_job_flag(self, mock_send, mock_validate):
+        """session send --job targets specific job."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "session", "send", "test-run",
+            "--job", "test-run-job-002",
+            "do something",
+        ])
+        assert result.exit_code == 0
+        mock_send.assert_called_once_with("test-run", "do something", job_id="test-run-job-002")
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.send_to_job")
+    def test_send_error_displayed(self, mock_send, mock_validate):
+        """session send shows error if send_to_job fails."""
+        mock_send.side_effect = RuntimeError("No interactive jobs")
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "session", "send", "test-run", "hello",
+        ])
+        assert result.exit_code != 0
+        assert "No interactive" in result.output
