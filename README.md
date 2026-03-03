@@ -198,7 +198,7 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 | `repos.<key>.workdir` | no | Container working directory (exactly one required) |
 | `repos.<key>.add_dir` | no | Pass to `claude --add-dir` for multi-repo context |
 | `repos.<key>.focus` | no | Subdirectory to highlight in Claude's context prompt |
-| `mounts` | no | List of `{host, container}` read-write data mounts |
+| `mounts` | no | List of `{host, container}` read-write data mounts. Concurrent jobs share these mounts — avoid conflicting writes. |
 | `python.version` | no | Python version (default: `3.11`) |
 | `python.requirements` | no | Path to requirements.txt relative to workdir repo |
 | `apt_packages` | no | System packages to install via apt |
