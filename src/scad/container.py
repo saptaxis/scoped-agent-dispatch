@@ -194,11 +194,15 @@ def inject_job(
         container.exec_run(
             ["bash", "-c", f"cat > {launcher} <<'SCADEOF'\n#!/bin/bash\n{script}\nSCADEOF\nchmod +x {launcher}"],
         )
-        # Create tmux window running the launcher
-        container.exec_run(
+        # Create tmux window running the launcher — run synchronously to catch errors
+        result = container.exec_run(
             ["bash", "-c", f"tmux new-window -t scad: -n {job_id} {launcher}"],
-            detach=True,
         )
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"tmux new-window failed (exit {result.exit_code}): "
+                f"{result.output.decode() if result.output else 'no output'}"
+            )
 
     # Write job metadata
     jobs_dir = RUNS_DIR / run_id / "jobs"

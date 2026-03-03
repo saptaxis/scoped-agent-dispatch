@@ -40,7 +40,7 @@ class TestInjectJob:
         mock_container = MagicMock()
         mock_container.status = "running"
         mock_docker.return_value.containers.get.return_value = mock_container
-        mock_container.exec_run.return_value = (0, b"")
+        mock_container.exec_run.return_value = MagicMock(exit_code=0, output=b"")
 
         with patch("scad.container.RUNS_DIR", tmp_path):
             (tmp_path / "test-run" / "workspace").mkdir(parents=True)
@@ -162,7 +162,7 @@ class TestInjectJob:
         mock_container = MagicMock()
         mock_container.status = "running"
         mock_docker.return_value.containers.get.return_value = mock_container
-        mock_container.exec_run.return_value = (0, b"")
+        mock_container.exec_run.return_value = MagicMock(exit_code=0, output=b"")
 
         with patch("scad.container.RUNS_DIR", tmp_path):
             (tmp_path / "test-run" / "workspace").mkdir(parents=True)
@@ -177,6 +177,56 @@ class TestInjectJob:
         # add_dir flag is in the launcher script (second exec_run call)
         all_calls = [str(c) for c in mock_container.exec_run.call_args_list]
         assert any("--add-dir /workspace/docs" in c for c in all_calls)
+
+    @patch("scad.container.docker.from_env")
+    def test_interactive_inject_checks_tmux_exit_code(self, mock_docker, tmp_path):
+        """Interactive inject runs tmux new-window synchronously and checks exit code."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        mock_container.exec_run.return_value = MagicMock(exit_code=0, output=b"")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            job_id = inject_job(
+                run_id="test-run",
+                prompt="Do stuff",
+                headless=False,
+                workdir_key="code",
+            )
+
+        # Find the tmux new-window call
+        tmux_calls = [
+            c for c in mock_container.exec_run.call_args_list
+            if "tmux new-window" in str(c)
+        ]
+        assert len(tmux_calls) == 1
+        # Should NOT be detached
+        _, kwargs = tmux_calls[0]
+        assert kwargs.get("detach") is not True
+
+    @patch("scad.container.docker.from_env")
+    def test_interactive_inject_raises_on_tmux_failure(self, mock_docker, tmp_path):
+        """Interactive inject raises if tmux new-window fails."""
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+        # First calls succeed (prompt file write, launcher write), tmux fails
+        mock_container.exec_run.side_effect = [
+            MagicMock(exit_code=0, output=b""),  # write prompt file
+            MagicMock(exit_code=0, output=b""),  # write launcher script
+            MagicMock(exit_code=1, output=b"tmux error"),  # tmux new-window fails
+        ]
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            (tmp_path / "test-run" / "workspace").mkdir(parents=True)
+            with pytest.raises(RuntimeError, match="tmux"):
+                inject_job(
+                    run_id="test-run",
+                    prompt="Do stuff",
+                    headless=False,
+                    workdir_key="code",
+                )
 
     @patch("scad.container.docker.from_env")
     def test_headless_uses_skip_permissions(self, mock_docker, tmp_path):
