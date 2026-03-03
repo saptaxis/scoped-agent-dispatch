@@ -1234,26 +1234,29 @@ def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
 @click.option("--tag", required=True, help="Session tag.")
 @click.option("--prompt", required=True, help="Prompt to send to Claude.")
 @click.option("--no-wait", is_flag=True, help="Fire-and-forget (don't block).")
-@click.option("--interactive", is_flag=True, help="Interactive mode (tmux).")
+@click.option("--headless", is_flag=True, help="Headless mode (claude -p). Default is interactive.")
 @click.option("--attach", is_flag=True, help="Attach after interactive inject.")
-@click.option("--fetch", is_flag=True, help="Auto-fetch results after completion (implies --wait).")
+@click.option("--fetch", is_flag=True, help="Auto-fetch results after completion (implies --headless --wait).")
 @click.option("--no-build", is_flag=True, help="Skip image build check.")
 @click.option("--tail", is_flag=True, help="Stream Claude activity during wait.")
-def dispatch(config_name, tag, prompt, no_wait, interactive, attach, fetch, no_build, tail):
+def dispatch(config_name, tag, prompt, no_wait, headless, attach, fetch, no_build, tail):
     """Start a session and dispatch work. Composites: build -> start -> inject."""
     # --- Flag validation ---
     if fetch and no_wait:
         raise click.ClickException("--fetch and --no-wait are mutually exclusive.")
-    if attach and not interactive:
-        raise click.ClickException("--attach requires --interactive.")
+    if attach and headless:
+        raise click.ClickException("--attach and --headless are mutually exclusive.")
     if attach and no_wait:
         raise click.ClickException("--attach and --no-wait are mutually exclusive.")
+    if no_wait and not headless:
+        raise click.ClickException("--no-wait requires --headless.")
 
-    # --- Determine headless/wait ---
-    headless = not interactive
-    wait = not no_wait and headless
+    # --- Determine wait ---
     if fetch:
+        headless = True
         wait = True
+    else:
+        wait = headless and not no_wait
 
     # --- Load config ---
     try:
@@ -1357,7 +1360,7 @@ def dispatch(config_name, tag, prompt, no_wait, interactive, attach, fetch, no_b
 
         if not fetch:
             click.echo(f"[scad] Harvest results: scad code fetch {run_id}")
-    elif interactive and attach:
+    elif not headless and attach:
         click.echo(f"[scad] Attaching to session {run_id}...")
         container_name = f"scad-{run_id}"
         attach_result = _subprocess.run(

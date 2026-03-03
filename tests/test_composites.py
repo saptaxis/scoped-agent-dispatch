@@ -16,10 +16,37 @@ class TestDispatch:
     @patch("scad.cli.run_agent")
     @patch("scad.cli.inject_job")
     @patch("scad.cli.load_config")
-    def test_dispatch_headless_wait_default(
+    def test_dispatch_defaults_to_interactive(
         self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
     ):
-        """dispatch defaults to headless + wait."""
+        """dispatch without flags defaults to interactive (not headless)."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-test-Mar03-1200"
+        mock_inject.return_value = "demo-test-Mar03-1200-job-001"
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test", "--prompt", "Do the thing",
+        ])
+        assert result.exit_code == 0
+        mock_inject.assert_called_once()
+        _, kwargs = mock_inject.call_args
+        assert kwargs["headless"] is False
+        assert kwargs["wait"] is False
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_headless_flag(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
+    ):
+        """dispatch --headless enables headless + wait."""
         from scad.config import ScadConfig, RepoConfig
         config = ScadConfig(
             name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
@@ -31,22 +58,22 @@ class TestDispatch:
         runner = CliRunner()
         result = runner.invoke(main, [
             "dispatch", "demo", "--tag", "test", "--prompt", "Do the thing",
+            "--headless",
         ])
         assert result.exit_code == 0
-        mock_inject.assert_called_once()
         _, kwargs = mock_inject.call_args
-        assert kwargs["wait"] is True
         assert kwargs["headless"] is True
+        assert kwargs["wait"] is True
 
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.image_exists", return_value=True)
     @patch("scad.cli.run_agent")
     @patch("scad.cli.inject_job")
     @patch("scad.cli.load_config")
-    def test_dispatch_no_wait(
+    def test_dispatch_headless_no_wait(
         self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
     ):
-        """dispatch --no-wait dispatches without blocking."""
+        """dispatch --headless --no-wait dispatches headless without blocking."""
         from scad.config import ScadConfig, RepoConfig
         config = ScadConfig(
             name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
@@ -57,11 +84,12 @@ class TestDispatch:
 
         runner = CliRunner()
         result = runner.invoke(main, [
-            "dispatch", "demo", "--tag", "test", "--no-wait",
+            "dispatch", "demo", "--tag", "test", "--headless", "--no-wait",
             "--prompt", "Do the thing",
         ])
         assert result.exit_code == 0
         _, kwargs = mock_inject.call_args
+        assert kwargs["headless"] is True
         assert kwargs.get("wait") is not True
 
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
@@ -72,7 +100,7 @@ class TestDispatch:
     def test_dispatch_fetch_implies_wait(
         self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
     ):
-        """dispatch --fetch forces --wait."""
+        """dispatch --fetch forces --wait and --headless."""
         from scad.config import ScadConfig, RepoConfig
         config = ScadConfig(
             name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
@@ -89,6 +117,7 @@ class TestDispatch:
         assert result.exit_code == 0
         _, kwargs = mock_inject.call_args
         assert kwargs["wait"] is True
+        assert kwargs["headless"] is True
 
     def test_dispatch_fetch_no_wait_errors(self):
         """dispatch --fetch --no-wait is an error."""
@@ -117,7 +146,7 @@ class TestDispatch:
         mock_load.return_value = config
         mock_build.return_value = iter(["Step 1/5"])
         mock_run_agent.return_value = "demo-test-Mar03-1200"
-        mock_inject.return_value = ("demo-test-Mar03-1200-job-001", 0)
+        mock_inject.return_value = "demo-test-Mar03-1200-job-001"
 
         runner = CliRunner()
         result = runner.invoke(main, [
