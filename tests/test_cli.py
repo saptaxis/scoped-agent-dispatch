@@ -197,9 +197,9 @@ class TestSessionLogs:
 
 
 class TestSessionStatus:
-    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.list_scad_containers")
-    def test_status_shows_running(self, mock_running, mock_auth, runner):
+    @patch("scad.cli.get_recently_crashed")
+    def test_status_shows_running(self, mock_crashed, mock_running, runner):
         mock_running.return_value = [{
             "run_id": "test-Feb26-1430",
             "config": "myconfig",
@@ -208,22 +208,23 @@ class TestSessionStatus:
             "container": "running",
             "clones": "yes",
         }]
-        result = runner.invoke(main, ["session", "status"])
+        mock_crashed.return_value = []
+        result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         assert "test-Feb26-1430" in result.output
         assert "running" in result.output
 
-    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.list_scad_containers")
-    def test_status_empty(self, mock_running, mock_auth, runner):
+    @patch("scad.cli.get_recently_crashed")
+    def test_status_empty(self, mock_crashed, mock_running, runner):
         mock_running.return_value = []
-        result = runner.invoke(main, ["session", "status"])
+        mock_crashed.return_value = []
+        result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
         assert "No running sessions" in result.output
 
-    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.get_all_sessions")
-    def test_status_all_shows_history(self, mock_all, mock_auth, runner):
+    def test_status_all_shows_history(self, mock_all, runner):
         mock_all.return_value = [
             {
                 "run_id": "test-Feb28-1400",
@@ -242,7 +243,7 @@ class TestSessionStatus:
                 "clones": "yes",
             },
         ]
-        result = runner.invoke(main, ["session", "status", "--all"])
+        result = runner.invoke(main, ["status", "--all"])
         assert result.exit_code == 0
         assert "test-Feb28-1400" in result.output
         assert "old-Feb27-0900" in result.output
@@ -1021,7 +1022,7 @@ class TestProjectStatus:
                  "usage": None},
             ],
         }
-        result = runner.invoke(main, ["project", "status", "demo", "--cost"])
+        result = runner.invoke(main, ["status", "demo", "--cost"])
         assert result.exit_code == 0
         assert "demo" in result.output
         assert "2 " in result.output  # total sessions
@@ -1043,7 +1044,7 @@ class TestProjectStatus:
                  "usage": None},
             ],
         }
-        result = runner.invoke(main, ["project", "status", "demo"])
+        result = runner.invoke(main, ["status", "demo"])
         assert result.exit_code == 0
         assert "$" not in result.output  # no cost column without --cost flag
 
@@ -1152,31 +1153,6 @@ class TestGcCommand:
         assert result.exit_code == 0
 
 
-class TestCredentialWarning:
-    """session status shows credential expiry warning."""
-
-    def test_warning_when_expiring_soon(self, runner, monkeypatch):
-        monkeypatch.setattr("scad.cli.list_scad_containers", lambda: [])
-        monkeypatch.setattr("scad.cli.check_claude_auth", lambda: (True, 1.5))
-
-        result = runner.invoke(main, ["session", "status"])
-        assert "expire" in result.output.lower() or "1.5h" in result.output
-
-    def test_warning_when_expired(self, runner, monkeypatch):
-        monkeypatch.setattr("scad.cli.list_scad_containers", lambda: [])
-        monkeypatch.setattr("scad.cli.check_claude_auth", lambda: (False, 0))
-
-        result = runner.invoke(main, ["session", "status"])
-        assert "expired" in result.output.lower()
-
-    def test_no_warning_when_plenty_of_time(self, runner, monkeypatch):
-        monkeypatch.setattr("scad.cli.list_scad_containers", lambda: [])
-        monkeypatch.setattr("scad.cli.check_claude_auth", lambda: (True, 8.0))
-
-        result = runner.invoke(main, ["session", "status"])
-        assert "expire" not in result.output.lower()
-
-
 class TestUsageDisplay:
     """session info shows tokens, project status has --cost opt-in."""
 
@@ -1209,22 +1185,88 @@ class TestUsageDisplay:
         }
         monkeypatch.setattr("scad.cli.get_project_status", lambda name, **kw: status)
 
-        result = runner.invoke(main, ["project", "status", "demo"])
+        result = runner.invoke(main, ["status", "demo"])
         assert result.exit_code == 0
 
 
 class TestCrashDetection:
     """Tests for crash detection in session status and start."""
 
-    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.list_scad_containers")
     @patch("scad.cli.get_recently_crashed")
-    def test_status_shows_crashed(self, mock_crashed, mock_running, mock_auth):
-        """session status shows recently crashed sessions."""
+    def test_status_shows_crashed(self, mock_crashed, mock_running):
+        """scad status shows recently crashed sessions."""
         mock_running.return_value = []
         mock_crashed.return_value = [
             {"run_id": "demo-test-Mar03-1200", "exit_code": 1, "finished": "2m ago"}
         ]
         runner = CliRunner()
-        result = runner.invoke(main, ["session", "status"])
+        result = runner.invoke(main, ["status"])
         assert "crashed" in result.output.lower() or "exit" in result.output.lower()
+
+
+class TestTopLevelStatus:
+    """Tests for top-level scad status command."""
+
+    @patch("scad.cli.list_scad_containers")
+    @patch("scad.cli.get_recently_crashed")
+    def test_status_no_args_lists_sessions(self, mock_crashed, mock_containers, runner):
+        """scad status with no args lists running sessions."""
+        mock_containers.return_value = [
+            {"run_id": "demo-test-Mar03-1200", "config": "demo",
+             "branch": "scad-demo-test-Mar03-1200", "started": "2026-03-03T12:00:00+00:00"},
+        ]
+        mock_crashed.return_value = []
+        result = runner.invoke(main, ["status"])
+        assert result.exit_code == 0
+        assert "demo-test-Mar03-1200" in result.output
+
+    @patch("scad.cli.list_scad_containers")
+    @patch("scad.cli.get_recently_crashed")
+    def test_status_no_args_all_flag(self, mock_crashed, mock_containers, runner):
+        """scad status --all shows full history."""
+        mock_containers.return_value = []
+        mock_crashed.return_value = []
+        with patch("scad.cli.get_all_sessions") as mock_all:
+            mock_all.return_value = []
+            result = runner.invoke(main, ["status", "--all"])
+        assert result.exit_code == 0
+
+    @patch("scad.cli.get_project_status")
+    def test_status_with_config_arg_shows_project(self, mock_status, runner):
+        """scad status <config> shows project overview."""
+        mock_status.return_value = {
+            "config": "demo",
+            "total_sessions": 1,
+            "running": 1, "stopped": 0, "cleaned": 0,
+            "last_active": "2026-03-03T12:00",
+            "total_cost": 0,
+            "sessions": [
+                {"run_id": "demo-test", "branch": "b",
+                 "started": "2026-03-03T12:00", "container": "running",
+                 "cost": 0, "usage": None},
+            ],
+        }
+        result = runner.invoke(main, ["status", "demo"])
+        assert result.exit_code == 0
+        assert "demo" in result.output
+        assert "Sessions:" in result.output
+
+    @patch("scad.cli.get_project_status")
+    def test_status_with_config_cost_flag(self, mock_status, runner):
+        """scad status <config> --cost shows cost data."""
+        mock_status.return_value = {
+            "config": "demo",
+            "total_sessions": 1,
+            "running": 0, "stopped": 1, "cleaned": 0,
+            "last_active": "2026-03-03T12:00",
+            "total_cost": 3.84,
+            "sessions": [
+                {"run_id": "demo-test", "branch": "b",
+                 "started": "2026-03-03T12:00", "container": "stopped",
+                 "cost": 3.84, "usage": None},
+            ],
+        }
+        result = runner.invoke(main, ["status", "demo", "--cost"])
+        assert result.exit_code == 0
+        assert "$3.84" in result.output

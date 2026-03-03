@@ -169,60 +169,100 @@ def code():
     pass
 
 
-@main.group()
-def project():
-    """Project-level views."""
-    pass
-
-
-@project.command("status")
-@click.argument("config_name", shell_complete=_complete_config_names)
+@main.command()
+@click.argument("config_name", required=False, default=None, shell_complete=_complete_config_names)
+@click.option("--all", "show_all", is_flag=True, help="Show full session history.")
 @click.option("--cost", is_flag=True, help="Include cost data (slow — runs ccusage).")
-def project_status(config_name: str, cost: bool):
-    """Show cross-session project overview."""
-    status = get_project_status(config_name, include_cost=cost)
+def status(config_name: str, show_all: bool, cost: bool):
+    """List sessions, or show project overview for a config.
 
-    if status["total_sessions"] == 0:
-        click.echo(f"[scad] No sessions found for config: {config_name}")
-        return
+    Without arguments: list running sessions (like session status).
+    With a config name: show cross-session project overview.
+    """
+    if config_name:
+        # Project overview mode
+        status_data = get_project_status(config_name, include_cost=cost)
 
-    # Summary
-    parts = []
-    if status["running"]:
-        parts.append(f"{status['running']} running")
-    if status["stopped"]:
-        parts.append(f"{status['stopped']} stopped")
-    if status["cleaned"]:
-        parts.append(f"{status['cleaned']} cleaned")
-    status_str = ", ".join(parts) if parts else "none"
+        if status_data["total_sessions"] == 0:
+            click.echo(f"[scad] No sessions found for config: {config_name}")
+            return
 
-    click.echo(f"Project:     {status['config']}")
-    click.echo(f"Sessions:    {status['total_sessions']} ({status_str})")
-    click.echo(f"Last active: {_relative_time(status['last_active'])}")
-    if cost and status["total_cost"] > 0:
-        click.echo(f"Total cost:  ${status['total_cost']:.2f}")
+        parts = []
+        if status_data["running"]:
+            parts.append(f"{status_data['running']} running")
+        if status_data["stopped"]:
+            parts.append(f"{status_data['stopped']} stopped")
+        if status_data["cleaned"]:
+            parts.append(f"{status_data['cleaned']} cleaned")
+        status_str = ", ".join(parts) if parts else "none"
 
-    # Session table
-    click.echo()
-    if cost:
-        click.echo(
-            f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS':<10} {'COST'}"
-        )
-        for s in status["sessions"]:
-            started = _relative_time(s["started"])
-            cost_str = f"${s['cost']:.2f}" if s["cost"] > 0 else "-"
+        click.echo(f"Project:     {status_data['config']}")
+        click.echo(f"Sessions:    {status_data['total_sessions']} ({status_str})")
+        click.echo(f"Last active: {_relative_time(status_data['last_active'])}")
+        if cost and status_data["total_cost"] > 0:
+            click.echo(f"Total cost:  ${status_data['total_cost']:.2f}")
+
+        click.echo()
+        if cost:
             click.echo(
-                f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']:<10} {cost_str}"
+                f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS':<10} {'COST'}"
             )
+            for s in status_data["sessions"]:
+                started = _relative_time(s["started"])
+                cost_str = f"${s['cost']:.2f}" if s["cost"] > 0 else "-"
+                click.echo(
+                    f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']:<10} {cost_str}"
+                )
+        else:
+            click.echo(
+                f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS'}"
+            )
+            for s in status_data["sessions"]:
+                started = _relative_time(s["started"])
+                click.echo(
+                    f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']}"
+                )
     else:
-        click.echo(
-            f"  {'RUN ID':<35} {'BRANCH':<30} {'STARTED':<12} {'STATUS'}"
-        )
-        for s in status["sessions"]:
-            started = _relative_time(s["started"])
-            click.echo(
-                f"  {s['run_id']:<35} {s['branch']:<30} {started:<12} {s['container']}"
-            )
+        # Session listing mode (same as old session status)
+        if show_all:
+            all_runs = get_all_sessions()
+            if not all_runs:
+                click.echo("[scad] No sessions found.")
+            else:
+                click.echo(
+                    f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
+                    f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
+                )
+                for run in all_runs:
+                    started = _relative_time(run["started"]) if run["started"] else "?"
+                    click.echo(
+                        f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
+                        f"{started:<12} {run['container']:<12} {run['clones']}"
+                    )
+        else:
+            running = list_scad_containers()
+            if not running:
+                click.echo("[scad] No running sessions.")
+            else:
+                click.echo(
+                    f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
+                    f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
+                )
+                for run in running:
+                    started = _relative_time(run["started"]) if run["started"] else "?"
+                    clone_dir = SCAD_DIR / "runs" / run["run_id"] / "workspace"
+                    clones = "yes" if clone_dir.exists() else "-"
+                    click.echo(
+                        f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
+                        f"{started:<12} {'running':<12} {clones}"
+                    )
+
+            crashed = get_recently_crashed()
+            if crashed:
+                click.echo()
+                click.echo("[scad] Recently crashed:")
+                for c in crashed:
+                    click.echo(f"  {c['run_id']} (exit code {c['exit_code']})")
 
 
 def run_agent(
@@ -536,59 +576,6 @@ def build(config_name: str, verbose: bool):
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)
-
-
-@session.command("status")
-@click.option("--all", "show_all", is_flag=True, help="Show full session history.")
-def session_status(show_all: bool):
-    """List sessions. Running only by default, --all for full history."""
-    if show_all:
-        all_runs = get_all_sessions()
-        if not all_runs:
-            click.echo("[scad] No sessions found.")
-        else:
-            click.echo(
-                f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
-                f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
-            )
-            for run in all_runs:
-                started = _relative_time(run["started"]) if run["started"] else "?"
-                click.echo(
-                    f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
-                    f"{started:<12} {run['container']:<12} {run['clones']}"
-                )
-    else:
-        running = list_scad_containers()
-        if not running:
-            click.echo("[scad] No running sessions.")
-        else:
-            click.echo(
-                f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
-                f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
-            )
-            for run in running:
-                started = _relative_time(run["started"]) if run["started"] else "?"
-                clone_dir = SCAD_DIR / "runs" / run["run_id"] / "workspace"
-                clones = "yes" if clone_dir.exists() else "-"
-                click.echo(
-                    f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
-                    f"{started:<12} {'running':<12} {clones}"
-                )
-
-        # Show recently crashed
-        crashed = get_recently_crashed()
-        if crashed:
-            click.echo()
-            click.echo("[scad] Recently crashed:")
-            for c in crashed:
-                click.echo(f"  {c['run_id']} (exit code {c['exit_code']})")
-
-    # Credential expiry warning
-    valid, hours = check_claude_auth()
-    if not valid:
-        click.echo("\n\u2717 Credentials expired \u2014 run: claude /login")
-    elif hours < 2.0:
-        click.echo(f"\n\u26a0 Credentials expire in {hours:.1f}h \u2014 run: scad code refresh <run-id>")
 
 
 @session.command("info")
