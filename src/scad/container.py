@@ -1242,6 +1242,34 @@ def workspace_remove(run_id: str, name: str) -> None:
     log_event(run_id, "code-remove", f"name={name}")
 
 
+def create_branch(run_id: str, branch_name: str) -> list[str]:
+    """Create and checkout a branch in all clone repos in workspace.
+
+    Skips symlinked directories (data mounts, non-clone repos).
+    Returns list of repo names where branch was created.
+    """
+    workspace = RUNS_DIR / run_id / "workspace"
+    if not workspace.exists():
+        raise FileNotFoundError(f"No workspace for run: {run_id}")
+
+    created = []
+    for entry in sorted(workspace.iterdir()):
+        if not entry.is_dir() or entry.is_symlink():
+            continue
+        if not (entry / ".git").exists():
+            continue
+        subprocess.run(
+            ["git", "checkout", "-B", branch_name],
+            cwd=str(entry),
+            capture_output=True,
+            check=True,
+        )
+        created.append(entry.name)
+
+    log_event(run_id, "branch", f"branch={branch_name} repos={','.join(created)}")
+    return created
+
+
 def gc(force: bool = False) -> dict:
     """Find and optionally clean orphaned state.
 

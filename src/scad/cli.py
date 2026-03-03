@@ -24,6 +24,7 @@ from scad.container import (
     clean_run,
     cleanup_clones,
     config_name_for_run,
+    create_branch,
     create_clones,
     diff_from_source,
     fetch_to_host,
@@ -1027,6 +1028,27 @@ def code_diff(run_id: str):
     for repo, diff_text in diffs.items():
         click.echo(f"\n--- {repo} ---")
         click.echo(diff_text)
+
+
+@code.command("branch")
+@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("branch_name")
+def code_branch(run_id: str, branch_name: str):
+    """Create and switch to a branch in all clone repos."""
+    validate_run_id(run_id)
+    try:
+        created = create_branch(run_id, branch_name)
+        if created:
+            for repo in created:
+                click.echo(f"[scad] Branch '{branch_name}' in {repo}")
+        else:
+            click.echo("[scad] No clone repos found in workspace.")
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(1)
+    except subprocess.CalledProcessError as e:
+        click.echo(f"[scad] Git error: {e.stderr.decode().strip()}", err=True)
+        sys.exit(1)
 
 
 @session.command("refresh")

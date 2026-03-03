@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-from scad.container import inject_job, list_jobs, send_to_job, RUNS_DIR
+from scad.container import inject_job, list_jobs, send_to_job, create_branch, RUNS_DIR
 
 
 class TestInjectJob:
@@ -815,3 +815,72 @@ class TestSessionSendCLI:
         ])
         assert result.exit_code != 0
         assert "No interactive" in result.output
+
+
+class TestCreateBranch:
+    """Tests for create_branch() — create/switch branch in clones."""
+
+    def test_creates_branch_in_clone(self, tmp_path):
+        """create_branch runs git checkout -b in workspace clone."""
+        workspace = tmp_path / "test-run" / "workspace" / "code"
+        workspace.mkdir(parents=True)
+        (workspace / ".git").mkdir()  # fake git repo
+
+        with patch("scad.container.RUNS_DIR", tmp_path), \
+             patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="")
+            create_branch("test-run", "feature-x")
+
+        mock_run.assert_called()
+        cmd = mock_run.call_args_list[0][0][0]
+        assert "checkout" in cmd
+        assert "feature-x" in cmd
+
+    def test_creates_branch_in_all_clones(self, tmp_path):
+        """create_branch creates the branch in every git repo in workspace."""
+        workspace = tmp_path / "test-run" / "workspace"
+        for name in ["code", "docs"]:
+            d = workspace / name
+            d.mkdir(parents=True)
+            (d / ".git").mkdir()
+
+        with patch("scad.container.RUNS_DIR", tmp_path), \
+             patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="")
+            create_branch("test-run", "feature-x")
+
+        # Should be called for each git repo
+        assert mock_run.call_count >= 2
+
+    def test_skips_symlinks(self, tmp_path):
+        """create_branch skips symlinked directories (non-clone repos)."""
+        workspace = tmp_path / "test-run" / "workspace"
+        clone = workspace / "code"
+        clone.mkdir(parents=True)
+        (clone / ".git").mkdir()
+
+        # Create a symlink (data mount)
+        data_source = tmp_path / "data"
+        data_source.mkdir()
+        (workspace / "data").symlink_to(data_source)
+
+        with patch("scad.container.RUNS_DIR", tmp_path), \
+             patch("scad.container.subprocess.run") as mock_run:
+            mock_run.return_value = MagicMock(returncode=0, stdout="")
+            create_branch("test-run", "feature-x")
+
+        # Only called once — for the clone, not the symlink
+        assert mock_run.call_count == 1
+
+
+class TestCodeBranchCLI:
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.create_branch")
+    def test_branch_command(self, mock_branch, mock_validate):
+        """code branch creates branch in clones."""
+        mock_branch.return_value = ["code"]
+        runner = CliRunner()
+        result = runner.invoke(main, ["code", "branch", "test-run", "feature-x"])
+        assert result.exit_code == 0
+        mock_branch.assert_called_once_with("test-run", "feature-x")
