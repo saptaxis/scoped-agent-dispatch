@@ -38,6 +38,8 @@ from scad.container import (
     refresh_credentials,
     validate_run_id,
     _migrate_worktrees,
+    get_image_info,
+    get_recently_crashed,
 )
 
 
@@ -1914,3 +1916,79 @@ class TestUnifiedWorkspace:
         workspace = tmp_path / "test-run-001" / "workspace"
         symlinks = [p for p in workspace.iterdir() if p.is_symlink()]
         assert any(s.resolve() == data_dir.resolve() for s in symlinks)
+
+
+class TestGetImageInfo:
+    """Tests for get_image_info() — Docker image lookup."""
+
+    @patch("scad.container.docker.from_env")
+    def test_returns_info_when_image_exists(self, mock_docker):
+        """get_image_info returns tag and created date when image exists."""
+        mock_image = MagicMock()
+        mock_image.attrs = {"Created": "2026-03-03T12:00:00"}
+        mock_docker.return_value.images.get.return_value = mock_image
+
+        result = get_image_info("demo")
+        assert result is not None
+        assert result["tag"] == "scad-demo"
+        assert result["created"] == "2026-03-03T12:00:00"
+
+    @patch("scad.container.docker.from_env")
+    def test_returns_none_when_not_found(self, mock_docker):
+        """get_image_info returns None when image doesn't exist."""
+        mock_docker.return_value.images.get.side_effect = docker.errors.ImageNotFound("nope")
+
+        result = get_image_info("nonexistent")
+        assert result is None
+
+    @patch("scad.container.docker.from_env")
+    def test_returns_none_on_docker_error(self, mock_docker):
+        """get_image_info returns None on Docker connection error."""
+        mock_docker.side_effect = docker.errors.DockerException("not running")
+
+        result = get_image_info("demo")
+        assert result is None
+
+
+class TestGetRecentlyCrashed:
+    """Tests for get_recently_crashed() — find crashed containers."""
+
+    @patch("scad.container.docker.from_env")
+    def test_returns_crashed_containers(self, mock_docker):
+        """get_recently_crashed returns containers with non-zero exit code."""
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {"ExitCode": 1}}
+        mock_container.labels = {"scad.run_id": "demo-test", "scad.config": "demo"}
+        mock_docker.return_value.containers.list.return_value = [mock_container]
+
+        result = get_recently_crashed()
+        assert len(result) == 1
+        assert result[0]["run_id"] == "demo-test"
+        assert result[0]["exit_code"] == 1
+
+    @patch("scad.container.docker.from_env")
+    def test_ignores_clean_exits(self, mock_docker):
+        """get_recently_crashed ignores containers that exited cleanly (code 0)."""
+        mock_container = MagicMock()
+        mock_container.attrs = {"State": {"ExitCode": 0}}
+        mock_container.labels = {"scad.run_id": "demo-test", "scad.config": "demo"}
+        mock_docker.return_value.containers.list.return_value = [mock_container]
+
+        result = get_recently_crashed()
+        assert len(result) == 0
+
+    @patch("scad.container.docker.from_env")
+    def test_returns_empty_on_docker_error(self, mock_docker):
+        """get_recently_crashed returns empty list on Docker error."""
+        mock_docker.return_value.containers.list.side_effect = docker.errors.DockerException("err")
+
+        result = get_recently_crashed()
+        assert result == []
+
+    @patch("scad.container.docker.from_env")
+    def test_empty_when_no_exited_containers(self, mock_docker):
+        """get_recently_crashed returns empty when no containers match."""
+        mock_docker.return_value.containers.list.return_value = []
+
+        result = get_recently_crashed()
+        assert result == []
