@@ -206,6 +206,8 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 | `claude.plugins` | no | Claude Code plugins to bootstrap at startup |
 | `claude.claude_md` | no | Host path to CLAUDE.md to mount into container |
 
+Config files must use the `.yml` extension (not `.yaml`).
+
 ## How it works
 
 1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
