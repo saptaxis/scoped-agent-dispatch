@@ -1,6 +1,6 @@
 # Changelog
 
-## [0.2.1] — Unreleased
+## [Unreleased]
 
 Composite workflows, Claude Code plugin, small features.
 
@@ -14,6 +14,19 @@ Composite workflows, Claude Code plugin, small features.
 - Crash detection — `session status` shows recently-crashed containers, `session start` checks startup health
 - `python.editable` config option — `pip install -e .` at runtime for pyproject.toml projects
 - Configurable `SCAD_HOME` — env var override for `~/.scad/`, enables test isolation
+- `session send` — type into a running interactive Claude via tmux send-keys
+- `scad batch` — parallel headless jobs from `---`-delimited prompt file with `--parallel N` and `--fail-fast`
+- `code branch <run-id> <name>` — create/switch branch in all session clones
+- `install.sh` — bootstrap installer with auto-detection (venv, symlink, shell completions, Claude Code plugin registration, uninstall)
+- Top-level `scad status` — no arg lists sessions, with config arg shows project overview
+
+### Changed
+- `dispatch` defaults to interactive mode — `--headless` is now the opt-in flag (was `--interactive`)
+- `code refresh` moved to `session refresh` (credential push is session maintenance)
+- `project` CLI group removed — functionality merged into top-level `scad status`
+
+### Fixed
+- Added missing unit tests for `get_image_info()` and `get_recently_crashed()`
 
 ## [0.2.0] — 2026-03-03
 
