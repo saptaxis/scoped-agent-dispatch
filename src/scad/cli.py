@@ -1241,15 +1241,29 @@ def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("--tag", required=True, help="Session tag.")
-@click.option("--prompt", required=True, help="Prompt to send to Claude.")
+@click.option("--prompt", default=None, help="Prompt to send to Claude.")
+@click.option("--plan", "plan_path", default=None, type=click.Path(exists=True), help="Plan file — auto-generates execution prompt.")
 @click.option("--no-wait", is_flag=True, help="Fire-and-forget (don't block).")
 @click.option("--headless", is_flag=True, help="Headless mode (claude -p). Default is interactive.")
 @click.option("--attach", is_flag=True, help="Attach after interactive inject.")
 @click.option("--fetch", is_flag=True, help="Auto-fetch results after completion (implies --headless --wait).")
 @click.option("--no-build", is_flag=True, help="Skip image build check.")
 @click.option("--tail", is_flag=True, help="Stream Claude activity during wait.")
-def dispatch(config_name, tag, prompt, no_wait, headless, attach, fetch, no_build, tail):
+def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fetch, no_build, tail):
     """Start a session and dispatch work. Composites: build -> start -> inject."""
+    # --- Plan/prompt resolution ---
+    if plan_path and prompt:
+        raise click.ClickException("--plan and --prompt are mutually exclusive.")
+    if not plan_path and not prompt:
+        raise click.ClickException("Either --prompt or --plan is required.")
+    if plan_path:
+        plan_text = Path(plan_path).read_text()
+        prompt = (
+            f"Use the executing-plans skill to implement this plan. "
+            f"Work task-by-task, in order. Ask clarifying questions upfront before starting. "
+            f"Execute the full plan.\n\n{plan_text}"
+        )
+
     # --- Flag validation ---
     if fetch and no_wait:
         raise click.ClickException("--fetch and --no-wait are mutually exclusive.")

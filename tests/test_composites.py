@@ -130,6 +130,65 @@ class TestDispatch:
         assert result.exit_code != 0
 
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_plan_generates_prompt(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, tmp_path
+    ):
+        """dispatch --plan reads file and generates execution prompt."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-test-Mar03-1200"
+        mock_inject.return_value = "demo-test-Mar03-1200-job-001"
+
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# My Plan\n\n### Task 1: Do stuff\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test", "--plan", str(plan_file),
+        ])
+        assert result.exit_code == 0
+        mock_inject.assert_called_once()
+        _, kwargs = mock_inject.call_args
+        prompt = kwargs["prompt"]
+        assert "executing-plans" in prompt
+        assert str(plan_file) in prompt or "My Plan" in prompt
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_plan_and_prompt_mutually_exclusive(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, tmp_path
+    ):
+        """dispatch --plan and --prompt cannot be used together."""
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# Plan\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test",
+            "--plan", str(plan_file), "--prompt", "also this",
+        ])
+        assert result.exit_code != 0
+
+    def test_dispatch_plan_file_not_found(self):
+        """dispatch --plan with missing file errors."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test",
+            "--plan", "/nonexistent/plan.md",
+        ])
+        assert result.exit_code != 0
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.image_exists", return_value=False)
     @patch("scad.cli.build_image")
     @patch("scad.cli.run_agent")
