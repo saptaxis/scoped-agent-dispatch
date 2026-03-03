@@ -39,8 +39,10 @@ Operational visibility: `scad status` shows running sessions with credential exp
 ```bash
 # Top-level composites + status
 scad dispatch <config> --tag <tag> --prompt "..."  # start session + inject work (interactive default)
+scad dispatch <config> --tag <tag> --plan plan.md  # start session + inject from plan file
 scad batch <config> --tag <tag> --prompt-file prompts.txt  # parallel headless jobs from file
-scad harvest <run-id>                              # fetch branches + show diff
+scad harvest <run-id>                              # fetch branches + show summary
+scad harvest <run-id> --diff                       # fetch + show full diff
 scad finish <run-id>                               # fetch + clean (safe teardown)
 scad status                                        # list running sessions
 scad status --all                                  # full session history
@@ -163,6 +165,12 @@ claude:
 scad build my-project                       # builds Docker image (cached after first run)
 scad session start my-project --tag initial # creates clones, starts container
 scad session attach my-project-initial-Mar02-1400  # drops into tmux with Claude
+```
+
+Or dispatch from a plan file:
+
+```bash
+scad dispatch my-project --tag implement --plan docs/plans/feature.md
 ```
 
 ### 3. Work
