@@ -663,21 +663,37 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
         click.echo(f"[scad] {not_found_msg}", err=True)
         sys.exit(1)
 
-    # --job without --stream: parse stream.jsonl and show final result
+    # --job without --stream: human-readable activity summary
     if job and not stream:
         import json as _json
+        lines_out = []
+        result_text = None
+        is_error = False
         for line in log_path.read_text().splitlines():
             try:
                 record = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
+            # Tool activity
+            for tl in _format_tool_line(record):
+                lines_out.append(tl)
+            # Final result
             if record.get("type") == "result":
-                if record.get("is_error"):
-                    click.echo(f"[scad] Job failed: {record.get('result', 'unknown error')}", err=True)
-                else:
-                    click.echo(record.get("result", ""))
-                return
-        click.echo("[scad] Job still running (no result yet).", err=True)
+                is_error = record.get("is_error", False)
+                result_text = record.get("result", "")
+
+        if lines_out:
+            for ln in lines_out:
+                click.echo(ln)
+            click.echo()
+
+        if result_text is not None:
+            if is_error:
+                click.echo(f"[scad] Job failed: {result_text}", err=True)
+            else:
+                click.echo(f"[scad] Result: {result_text}")
+        else:
+            click.echo("[scad] Job still running (no result yet).", err=True)
         return
 
     if follow:
