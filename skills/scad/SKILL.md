@@ -28,12 +28,16 @@ description: >
 
 | Workflow | Commands | When |
 |----------|----------|------|
-| End-to-end headless | `scad dispatch <config> --tag t --prompt "task"` | "Do this task, give me results" |
-| Interactive session | `scad dispatch <config> --tag t --interactive --attach --prompt "task"` | "I want to work with Claude" |
-| Fire and forget | `scad dispatch <config> --tag t --no-wait --prompt "task"` | "Start this, I'll check later" |
+| Interactive dispatch | `scad dispatch <config> --tag t --prompt "task"` | "Do this task interactively" |
+| Interactive + attach | `scad dispatch <config> --tag t --attach --prompt "task"` | "I want to work with Claude" |
+| Execute a plan | `scad dispatch <config> --tag t --plan plan.md` | "Run this implementation plan" |
+| Headless dispatch | `scad dispatch <config> --tag t --headless --prompt "task"` | "Do this, give me results" |
+| Fire and forget | `scad dispatch <config> --tag t --headless --no-wait --prompt "task"` | "Start this, I'll check later" |
+| Parallel batch | `scad batch <config> --tag t --prompt-file prompts.txt` | "Run these N tasks in parallel" |
 | Get results back | `scad harvest <run-id>` | "What did Claude produce?" |
 | Done with session | `scad finish <run-id>` | "Save work, tear down" |
 | Add more work | `scad session inject <run-id> --prompt "more work"` | "Do this too in the same session" |
+| Send to running Claude | `scad session send <run-id> "message"` | "Tell Claude something mid-conversation" |
 | Monitor | `scad session jobs <run-id>` then `scad session logs <run-id> --job <id>` | "What's happening?" |
 
 ## Quick Reference
@@ -41,11 +45,15 @@ description: >
 ### Composites (start here)
 
 ```bash
-scad dispatch <config> --tag <tag> --prompt "..."  # headless+wait (default)
-scad dispatch <config> --tag <tag> --prompt "..." --fetch  # + auto-fetch results
-scad dispatch <config> --tag <tag> --prompt "..." --interactive --attach  # drop into tmux
-scad harvest <run-id>                              # fetch + diff
-scad finish <run-id>                               # fetch + clean
+scad dispatch <config> --tag <tag> --prompt "..."            # interactive (default)
+scad dispatch <config> --tag <tag> --prompt "..." --attach   # interactive + attach to tmux
+scad dispatch <config> --tag <tag> --plan plan.md            # execute plan file
+scad dispatch <config> --tag <tag> --prompt "..." --headless # headless + wait
+scad dispatch <config> --tag <tag> --prompt "..." --fetch    # headless + wait + auto-fetch
+scad batch <config> --tag <tag> --prompt-file prompts.txt    # parallel headless jobs
+scad harvest <run-id>                                        # fetch + git log summary
+scad harvest <run-id> --diff                                 # fetch + full diff
+scad finish <run-id>                                         # fetch + clean
 ```
 
 ### Session Lifecycle
@@ -56,6 +64,7 @@ scad session start <config> --tag <tag> --prompt "..." # start + inject
 scad session inject <run-id> --prompt "..."         # inject interactive work
 scad session inject <run-id> --prompt "..." --headless  # inject headless
 scad session inject <run-id> --prompt "..." --wait  # block until done
+scad session send <run-id> "message"               # send to running Claude
 scad session attach <run-id>                        # attach to tmux
 scad session jobs <run-id>                          # list jobs
 scad session logs <run-id> --job <id>               # job result
@@ -72,9 +81,10 @@ scad session status --all                           # full history
 scad code fetch <run-id>        # fetch branches to host repos
 scad code sync <run-id>         # push host changes into clones
 scad code diff <run-id>         # diff clones vs source repos
+scad code branch <run-id> <name> # create/switch branch in all clones
 scad code add <run-id> --path ~/data --name data    # add to workspace
 scad code remove <run-id> --name data               # remove from workspace
-scad code refresh <run-id>      # push fresh credentials
+scad session refresh <run-id>   # push fresh credentials
 ```
 
 ### Infrastructure
@@ -84,6 +94,8 @@ scad build <config>             # build Docker image
 scad config list                # list configs
 scad config info <config>       # environment summary
 scad config new <name>          # scaffold config
+scad status                     # running sessions
+scad status <config> --cost     # project overview with cost
 scad gc                         # find orphans (dry-run)
 scad gc --force                 # clean orphans
 ```
@@ -107,7 +119,7 @@ scad gc --force                 # clean orphans
 - **`--fetch` implies `--wait`.** Can't fetch results from unfinished work.
 - **Detaching tmux returns to host shell.** This is expected — the container keeps running. Reattach with `scad session attach`.
 - **`session clean` is destructive.** No undo. Fetch branches first (`scad harvest`) or use `scad finish` which fetches automatically.
-- **Credentials expire ~8h.** Use `scad code refresh <run-id>` to push fresh creds. `session status` warns when <2h remaining.
+- **Credentials expire ~8h.** Use `scad session refresh <run-id>` to push fresh creds. `session status` warns when <2h remaining.
 
 <HARD-GATE>
 NEVER construct Docker commands manually when scad has a command for it.
