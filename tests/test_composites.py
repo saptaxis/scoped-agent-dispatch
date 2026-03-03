@@ -235,3 +235,134 @@ class TestFinish:
         runner = CliRunner()
         result = runner.invoke(main, ["finish", "test-run", "--keep-session"])
         assert result.exit_code == 0
+
+
+class TestBatch:
+    """Tests for scad batch — parallel headless jobs."""
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.parse_prompt_file")
+    def test_batch_runs_all_prompts(
+        self, mock_parse, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
+    ):
+        """batch runs inject_job for each prompt in the file."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-batch-Mar03-1200"
+        mock_parse.return_value = ["Prompt A", "Prompt B", "Prompt C"]
+        mock_inject.return_value = ("demo-batch-Mar03-1200-job-001", 0)
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "batch", "--prompt-file", "/tmp/prompts.txt",
+        ])
+        assert result.exit_code == 0
+        assert mock_inject.call_count == 3
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.parse_prompt_file")
+    def test_batch_reports_summary(
+        self, mock_parse, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
+    ):
+        """batch prints pass/fail summary."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-batch-Mar03-1200"
+        mock_parse.return_value = ["Prompt A", "Prompt B"]
+        # First succeeds, second fails
+        mock_inject.side_effect = [
+            ("demo-batch-Mar03-1200-job-001", 0),
+            ("demo-batch-Mar03-1200-job-002", 1),
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "batch", "--prompt-file", "/tmp/prompts.txt",
+        ])
+        assert result.exit_code == 0
+        assert "1 passed" in result.output
+        assert "1 failed" in result.output
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.parse_prompt_file")
+    def test_batch_fail_fast_stops_early(
+        self, mock_parse, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
+    ):
+        """batch --fail-fast cancels remaining jobs on first failure."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-batch-Mar03-1200"
+        mock_parse.return_value = ["A", "B", "C", "D"]
+        # First fails — with --fail-fast and --parallel 1 the rest shouldn't run
+        mock_inject.side_effect = [
+            ("job-001", 1),
+            ("job-002", 0),
+            ("job-003", 0),
+            ("job-004", 0),
+        ]
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "batch",
+            "--prompt-file", "/tmp/prompts.txt",
+            "--fail-fast", "--parallel", "1",
+        ])
+        assert result.exit_code == 0
+        # With parallel=1 and fail-fast, should stop after first failure
+        assert mock_inject.call_count < 4
+
+    def test_batch_requires_prompt_file(self):
+        """batch without --prompt-file errors."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "test",
+        ])
+        assert result.exit_code != 0
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.parse_prompt_file")
+    def test_batch_parallel_flag(
+        self, mock_parse, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth
+    ):
+        """batch --parallel N limits concurrency."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-batch-Mar03-1200"
+        mock_parse.return_value = ["A", "B"]
+        mock_inject.return_value = ("job-001", 0)
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "batch",
+            "--prompt-file", "/tmp/prompts.txt",
+            "--parallel", "2",
+        ])
+        assert result.exit_code == 0

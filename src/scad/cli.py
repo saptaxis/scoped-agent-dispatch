@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import docker
 import yaml
 
 from scad.config import load_config, list_configs, CONFIG_DIR, SCAD_DIR, ScadConfig
+from scad.prompts import parse_prompt_file
 from scad.container import (
     build_image,
     check_claude_auth,
@@ -1116,6 +1118,115 @@ def gc_cmd(force: bool):
         click.echo("  Nothing to clean.")
     elif not force:
         click.echo("\nRun with --force to clean up.")
+
+
+@main.command()
+@click.argument("config_name", shell_complete=_complete_config_names)
+@click.option("--tag", required=True, help="Session tag.")
+@click.option("--prompt-file", required=True, type=click.Path(exists=False), help="Path to ---delimited prompt file.")
+@click.option("--parallel", default=3, type=int, help="Max concurrent jobs (default: 3).")
+@click.option("--fail-fast", is_flag=True, help="Stop queuing on first failure.")
+@click.option("--no-build", is_flag=True, help="Skip image build check.")
+def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
+    """Run parallel headless jobs from a prompt file."""
+    # --- Parse prompts ---
+    try:
+        prompts = parse_prompt_file(Path(prompt_file))
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(2)
+
+    if not prompts:
+        click.echo("[scad] Error: prompt file is empty", err=True)
+        sys.exit(2)
+
+    # --- Load config ---
+    try:
+        config = load_config(config_name)
+    except FileNotFoundError as e:
+        click.echo(f"[scad] Error: {e}", err=True)
+        sys.exit(2)
+
+    # --- Auth check ---
+    valid, hours = check_claude_auth()
+    if not valid:
+        raise click.ClickException("Claude auth expired or missing. Run: claude /login")
+
+    # --- Build if needed ---
+    if not no_build and not image_exists(config):
+        image_tag = f"scad-{config.name}"
+        click.echo(f"[scad] Building image {image_tag}...")
+        with tempfile.TemporaryDirectory() as build_dir:
+            for line in build_image(config, Path(build_dir)):
+                if line.startswith("Step "):
+                    click.echo(f"[scad] {line}")
+        click.echo(f"[scad] Image built: {image_tag}")
+
+    # --- Start session ---
+    try:
+        branch = resolve_branch(config, None, tag)
+        run_id = run_agent(config, branch=branch, tag=tag)
+        log_event(run_id, "start", f"config={config.name} branch={branch} mode=batch")
+    except Exception as e:
+        click.echo(f"[scad] Error starting session: {e}", err=True)
+        sys.exit(2)
+
+    time.sleep(1)
+    click.echo(f"[scad] Batch: {len(prompts)} jobs, parallel={parallel}")
+
+    # --- Common inject kwargs ---
+    add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
+
+    # --- Run jobs in parallel ---
+    results = []  # list of (prompt_idx, job_id, exit_code)
+    failed = False
+
+    def _run_one(idx, prompt_text):
+        job_id, exit_code = inject_job(
+            run_id=run_id,
+            prompt=prompt_text,
+            headless=True,
+            workdir_key=config.workdir_key,
+            add_dirs=add_dirs,
+            dangerously_skip_permissions=config.claude.dangerously_skip_permissions,
+            additional_flags=config.claude.additional_flags,
+            wait=True,
+        )
+        return (idx, job_id, exit_code)
+
+    with ThreadPoolExecutor(max_workers=parallel) as executor:
+        futures = {}
+        for idx, prompt_text in enumerate(prompts):
+            if fail_fast and failed:
+                break
+            future = executor.submit(_run_one, idx, prompt_text)
+            futures[future] = idx
+
+        done_count = 0
+        for future in as_completed(futures):
+            idx, job_id, exit_code = future.result()
+            done_count += 1
+            status_icon = "pass" if exit_code == 0 else "FAIL"
+            click.echo(
+                f"[scad] [{done_count}/{len(prompts)} complete] "
+                f"{job_id} {status_icon} (exit {exit_code})"
+            )
+            results.append((idx, job_id, exit_code))
+            if exit_code != 0 and fail_fast:
+                failed = True
+                executor.shutdown(wait=False, cancel_futures=True)
+                break
+
+    # --- Summary ---
+    passed = sum(1 for _, _, ec in results if ec == 0)
+    failed_count = sum(1 for _, _, ec in results if ec != 0)
+    click.echo()
+    click.echo(f"[scad] Results: {passed} passed, {failed_count} failed")
+    if failed_count:
+        for idx, job_id, ec in results:
+            if ec != 0:
+                click.echo(f"[scad] Failed: {job_id} (exit {ec})")
+    click.echo(f"[scad] Session: {run_id}")
 
 
 @main.command()
