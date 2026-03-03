@@ -915,6 +915,34 @@ def diff_from_source(run_id: str, config: ScadConfig) -> dict[str, str]:
     return results
 
 
+def log_from_source(run_id: str, config: ScadConfig) -> dict[str, str]:
+    """Show git log --oneline between default branch and HEAD for each clone.
+
+    Returns dict of repo_key -> log output string.
+    """
+    workspace = RUNS_DIR / run_id / "workspace"
+    if not workspace.exists():
+        raise FileNotFoundError(f"No workspace found for run: {run_id}")
+
+    results = {}
+    for key, repo_cfg in config.repos.items():
+        clone_path = workspace / key
+        if not clone_path.exists() or clone_path.is_symlink() or not (clone_path / ".git").exists():
+            continue
+
+        default_branch = _detect_default_branch(clone_path) or "main"
+
+        result = subprocess.run(
+            ["git", "-C", str(clone_path), "log", "--oneline",
+             f"origin/{default_branch}..HEAD"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            results[key] = result.stdout.strip()
+
+    return results
+
+
 def config_name_for_run(run_id: str) -> Optional[str]:
     """Extract config name from run ID. Checks events.log first, then heuristic."""
     info = _parse_events_log(run_id)

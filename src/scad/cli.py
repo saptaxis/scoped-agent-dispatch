@@ -28,6 +28,7 @@ from scad.container import (
     create_clones,
     diff_from_source,
     fetch_to_host,
+    log_from_source,
     gc,
     generate_run_id,
     get_all_sessions,
@@ -1403,8 +1404,9 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
 
 @main.command()
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def harvest(run_id: str):
-    """Fetch branches + show diff. The 'what did Claude produce?' command."""
+@click.option("--diff", is_flag=True, help="Show full diff instead of git log.")
+def harvest(run_id: str, diff: bool):
+    """Fetch branches + show summary. The 'what did Claude produce?' command."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
 
@@ -1416,16 +1418,24 @@ def harvest(run_id: str):
     else:
         click.echo(f"[scad] Nothing to fetch for {run_id}")
 
-    # Diff
+    # Summary
     try:
-        diffs = diff_from_source(run_id, config)
-        if diffs:
-            click.echo()
-            for repo, diff_text in diffs.items():
-                click.echo(f"--- {repo} ---")
-                click.echo(diff_text)
+        if diff:
+            diffs = diff_from_source(run_id, config)
+            if diffs:
+                click.echo()
+                for repo, diff_text in diffs.items():
+                    click.echo(f"--- {repo} ---")
+                    click.echo(diff_text)
+        else:
+            logs = log_from_source(run_id, config)
+            if logs:
+                click.echo()
+                for repo, log_text in logs.items():
+                    click.echo(f"--- {repo} ---")
+                    click.echo(log_text)
     except FileNotFoundError:
-        pass  # Clones already cleaned — skip diff
+        pass  # Clones already cleaned — skip
 
 
 @main.command()

@@ -220,34 +220,33 @@ class TestHarvest:
 
     @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
-    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli.log_from_source")
     @patch("scad.cli._config_for_run")
-    def test_harvest_fetches_and_diffs(
-        self, mock_config, mock_diff, mock_fetch, mock_validate
+    def test_harvest_fetches_and_logs(
+        self, mock_config, mock_log, mock_fetch, mock_validate
     ):
-        """harvest runs fetch then diff."""
+        """harvest runs fetch then shows git log."""
         from scad.config import ScadConfig, RepoConfig
         config = ScadConfig(
             name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
         )
         mock_config.return_value = config
         mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
-        mock_diff.return_value = {"code": "+new line"}
+        mock_log.return_value = {"code": "abc1234 first commit"}
 
         runner = CliRunner()
         result = runner.invoke(main, ["harvest", "test-run"])
         assert result.exit_code == 0
         mock_fetch.assert_called_once()
-        mock_diff.assert_called_once()
+        mock_log.assert_called_once()
         assert "Fetched" in result.output
-        assert "+new line" in result.output
 
     @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
-    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli.log_from_source")
     @patch("scad.cli._config_for_run")
     def test_harvest_no_changes(
-        self, mock_config, mock_diff, mock_fetch, mock_validate
+        self, mock_config, mock_log, mock_fetch, mock_validate
     ):
         """harvest with no changes shows message."""
         from scad.config import ScadConfig, RepoConfig
@@ -255,11 +254,55 @@ class TestHarvest:
             name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
         )
         mock_fetch.return_value = []
-        mock_diff.return_value = {}
+        mock_log.return_value = {}
 
         runner = CliRunner()
         result = runner.invoke(main, ["harvest", "test-run"])
         assert result.exit_code == 0
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.log_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_shows_log_not_diff(
+        self, mock_config, mock_log, mock_fetch, mock_validate
+    ):
+        """harvest shows git log --oneline by default."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_log.return_value = {"code": "abc1234 first commit\ndef5678 second commit"}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run"])
+        assert result.exit_code == 0
+        assert "abc1234" in result.output
+        mock_log.assert_called_once()
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_diff_flag_shows_diff(
+        self, mock_config, mock_diff, mock_fetch, mock_validate
+    ):
+        """harvest --diff shows full diff output."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_diff.return_value = {"code": "+new line\n-old line"}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run", "--diff"])
+        assert result.exit_code == 0
+        assert "+new line" in result.output
+        mock_diff.assert_called_once()
 
 
 class TestFinish:
