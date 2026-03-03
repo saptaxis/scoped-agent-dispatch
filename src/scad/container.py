@@ -406,15 +406,6 @@ def create_clones(
             link_path.symlink_to(repo.resolved_path)
             paths[key] = link_path
 
-    # Symlink data mounts into workspace
-    for mount in config.mounts:
-        host_path = Path(mount.host).expanduser().resolve()
-        # Use the last component of the container path as the symlink name
-        link_name = Path(mount.container).name
-        link_path = workspace / link_name
-        if not link_path.exists():
-            link_path.symlink_to(host_path)
-
     # Create persistent run directory for Claude session data
     run_dir = RUNS_DIR / run_id / "claude"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -696,6 +687,11 @@ def run_container(
     gitconfig = Path.home() / ".gitconfig"
     if gitconfig.exists():
         volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
+
+    # Data mounts — direct bind mounts (not managed by scad)
+    for mount in config.mounts:
+        host_path = str(Path(mount.host).expanduser().resolve())
+        volumes[host_path] = {"bind": mount.container, "mode": "rw"}
 
     # Claude-related mounts (credentials, claude dir, claude.json, CLAUDE.md, localtime)
     from scad.claude_config import get_volume_mounts, get_host_timezone

@@ -428,13 +428,15 @@ class TestRunContainerWorkspaceMounts:
                 assert bind_info["bind"] == "/workspace"
 
     @patch("scad.container.docker.from_env")
-    def test_no_separate_data_mounts(self, mock_docker, tmp_path, monkeypatch):
-        """Data mounts are symlinked in workspace, not separate Docker volumes."""
+    def test_data_mounts_are_bind_mounts(self, mock_docker, tmp_path, monkeypatch):
+        """Data mounts from config get their own Docker bind mounts."""
         from scad.config import MountConfig
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
         config = ScadConfig(
             name="test",
             repos={"code": {"path": str(tmp_path / "code"), "workdir": True, "worktree": True}},
-            mounts=[MountConfig(host=str(tmp_path / "data"), container="/data/experiments")],
+            mounts=[MountConfig(host=str(data_dir), container="/data/experiments")],
         )
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
@@ -450,9 +452,9 @@ class TestRunContainerWorkspaceMounts:
             run_container(config, "plan-22", "test-run", worktree_paths)
 
         volumes = mock_client.containers.run.call_args[1]["volumes"]
-        # No mount at /data/experiments — data comes via symlink in workspace
-        for bind_info in volumes.values():
-            assert bind_info["bind"] != "/data/experiments"
+        assert str(data_dir) in volumes
+        assert volumes[str(data_dir)]["bind"] == "/data/experiments"
+        assert volumes[str(data_dir)]["mode"] == "rw"
 
     @patch("scad.container.docker.from_env")
     def test_no_branch_name_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
@@ -1904,8 +1906,8 @@ class TestUnifiedWorkspace:
         assert docs_path.resolve() == (tmp_path / "docs-source").resolve()
 
     @patch("scad.container.subprocess.run")
-    def test_create_clones_symlinks_data_mounts(self, mock_run, sample_config, tmp_path):
-        """Data mounts from config.mounts get symlinked into workspace/."""
+    def test_create_clones_no_data_mount_symlinks(self, mock_run, sample_config, tmp_path):
+        """Data mounts are NOT symlinked into workspace — they get bind mounts instead."""
         from scad.config import MountConfig
         data_dir = tmp_path / "experiments"
         data_dir.mkdir()
@@ -1915,7 +1917,8 @@ class TestUnifiedWorkspace:
             paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
         workspace = tmp_path / "test-run-001" / "workspace"
         symlinks = [p for p in workspace.iterdir() if p.is_symlink()]
-        assert any(s.resolve() == data_dir.resolve() for s in symlinks)
+        # No data mount symlinks — data mounts are handled as Docker bind mounts
+        assert not any(s.resolve() == data_dir.resolve() for s in symlinks)
 
 
 class TestGetImageInfo:
