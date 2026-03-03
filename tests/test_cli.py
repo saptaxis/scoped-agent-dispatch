@@ -887,12 +887,29 @@ class TestEventLogging:
         mock_log.assert_called_once_with("test-run", "attach")
 
 
-class TestCodeRefresh:
+class TestSessionRefresh:
+    """Tests for session refresh (moved from code refresh)."""
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.refresh_credentials")
+    def test_refresh_under_session(self, mock_refresh, mock_validate, runner):
+        """session refresh pushes fresh credentials."""
+        mock_refresh.return_value = 7.5
+        result = runner.invoke(main, ["session", "refresh", "test-run"])
+        assert result.exit_code == 0
+        assert "Credentials refreshed" in result.output
+        mock_refresh.assert_called_once_with("test-run")
+
+    def test_code_refresh_no_longer_exists(self, runner):
+        """code refresh should no longer be a valid command."""
+        result = runner.invoke(main, ["code", "refresh", "test-run"])
+        assert result.exit_code != 0
+
     @patch("scad.cli.validate_run_id")
     @patch("scad.cli.refresh_credentials")
     def test_refresh_shows_time_remaining(self, mock_refresh, mock_validate, runner):
         mock_refresh.return_value = 4.5
-        result = runner.invoke(main, ["code", "refresh", "test-run"])
+        result = runner.invoke(main, ["session", "refresh", "test-run"])
         assert result.exit_code == 0
         assert "4h 30m" in result.output or "refreshed" in result.output.lower()
 
@@ -900,7 +917,7 @@ class TestCodeRefresh:
     @patch("scad.cli.refresh_credentials")
     def test_refresh_expired(self, mock_refresh, mock_validate, runner):
         mock_refresh.side_effect = click.ClickException("Credentials expired")
-        result = runner.invoke(main, ["code", "refresh", "test-run"])
+        result = runner.invoke(main, ["session", "refresh", "test-run"])
         assert result.exit_code != 0
         assert "expired" in result.output.lower()
 

@@ -1029,9 +1029,9 @@ def code_diff(run_id: str):
         click.echo(diff_text)
 
 
-@code.command("refresh")
+@session.command("refresh")
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def code_refresh(run_id: str):
+def session_refresh(run_id: str):
     """Push fresh credentials into a running container."""
     validate_run_id(run_id)
     try:
