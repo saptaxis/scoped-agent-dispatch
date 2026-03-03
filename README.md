@@ -32,55 +32,59 @@ Each session gets:
 
 Sessions are long-lived. Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
 
-Operational visibility: `scad session status` shows running sessions with credential expiry warnings, `scad session info` shows token usage and Claude session history, `scad project status` aggregates across sessions, and `scad gc` cleans orphaned state.
+Operational visibility: `scad status` shows running sessions with credential expiry warnings, `scad session info` shows token usage and Claude session history, `scad status <config>` aggregates across sessions, and `scad gc` cleans orphaned state.
 
 ## CLI
 
 ```bash
+# Top-level composites + status
+scad dispatch <config> --tag <tag> --prompt "..."  # start session + inject work (interactive default)
+scad batch <config> --tag <tag> --prompt-file prompts.txt  # parallel headless jobs from file
+scad harvest <run-id>                              # fetch branches + show diff
+scad finish <run-id>                               # fetch + clean (safe teardown)
+scad status                                        # list running sessions
+scad status --all                                  # full session history
+scad status <config>                               # cross-session project overview
+scad status <config> --cost                        # include cost data (slow)
+
 # Session — container + Claude lifecycle
-scad session start <config> --tag <tag>  # launch session (setup only, no Claude)
+scad session start <config> --tag <tag>            # launch session (setup only, no Claude)
 scad session start <config> --tag <tag> --prompt "..."  # start + immediate inject (sugar)
-scad session start <config> --tag <tag> --prompt "..." --headless  # start + headless inject
-scad session inject <run-id> --prompt "..."  # inject Claude into running session (interactive)
+scad session inject <run-id> --prompt "..."         # inject new Claude process (interactive default)
 scad session inject <run-id> --prompt "..." --headless  # inject headless (fire-and-forget)
-scad session inject <run-id> --prompt "..." --branch feat  # inject on a new branch
-scad session jobs <run-id>               # list injected jobs with status, mode, branch
-scad session stop <run-id>               # stop container (preserves state)
-scad session stop --all [--yes]          # stop all running sessions
-scad session stop --config <name> [--yes]  # stop all sessions for a config
-scad session attach <run-id>             # attach to tmux session inside container
-scad session clean <run-id>              # remove container + clones + session data (destructive)
-scad session clean --all [--yes] [--force]  # clean all sessions (--force includes running)
-scad session clean --config <name> [--yes]  # clean all sessions for a config
-scad session status [--all]              # list sessions (running by default, --all for history)
-scad session logs <run-id>               # read agent output
-scad session info <run-id>               # session dashboard (tokens/turns, cost if available)
+scad session inject <run-id> --prompt "..." --wait  # inject headless + block until done
+scad session inject <run-id> --prompt "..." --wait --tail  # block + stream activity
+scad session send <run-id> "text"                  # type into running interactive Claude
+scad session jobs <run-id>                         # list injected jobs with status
+scad session stop <run-id>                         # stop container (preserves state)
+scad session stop --all [--yes]                    # stop all running sessions
+scad session attach <run-id>                       # attach to tmux session
+scad session clean <run-id>                        # remove container + clones (destructive)
+scad session clean --all [--yes] [--force]         # clean all sessions
+scad session logs <run-id>                         # read agent output
+scad session info <run-id>                         # session dashboard
+scad session refresh <run-id>                      # push fresh credentials into container
 
 # Code — git state between host and clones
-scad code fetch <run-id>                 # snapshot clone branches back to host repos
-scad code sync <run-id>                  # sync host refs + fast-forward main
-scad code sync <run-id> --checkout main  # sync and switch to updated main
-scad code sync <run-id> --no-update-main  # fetch only (skip fast-forward)
-scad code add <run-id> --path <dir> --name <name>  # symlink a directory into workspace
-scad code add <run-id> --path <dir> --name <name> --clone  # git clone into workspace
-scad code remove <run-id> --name <name>  # remove a directory from workspace
-scad code diff <run-id>                  # show diff between session clones and source repos
-scad code refresh <run-id>               # push fresh credentials into running container
+scad code fetch <run-id>                           # fetch branches back to host
+scad code sync <run-id>                            # sync host changes into clones
+scad code diff <run-id>                            # show diff between clones and source
+scad code branch <run-id> <name>                   # create/switch branch in all clones
+scad code add <run-id> --path <dir> --name <name>  # add directory to workspace
+scad code remove <run-id> --name <name>            # remove directory from workspace
 
-# Project
-scad project status <config>             # cross-session project view (tokens/turns)
-scad project status <config> --cost      # include cost data (slow — runs ccusage)
+# Config
+scad config list                                   # list available configs
+scad config new <name> [--edit]                    # scaffold new config
+scad config view <name>                            # print config YAML
+scad config edit <name>                            # open in $EDITOR
+scad config info <name>                            # structured environment summary
+scad config add <path>                             # register external config
+scad config remove <name>                          # unregister config
 
 # Infrastructure
-scad build <config>                      # build/rebuild Docker image (auto-prunes old images)
-scad gc [--force]                        # garbage collection for orphaned state (dry-run by default)
-scad config list                         # list available configs
-scad config new <name> [--edit]          # scaffold a new config from template
-scad config view <name>                  # print config YAML
-scad config edit <name>                  # open config in $EDITOR
-scad config add <path>                   # register external config (symlink)
-scad config remove <name>               # unregister config
-scad config info <name>                # structured environment summary
+scad build <config>                                # build/rebuild Docker image
+scad gc [--force]                                  # garbage collection
 ```
 
 ## Prerequisites
@@ -92,32 +96,34 @@ scad config info <name>                # structured environment summary
 
 ## Install
 
-```bash
-pip install git+https://github.com/saptaxis/scoped-agent-dispatch.git
-```
-
-Development:
+Requires Python 3.11+ and Docker.
 
 ```bash
 git clone https://github.com/saptaxis/scoped-agent-dispatch.git
 cd scoped-agent-dispatch
-pip install -e ".[dev]"
+./install.sh
 ```
 
-Shell completion (zsh):
+The installer creates a Python venv, symlinks `scad` to `~/.local/bin/`, sets up
+shell completions (zsh/bash auto-detected), and registers the Claude Code plugin
+(if installed). Everything is auto-detected — skips gracefully when optional deps
+are missing.
+
+Options:
 
 ```bash
-echo 'eval "$(_SCAD_COMPLETE=zsh_source scad)"' >> ~/.zshrc
-source ~/.zshrc
+./install.sh --home ~/my-scad     # custom SCAD_HOME (default: ~/.scad)
+./install.sh --dry-run            # preview without making changes
+./install.sh --no-plugin          # skip Claude Code plugin registration
+./install.sh --no-completions     # skip shell completion setup
+./install.sh --uninstall          # remove scad (preserves your configs + data)
 ```
 
-Bash:
+Development (editable install — same script, detects repo checkout):
 
 ```bash
-echo 'eval "$(_SCAD_COMPLETE=bash_source scad)"' >> ~/.bashrc
+pip install -e ".[dev]"           # if you prefer manual venv management
 ```
-
-Completes commands, subcommands, run IDs, and config names.
 
 ## Quick start
 
