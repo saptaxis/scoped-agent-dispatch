@@ -216,7 +216,7 @@ class TestDispatch:
 
 
 class TestHarvest:
-    """Tests for scad harvest — fetch + diff composite."""
+    """Tests for scad harvest — fetch + summary composite."""
 
     @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
