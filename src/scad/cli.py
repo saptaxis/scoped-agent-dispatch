@@ -250,7 +250,7 @@ def status(config_name: str, show_all: bool, cost: bool):
                     f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
                     f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
                 )
-                for run in running:
+                for i, run in enumerate(running):
                     started = _relative_time(run["started"]) if run["started"] else "?"
                     clone_dir = SCAD_DIR / "runs" / run["run_id"] / "workspace"
                     clones = "yes" if clone_dir.exists() else "-"
@@ -258,6 +258,17 @@ def status(config_name: str, show_all: bool, cost: bool):
                         f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
                         f"{started:<12} {'running':<12} {clones}"
                     )
+                    jobs = list_jobs(run["run_id"])
+                    if jobs:
+                        for job in jobs:
+                            mode = job.get("mode", "?")
+                            branch = job.get("branch") or ""
+                            job_started = _relative_time(job.get("started", ""))
+                            click.echo(
+                                f"  └ {job['job_id']:<27} {mode:<12} {branch:<25} {job_started}"
+                            )
+                    if i < len(running) - 1:
+                        click.echo()
 
             crashed = get_recently_crashed()
             if crashed:
