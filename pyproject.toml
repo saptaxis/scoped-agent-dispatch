@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scad"
 version = "0.3.0"
-description = "Config-driven CLI for launching Claude Code sessions in isolated Docker containers"
+description = "Thin, config-driven CLI wrapping Docker, git, and Claude Code into repeatable isolated AI coding sessions"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [

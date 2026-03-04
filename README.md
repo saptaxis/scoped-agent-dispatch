@@ -1,6 +1,6 @@
 # scad — scoped agent dispatch
 
-Config-driven CLI for launching Claude Code agents in isolated Docker containers. Define your project once in YAML, then build, dispatch, monitor, and fetch code back — all from the host.
+Thin, config-driven CLI that wraps Docker, git, and Claude Code into a repeatable workflow for isolated AI coding sessions. Define your project once in YAML — scad handles environment setup, session lifecycle, code flow, and operational visibility.
 
 ## The problem
 
@@ -8,31 +8,43 @@ Running Claude Code on your working tree means it touches your files, your branc
 
 ## What this does
 
-`scad` manages the full lifecycle: **config** your project, **build** a Docker image, start a **session** (interactive or headless), manage **code** flow between host and container, and **clean up** when done.
+`scad` manages the full lifecycle: **config** your project, **build** a Docker image, start a **session**, inject **jobs**, manage **code** flow between host and container, and **clean up** when done.
 
 ```bash
 scad config new myproject --edit          # scaffold and edit a config
 scad build myproject                      # build Docker image
-scad session start myproject --tag feat1  # launch isolated Claude session
-scad session attach myproject-feat1-Mar02-1400  # drop into tmux
-# ... work, detach (Ctrl+b d), reattach anytime ...
+scad session start myproject --tag feat1  # start session (environment only)
+scad session inject myproject-feat1-Mar02-1400 --prompt "implement X"  # inject a job
+scad session inject myproject-feat1-Mar02-1400 --prompt "fix tests" --branch hotfix  # another job, different branch
+scad code add myproject-feat1-Mar02-1400 --path ~/data --name data  # update workspace anytime
+scad status                                     # see sessions and their jobs
+scad session logs myproject-feat1-Mar02-1400 --job job-001  # what did a job do?
 scad code fetch myproject-feat1-Mar02-1400      # fetch branches back to host
-scad session clean myproject-feat1-Mar02-1400   # tear down when done
+scad session clean myproject-feat1-Mar02-1400   # tear down
 ```
+
+Composites combine primitives for common workflows:
+
+```bash
+scad dispatch myproject --tag feat1 --prompt "implement X"  # build + start + inject
+scad dispatch myproject --tag feat1 --plan plan.md          # same, but from a plan file
+scad harvest myproject-feat1-Mar02-1400                     # fetch + show git log
+scad batch myproject --tag exp --prompt-file prompts.txt     # parallel headless jobs
+scad finish myproject-feat1-Mar02-1400                      # fetch + clean
+```
+
+A **session** is a long-lived container for a project. Start it once, then inject as many **jobs** as you need — each job is a Claude process (interactive or headless) that can target its own branch. Update the workspace, add repos or data mounts, push fresh credentials — all while the session runs.
 
 Each session gets:
 - **Its own container** with a baked Python environment
-- **Its own git branches** cloned from your local repos
-- **Shared data mounts** for experiment I/O
+- **Isolated git clones** from your local repos — the host repo is never touched
+- **Shared data mounts** for bidirectional host/container I/O
 - **Full `--dangerously-skip-permissions`** since it's isolated
 - **Persistent Claude session data** across stop/restart
 - **Pre-configured plugins** active from the first prompt
-- **Host timezone** inherited (git commits match your clock)
-- **Injection model** — start a session once, then inject Claude processes via `docker exec` (interactive or headless, with optional `--branch`)
+Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
 
-Sessions are long-lived. Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
-
-Operational visibility: `scad status` shows running sessions with credential expiry warnings, `scad session info` shows token usage and Claude session history, `scad status <config>` aggregates across sessions, and `scad gc` cleans orphaned state.
+Operational visibility: `scad status` shows running sessions and their jobs, `scad session info` shows token usage and Claude session history, `scad status <config>` aggregates across sessions, and `scad gc` cleans orphaned state.
 
 ## CLI
 
