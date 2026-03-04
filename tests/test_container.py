@@ -1995,3 +1995,32 @@ class TestGetRecentlyCrashed:
 
         result = get_recently_crashed()
         assert result == []
+
+
+class TestLogFromSource:
+    """Tests for log_from_source — git log --oneline for harvest."""
+
+    @patch("scad.container.subprocess.run")
+    def test_log_from_source_returns_oneline(self, mock_run, tmp_path):
+        from scad.container import log_from_source
+        from scad.config import ScadConfig, RepoConfig
+
+        workspace = tmp_path / "test-run" / "workspace" / "code"
+        workspace.mkdir(parents=True)
+        (workspace / ".git").mkdir()
+
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+
+        mock_run.return_value = MagicMock(stdout="abc1234 first commit\ndef5678 second commit\n")
+
+        with patch("scad.container.RUNS_DIR", tmp_path):
+            result = log_from_source("test-run", config)
+
+        assert "code" in result
+        assert "abc1234" in result["code"]
+        # Last call should be the git log command (earlier calls are _detect_default_branch)
+        cmd = mock_run.call_args_list[-1][0][0]
+        assert "log" in cmd
+        assert "--oneline" in cmd

@@ -28,6 +28,7 @@ from scad.container import (
     create_clones,
     diff_from_source,
     fetch_to_host,
+    log_from_source,
     gc,
     generate_run_id,
     get_all_sessions,
@@ -249,7 +250,7 @@ def status(config_name: str, show_all: bool, cost: bool):
                     f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
                     f"{'STARTED':<12} {'CONTAINER':<12} {'CLONES'}"
                 )
-                for run in running:
+                for i, run in enumerate(running):
                     started = _relative_time(run["started"]) if run["started"] else "?"
                     clone_dir = SCAD_DIR / "runs" / run["run_id"] / "workspace"
                     clones = "yes" if clone_dir.exists() else "-"
@@ -257,6 +258,17 @@ def status(config_name: str, show_all: bool, cost: bool):
                         f"{run['run_id']:<30} {run['config']:<12} {run['branch']:<25} "
                         f"{started:<12} {'running':<12} {clones}"
                     )
+                    jobs = list_jobs(run["run_id"])
+                    if jobs:
+                        for job in jobs:
+                            mode = job.get("mode", "?")
+                            branch = job.get("branch") or ""
+                            job_started = _relative_time(job.get("started", ""))
+                            click.echo(
+                                f"  └ {job['job_id']:<27} {mode:<12} {branch:<25} {job_started}"
+                            )
+                    if i < len(running) - 1:
+                        click.echo()
 
             crashed = get_recently_crashed()
             if crashed:
@@ -662,21 +674,37 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
         click.echo(f"[scad] {not_found_msg}", err=True)
         sys.exit(1)
 
-    # --job without --stream: parse stream.jsonl and show final result
+    # --job without --stream: human-readable activity summary
     if job and not stream:
         import json as _json
+        lines_out = []
+        result_text = None
+        is_error = False
         for line in log_path.read_text().splitlines():
             try:
                 record = _json.loads(line)
             except _json.JSONDecodeError:
                 continue
+            # Tool activity
+            for tl in _format_tool_line(record):
+                lines_out.append(tl)
+            # Final result
             if record.get("type") == "result":
-                if record.get("is_error"):
-                    click.echo(f"[scad] Job failed: {record.get('result', 'unknown error')}", err=True)
-                else:
-                    click.echo(record.get("result", ""))
-                return
-        click.echo("[scad] Job still running (no result yet).", err=True)
+                is_error = record.get("is_error", False)
+                result_text = record.get("result", "")
+
+        if lines_out:
+            for ln in lines_out:
+                click.echo(ln)
+            click.echo()
+
+        if result_text is not None:
+            if is_error:
+                click.echo(f"[scad] Job failed: {result_text}", err=True)
+            else:
+                click.echo(f"[scad] Result: {result_text}")
+        else:
+            click.echo("[scad] Job still running (no result yet).", err=True)
         return
 
     if follow:
@@ -1241,15 +1269,29 @@ def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("--tag", required=True, help="Session tag.")
-@click.option("--prompt", required=True, help="Prompt to send to Claude.")
+@click.option("--prompt", default=None, help="Prompt to send to Claude.")
+@click.option("--plan", "plan_path", default=None, type=click.Path(exists=True), help="Plan file — auto-generates execution prompt.")
 @click.option("--no-wait", is_flag=True, help="Fire-and-forget (don't block).")
 @click.option("--headless", is_flag=True, help="Headless mode (claude -p). Default is interactive.")
 @click.option("--attach", is_flag=True, help="Attach after interactive inject.")
 @click.option("--fetch", is_flag=True, help="Auto-fetch results after completion (implies --headless --wait).")
 @click.option("--no-build", is_flag=True, help="Skip image build check.")
 @click.option("--tail", is_flag=True, help="Stream Claude activity during wait.")
-def dispatch(config_name, tag, prompt, no_wait, headless, attach, fetch, no_build, tail):
+def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fetch, no_build, tail):
     """Start a session and dispatch work. Composites: build -> start -> inject."""
+    # --- Plan/prompt resolution ---
+    if plan_path and prompt:
+        raise click.ClickException("--plan and --prompt are mutually exclusive.")
+    if not plan_path and not prompt:
+        raise click.ClickException("Either --prompt or --plan is required.")
+    if plan_path:
+        plan_text = Path(plan_path).read_text()
+        prompt = (
+            f"Use the executing-plans skill to implement this plan. "
+            f"Work task-by-task, in order. Ask clarifying questions upfront before starting. "
+            f"Execute the full plan.\n\n{plan_text}"
+        )
+
     # --- Flag validation ---
     if fetch and no_wait:
         raise click.ClickException("--fetch and --no-wait are mutually exclusive.")
@@ -1389,8 +1431,9 @@ def dispatch(config_name, tag, prompt, no_wait, headless, attach, fetch, no_buil
 
 @main.command()
 @click.argument("run_id", shell_complete=_complete_run_ids)
-def harvest(run_id: str):
-    """Fetch branches + show diff. The 'what did Claude produce?' command."""
+@click.option("--diff", is_flag=True, help="Show full diff instead of git log.")
+def harvest(run_id: str, diff: bool):
+    """Fetch branches + show summary. The 'what did Claude produce?' command."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
 
@@ -1402,16 +1445,24 @@ def harvest(run_id: str):
     else:
         click.echo(f"[scad] Nothing to fetch for {run_id}")
 
-    # Diff
+    # Summary
     try:
-        diffs = diff_from_source(run_id, config)
-        if diffs:
-            click.echo()
-            for repo, diff_text in diffs.items():
-                click.echo(f"--- {repo} ---")
-                click.echo(diff_text)
+        if diff:
+            diffs = diff_from_source(run_id, config)
+            if diffs:
+                click.echo()
+                for repo, diff_text in diffs.items():
+                    click.echo(f"--- {repo} ---")
+                    click.echo(diff_text)
+        else:
+            logs = log_from_source(run_id, config)
+            if logs:
+                click.echo()
+                for repo, log_text in logs.items():
+                    click.echo(f"--- {repo} ---")
+                    click.echo(log_text)
     except FileNotFoundError:
-        pass  # Clones already cleaned — skip diff
+        pass  # Clones already cleaned — skip
 
 
 @main.command()

@@ -196,6 +196,64 @@ class TestSessionLogs:
         assert "No stream log" in result.output
 
 
+class TestSessionLogsHumanReadable:
+    """Tests for session logs --job human-readable output."""
+
+    @patch("scad.cli.validate_run_id")
+    def test_job_logs_show_tool_activity(self, mock_validate, tmp_path):
+        """session logs --job shows condensed tool activity."""
+        import json
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        records = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/workspace/code/main.py"}}
+            ]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Edit", "input": {"file_path": "/workspace/code/main.py"}}
+            ]}},
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Bash", "input": {"command": "pytest tests/ -v"}}
+            ]}},
+            {"type": "result", "is_error": False, "result": "All done."},
+        ]
+        stream_file = logs_dir / "test-run-job-001.stream.jsonl"
+        stream_file.write_text("\n".join(json.dumps(r) for r in records))
+
+        runner = CliRunner()
+        with patch("scad.cli.SCAD_DIR", tmp_path):
+            result = runner.invoke(main, ["session", "logs", "test-run", "--job", "test-run-job-001"])
+
+        assert result.exit_code == 0
+        assert "Reading" in result.output
+        assert "Editing" in result.output
+        assert "pytest" in result.output
+        assert "All done" in result.output
+
+    @patch("scad.cli.validate_run_id")
+    def test_job_logs_still_running(self, mock_validate, tmp_path):
+        """session logs --job with no result record shows 'still running'."""
+        import json
+        logs_dir = tmp_path / "logs"
+        logs_dir.mkdir()
+
+        records = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "name": "Read", "input": {"file_path": "/workspace/code/main.py"}}
+            ]}},
+        ]
+        stream_file = logs_dir / "test-run-job-001.stream.jsonl"
+        stream_file.write_text("\n".join(json.dumps(r) for r in records))
+
+        runner = CliRunner()
+        with patch("scad.cli.SCAD_DIR", tmp_path):
+            result = runner.invoke(main, ["session", "logs", "test-run", "--job", "test-run-job-001"])
+
+        assert "Reading" in result.output
+        assert "still running" in result.output.lower() or "no result" in result.output.lower()
+
+
 class TestSessionStatus:
     @patch("scad.cli.list_scad_containers")
     @patch("scad.cli.get_recently_crashed")

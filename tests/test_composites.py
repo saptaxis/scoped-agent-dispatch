@@ -130,6 +130,65 @@ class TestDispatch:
         assert result.exit_code != 0
 
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_plan_generates_prompt(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, tmp_path
+    ):
+        """dispatch --plan reads file and generates execution prompt."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-test-Mar03-1200"
+        mock_inject.return_value = "demo-test-Mar03-1200-job-001"
+
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# My Plan\n\n### Task 1: Do stuff\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test", "--plan", str(plan_file),
+        ])
+        assert result.exit_code == 0
+        mock_inject.assert_called_once()
+        _, kwargs = mock_inject.call_args
+        prompt = kwargs["prompt"]
+        assert "executing-plans" in prompt
+        assert str(plan_file) in prompt or "My Plan" in prompt
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_plan_and_prompt_mutually_exclusive(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, tmp_path
+    ):
+        """dispatch --plan and --prompt cannot be used together."""
+        plan_file = tmp_path / "plan.md"
+        plan_file.write_text("# Plan\n")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test",
+            "--plan", str(plan_file), "--prompt", "also this",
+        ])
+        assert result.exit_code != 0
+
+    def test_dispatch_plan_file_not_found(self):
+        """dispatch --plan with missing file errors."""
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test",
+            "--plan", "/nonexistent/plan.md",
+        ])
+        assert result.exit_code != 0
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.image_exists", return_value=False)
     @patch("scad.cli.build_image")
     @patch("scad.cli.run_agent")
@@ -157,38 +216,37 @@ class TestDispatch:
 
 
 class TestHarvest:
-    """Tests for scad harvest — fetch + diff composite."""
+    """Tests for scad harvest — fetch + summary composite."""
 
     @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
-    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli.log_from_source")
     @patch("scad.cli._config_for_run")
-    def test_harvest_fetches_and_diffs(
-        self, mock_config, mock_diff, mock_fetch, mock_validate
+    def test_harvest_fetches_and_logs(
+        self, mock_config, mock_log, mock_fetch, mock_validate
     ):
-        """harvest runs fetch then diff."""
+        """harvest runs fetch then shows git log."""
         from scad.config import ScadConfig, RepoConfig
         config = ScadConfig(
             name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
         )
         mock_config.return_value = config
         mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
-        mock_diff.return_value = {"code": "+new line"}
+        mock_log.return_value = {"code": "abc1234 first commit"}
 
         runner = CliRunner()
         result = runner.invoke(main, ["harvest", "test-run"])
         assert result.exit_code == 0
         mock_fetch.assert_called_once()
-        mock_diff.assert_called_once()
+        mock_log.assert_called_once()
         assert "Fetched" in result.output
-        assert "+new line" in result.output
 
     @patch("scad.cli.validate_run_id")
     @patch("scad.cli.fetch_to_host")
-    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli.log_from_source")
     @patch("scad.cli._config_for_run")
     def test_harvest_no_changes(
-        self, mock_config, mock_diff, mock_fetch, mock_validate
+        self, mock_config, mock_log, mock_fetch, mock_validate
     ):
         """harvest with no changes shows message."""
         from scad.config import ScadConfig, RepoConfig
@@ -196,11 +254,55 @@ class TestHarvest:
             name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
         )
         mock_fetch.return_value = []
-        mock_diff.return_value = {}
+        mock_log.return_value = {}
 
         runner = CliRunner()
         result = runner.invoke(main, ["harvest", "test-run"])
         assert result.exit_code == 0
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.log_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_shows_log_not_diff(
+        self, mock_config, mock_log, mock_fetch, mock_validate
+    ):
+        """harvest shows git log --oneline by default."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_log.return_value = {"code": "abc1234 first commit\ndef5678 second commit"}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run"])
+        assert result.exit_code == 0
+        assert "abc1234" in result.output
+        mock_log.assert_called_once()
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.diff_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_diff_flag_shows_diff(
+        self, mock_config, mock_diff, mock_fetch, mock_validate
+    ):
+        """harvest --diff shows full diff output."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        mock_fetch.return_value = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_diff.return_value = {"code": "+new line\n-old line"}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run", "--diff"])
+        assert result.exit_code == 0
+        assert "+new line" in result.output
+        mock_diff.assert_called_once()
 
 
 class TestFinish:

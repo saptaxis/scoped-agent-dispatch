@@ -194,11 +194,15 @@ def inject_job(
         container.exec_run(
             ["bash", "-c", f"cat > {launcher} <<'SCADEOF'\n#!/bin/bash\n{script}\nSCADEOF\nchmod +x {launcher}"],
         )
-        # Create tmux window running the launcher
-        container.exec_run(
+        # Create tmux window running the launcher — run synchronously to catch errors
+        result = container.exec_run(
             ["bash", "-c", f"tmux new-window -t scad: -n {job_id} {launcher}"],
-            detach=True,
         )
+        if result.exit_code != 0:
+            raise RuntimeError(
+                f"tmux new-window failed (exit {result.exit_code}): "
+                f"{result.output.decode() if result.output else 'no output'}"
+            )
 
     # Write job metadata
     jobs_dir = RUNS_DIR / run_id / "jobs"
@@ -907,6 +911,34 @@ def diff_from_source(run_id: str, config: ScadConfig) -> dict[str, str]:
         )
         if result.stdout.strip():
             results[key] = result.stdout
+
+    return results
+
+
+def log_from_source(run_id: str, config: ScadConfig) -> dict[str, str]:
+    """Show git log --oneline between default branch and HEAD for each clone.
+
+    Returns dict of repo_key -> log output string.
+    """
+    workspace = RUNS_DIR / run_id / "workspace"
+    if not workspace.exists():
+        raise FileNotFoundError(f"No workspace found for run: {run_id}")
+
+    results = {}
+    for key, repo_cfg in config.repos.items():
+        clone_path = workspace / key
+        if not clone_path.exists() or clone_path.is_symlink() or not (clone_path / ".git").exists():
+            continue
+
+        default_branch = _detect_default_branch(clone_path) or "main"
+
+        result = subprocess.run(
+            ["git", "-C", str(clone_path), "log", "--oneline",
+             f"origin/{default_branch}..HEAD"],
+            capture_output=True, text=True,
+        )
+        if result.stdout.strip():
+            results[key] = result.stdout.strip()
 
     return results
 

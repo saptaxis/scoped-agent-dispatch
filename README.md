@@ -39,8 +39,10 @@ Operational visibility: `scad status` shows running sessions with credential exp
 ```bash
 # Top-level composites + status
 scad dispatch <config> --tag <tag> --prompt "..."  # start session + inject work (interactive default)
+scad dispatch <config> --tag <tag> --plan plan.md  # start session + inject from plan file
 scad batch <config> --tag <tag> --prompt-file prompts.txt  # parallel headless jobs from file
-scad harvest <run-id>                              # fetch branches + show diff
+scad harvest <run-id>                              # fetch branches + show summary
+scad harvest <run-id> --diff                       # fetch + show full diff
 scad finish <run-id>                               # fetch + clean (safe teardown)
 scad status                                        # list running sessions
 scad status --all                                  # full session history
@@ -165,6 +167,12 @@ scad session start my-project --tag initial # creates clones, starts container
 scad session attach my-project-initial-Mar02-1400  # drops into tmux with Claude
 ```
 
+Or dispatch from a plan file:
+
+```bash
+scad dispatch my-project --tag implement --plan docs/plans/feature.md
+```
+
 ### 3. Work
 
 Inside the container, Claude has access to all repos and mounts. Detach with `Ctrl+b d` — container keeps running.
@@ -205,6 +213,8 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 | `claude.dangerously_skip_permissions` | no | Skip permission prompts (default: `false`) |
 | `claude.plugins` | no | Claude Code plugins to bootstrap at startup |
 | `claude.claude_md` | no | Host path to CLAUDE.md to mount into container |
+
+Config files must use the `.yml` extension (not `.yaml`).
 
 ## How it works
 
