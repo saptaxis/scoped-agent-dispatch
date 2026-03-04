@@ -15,7 +15,7 @@ scad config new myproject --edit          # scaffold and edit a config
 scad build myproject                      # build Docker image
 scad session start myproject --tag feat1  # start session (environment only)
 scad session inject myproject-feat1-Mar02-1400 --prompt "implement X"  # inject a job
-scad session inject myproject-feat1-Mar02-1400 --prompt "fix tests" --branch hotfix  # another job, different branch
+scad session inject myproject-feat1-Mar02-1400 --prompt "fix tests"   # another job, same session
 scad code add myproject-feat1-Mar02-1400 --path ~/data --name data  # update workspace anytime
 scad status                                     # see sessions and their jobs
 scad session logs myproject-feat1-Mar02-1400 --job job-001  # what did a job do?
@@ -45,6 +45,38 @@ Each session gets:
 Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
 
 Operational visibility: `scad status` shows running sessions and their jobs, `scad session info` shows token usage and Claude session history, `scad status <config>` aggregates across sessions, and `scad gc` cleans orphaned state.
+
+## Install
+
+Requires Python 3.11+, Git, and Docker.
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/saptaxis/scoped-agent-dispatch/main/install-remote.sh | bash
+```
+
+Or clone manually:
+
+```bash
+git clone https://github.com/saptaxis/scoped-agent-dispatch.git
+cd scoped-agent-dispatch
+./install.sh
+```
+
+Options:
+
+```bash
+# Remote installer
+curl -fsSL ... | bash -s -- --prefix ~/my-scad-src  # custom clone location (default: ~/.scad/src)
+curl -fsSL ... | bash -s -- --no-plugin              # skip Claude Code plugin
+
+# Local installer (from repo checkout)
+./install.sh --home ~/my-scad     # custom SCAD_HOME (default: ~/.scad)
+./install.sh --dry-run            # preview without making changes
+./install.sh --no-plugin          # skip Claude Code plugin registration
+./install.sh --no-completions     # skip shell completion setup
+./install.sh --uninstall          # remove scad (preserves your configs + data)
+```
+
 
 ## CLI
 
@@ -99,44 +131,6 @@ scad config remove <name>                          # unregister config
 # Infrastructure
 scad build <config>                                # build/rebuild Docker image
 scad gc [--force]                                  # garbage collection
-```
-
-## Prerequisites
-
-- **Docker** — installed and running ([install](https://docs.docker.com/engine/install/))
-- **Python >= 3.11**
-- **Git**
-- **Claude Code subscription or API key**
-
-## Install
-
-Requires Python 3.11+ and Docker.
-
-```bash
-git clone https://github.com/saptaxis/scoped-agent-dispatch.git
-cd scoped-agent-dispatch
-./install.sh
-```
-
-The installer creates a Python venv, symlinks `scad` to `~/.local/bin/`, sets up
-shell completions (zsh/bash auto-detected), and registers the Claude Code plugin
-(if installed). Everything is auto-detected — skips gracefully when optional deps
-are missing.
-
-Options:
-
-```bash
-./install.sh --home ~/my-scad     # custom SCAD_HOME (default: ~/.scad)
-./install.sh --dry-run            # preview without making changes
-./install.sh --no-plugin          # skip Claude Code plugin registration
-./install.sh --no-completions     # skip shell completion setup
-./install.sh --uninstall          # remove scad (preserves your configs + data)
-```
-
-Development (editable install — same script, detects repo checkout):
-
-```bash
-pip install -e ".[dev]"           # if you prefer manual venv management
 ```
 
 ## Quick start
@@ -208,6 +202,18 @@ git merge scad-my-project-initial-Mar02-1400
 scad session clean my-project-initial-Mar02-1400  # removes container, clones, session data
 ```
 
+## How it works
+
+1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
+2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/runs/<run-id>/workspace/`. Non-worktree repos and data mounts are symlinked.
+3. **Branch** — Auto-generates branch name (`scad-{config}-{tag}-MonDD-HHMM`) and checks it out in each clone.
+4. **Configure** — `claude_config.py` centralizes all Claude Code configuration: `settings.json` (permissions, `attribution`, `enabledPlugins`), `.claude.json` (persisted across sessions via bind-mount from the run dir), host timezone inheritance (IANA `TZ` env var + `/etc/localtime` mount).
+5. **Run** — Starts container detached. Entrypoint performs setup only (git config, tmux init) — no Claude launch.
+6. **Inject** — `scad session inject` runs Claude inside the container via `docker exec`. Each injection is a tracked job with its own mode (interactive/headless), optional branch, and log stream.
+7. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Job metadata lives in `~/.scad/runs/<run-id>/jobs/`. Survives stop/restart.
+8. **Fetch** — `scad code fetch` discovers all branches across clones and snapshots them back to host repos.
+9. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
+
 ## Config reference
 
 | Field | Required | Description |
@@ -227,44 +233,6 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 | `claude.claude_md` | no | Host path to CLAUDE.md to mount into container |
 
 Config files must use the `.yml` extension (not `.yaml`).
-
-## How it works
-
-1. **Build** — Renders a Dockerfile from your config (Python venv, deps, Claude Code, non-root user) and builds the image. Cached after first build.
-2. **Clone** — Creates `git clone --local` of each repo on the host at `~/.scad/runs/<run-id>/workspace/`. Non-worktree repos and data mounts are symlinked.
-3. **Branch** — Auto-generates branch name (`scad-{config}-{tag}-MonDD-HHMM`) and checks it out in each clone.
-4. **Configure** — `claude_config.py` centralizes all Claude Code configuration: `settings.json` (permissions, `attribution`, `enabledPlugins`), `.claude.json` (persisted across sessions via bind-mount from the run dir), host timezone inheritance (IANA `TZ` env var + `/etc/localtime` mount).
-5. **Run** — Starts container detached. Entrypoint performs setup only (git config, tmux init) — no Claude launch.
-6. **Inject** — `scad session inject` runs Claude inside the container via `docker exec`. Each injection is a tracked job with its own mode (interactive/headless), optional branch, and log stream.
-7. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Job metadata lives in `~/.scad/runs/<run-id>/jobs/`. Survives stop/restart.
-8. **Fetch** — `scad code fetch` discovers all branches across clones and snapshots them back to host repos.
-9. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
-
-## Architecture
-
-| Module | Responsibility |
-|--------|---------------|
-| `container.py` | Docker container lifecycle (create, start, stop, clean) |
-| `claude_config.py` | Claude Code configuration — settings.json, mounts, timezone |
-| `config.py` | YAML config loading and validation |
-| `cli.py` | Click CLI commands and argument handling |
-
-## Data layout
-
-```
-~/.scad/
-  configs/                          # project YAML configs
-    my-project.yml
-  runs/<run-id>/                    # one directory = one session
-    workspace/                      # single bind mount into container
-      my-project-code/              # git clone (workdir repo)
-      my-project-docs/              # git clone or symlink (add_dir repo)
-    jobs/                           # per-job metadata (one file per inject)
-      <job-id>.json
-    claude/                         # mounted as container ~/.claude/
-    claude.json                     # mounted as container ~/.claude.json
-    events.log                      # append-only event history
-```
 
 ## License
 
