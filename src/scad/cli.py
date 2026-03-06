@@ -86,6 +86,42 @@ def _complete_run_ids(ctx, param, incomplete):
     )
 
 
+def _complete_running_sessions(ctx, param, incomplete):
+    """Shell completion for running sessions only (attach, inject, send, etc.)."""
+    try:
+        running = list_scad_containers()
+    except Exception:
+        return _complete_run_ids(ctx, param, incomplete)
+    return sorted(
+        s["run_id"] for s in running
+        if s["run_id"].startswith(incomplete)
+    )
+
+
+def _complete_sessions_with_clones(ctx, param, incomplete):
+    """Shell completion for sessions that have clones (code fetch, harvest, etc.)."""
+    runs_dir = SCAD_DIR / "runs"
+    if not runs_dir.exists():
+        return []
+    return sorted(
+        d.name for d in runs_dir.iterdir()
+        if d.is_dir() and d.name.startswith(incomplete)
+        and ((d / "workspace").exists() or (d / "worktrees").exists())
+    )
+
+
+def _complete_cleanable_sessions(ctx, param, incomplete):
+    """Shell completion for sessions that can be cleaned (not already cleaned)."""
+    runs_dir = SCAD_DIR / "runs"
+    if not runs_dir.exists():
+        return []
+    return sorted(
+        d.name for d in runs_dir.iterdir()
+        if d.is_dir() and d.name.startswith(incomplete)
+        and any(d.iterdir())  # not empty = not fully cleaned
+    )
+
+
 def _complete_config_names(ctx, param, incomplete):
     """Shell completion for config names."""
     return sorted(n for n in list_configs() if n.startswith(incomplete))
@@ -721,7 +757,7 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
 
 
 @session.command("stop")
-@click.argument("run_id", required=False, shell_complete=_complete_run_ids)
+@click.argument("run_id", required=False, shell_complete=_complete_running_sessions)
 @click.option("--all", "stop_all", is_flag=True, help="Stop all running sessions.")
 @click.option("--config", "config_name", help="Stop all sessions for this config.")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
@@ -761,7 +797,7 @@ def session_stop(run_id, stop_all, config_name, yes):
 
 
 @session.command("attach")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_running_sessions)
 def session_attach(run_id: str):
     """Attach to an interactive tmux session."""
     validate_run_id(run_id)
@@ -797,7 +833,7 @@ def session_attach(run_id: str):
 
 
 @session.command("inject")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_running_sessions)
 @click.option("--prompt", required=True, help="Prompt to send to Claude.")
 @click.option("--headless", is_flag=True, help="Fire-and-forget mode (claude -p).")
 @click.option("--branch", default=None, help="Create/checkout branch before running.")
@@ -915,7 +951,7 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: 
 
 
 @session.command("jobs")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_running_sessions)
 def session_jobs(run_id: str):
     """List jobs in a session."""
     validate_run_id(run_id)
@@ -934,7 +970,7 @@ def session_jobs(run_id: str):
 
 
 @session.command("send")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_running_sessions)
 @click.argument("text")
 @click.option("--job", "job_id", default=None, help="Target a specific job (required if multiple interactive jobs).")
 def session_send(run_id: str, text: str, job_id: str):
@@ -949,7 +985,7 @@ def session_send(run_id: str, text: str, job_id: str):
 
 
 @session.command("clean")
-@click.argument("run_id", required=False, shell_complete=_complete_run_ids)
+@click.argument("run_id", required=False, shell_complete=_complete_cleanable_sessions)
 @click.option("--all", "clean_all", is_flag=True, help="Clean all sessions.")
 @click.option("--config", "config_name", help="Clean all sessions for this config.")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
@@ -994,7 +1030,7 @@ def _config_for_run(run_id: str) -> "ScadConfig":
 
 
 @code.command("fetch")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 def code_fetch(run_id: str):
     """Fetch branches from clones back to source repos."""
     validate_run_id(run_id)
@@ -1012,7 +1048,7 @@ def code_fetch(run_id: str):
 
 
 @code.command("sync")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--checkout", default=None, help="Checkout this branch after sync.")
 @click.option("--no-update-main", is_flag=True, help="Skip fast-forwarding clone's main.")
 def code_sync(run_id: str, checkout: str, no_update_main: bool):
@@ -1037,7 +1073,7 @@ def code_sync(run_id: str, checkout: str, no_update_main: bool):
 
 
 @code.command("diff")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 def code_diff(run_id: str):
     """Show diff between session clones and source repos."""
     validate_run_id(run_id)
@@ -1059,7 +1095,7 @@ def code_diff(run_id: str):
 
 
 @code.command("branch")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.argument("branch_name")
 def code_branch(run_id: str, branch_name: str):
     """Create and switch to a branch in all clone repos."""
@@ -1080,7 +1116,7 @@ def code_branch(run_id: str, branch_name: str):
 
 
 @session.command("refresh")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_running_sessions)
 def session_refresh(run_id: str):
     """Push fresh credentials into a running container."""
     validate_run_id(run_id)
@@ -1095,7 +1131,7 @@ def session_refresh(run_id: str):
 
 
 @code.command("add")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--path", required=True, help="Host path to add.")
 @click.option("--name", required=True, help="Name in workspace/.")
 @click.option("--clone", is_flag=True, help="Git clone instead of symlink.")
@@ -1112,7 +1148,7 @@ def code_add(run_id: str, path: str, name: str, clone: bool):
 
 
 @code.command("remove")
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--name", required=True, help="Name to remove from workspace/.")
 def code_remove(run_id: str, name: str):
     """Remove a directory from a session's workspace."""
@@ -1279,18 +1315,11 @@ def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
 @click.option("--tail", is_flag=True, help="Stream Claude activity during wait.")
 def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fetch, no_build, tail):
     """Start a session and dispatch work. Composites: build -> start -> inject."""
-    # --- Plan/prompt resolution ---
+    # --- Plan/prompt validation ---
     if plan_path and prompt:
         raise click.ClickException("--plan and --prompt are mutually exclusive.")
     if not plan_path and not prompt:
         raise click.ClickException("Either --prompt or --plan is required.")
-    if plan_path:
-        plan_text = Path(plan_path).read_text()
-        prompt = (
-            f"Use the executing-plans skill to implement this plan. "
-            f"Work task-by-task, in order. Ask clarifying questions upfront before starting. "
-            f"Execute the full plan.\n\n{plan_text}"
-        )
 
     # --- Flag validation ---
     if fetch and no_wait:
@@ -1355,6 +1384,28 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
 
     # --- Wait for entrypoint setup ---
     time.sleep(1)
+
+    # --- Plan file resolution (after workspace exists) ---
+    if plan_path:
+        plan_host = Path(plan_path).resolve()
+        container_path = None
+        for key, repo in config.repos.items():
+            try:
+                relative = plan_host.relative_to(repo.resolved_path)
+                container_path = f"/workspace/{key}/{relative}"
+                break
+            except ValueError:
+                continue
+        if not container_path:
+            raise click.ClickException(
+                f"Plan file {plan_host} is not inside any configured repo. "
+                f"Add the repo containing this plan to your config."
+            )
+        prompt = (
+            f"Load the executing-plans skill. Execute the plan at {container_path}. "
+            f"Use subagent-driven development. Get through all tasks without waiting for feedback. "
+            f"If you have any questions, ask upfront. Otherwise, continue and execute till the end."
+        )
 
     # --- Inject work ---
     add_dirs = [key for key, repo in config.repos.items() if repo.add_dir]
@@ -1430,7 +1481,7 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
 
 
 @main.command()
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--diff", is_flag=True, help="Show full diff instead of git log.")
 def harvest(run_id: str, diff: bool):
     """Fetch branches + show summary. The 'what did Claude produce?' command."""
@@ -1466,7 +1517,7 @@ def harvest(run_id: str, diff: bool):
 
 
 @main.command()
-@click.argument("run_id", shell_complete=_complete_run_ids)
+@click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--no-fetch", is_flag=True, help="Skip fetching (risk losing unfetched branches).")
 @click.option("--keep-session", is_flag=True, help="Keep the session after fetching.")
 @click.option("--force", is_flag=True, help="Clean even if session is running.")
