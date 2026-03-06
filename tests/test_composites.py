@@ -137,28 +137,60 @@ class TestDispatch:
     def test_dispatch_plan_generates_prompt(
         self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, tmp_path
     ):
-        """dispatch --plan reads file and generates execution prompt."""
+        """dispatch --plan mounts file and generates execution prompt with container path."""
         from scad.config import ScadConfig, RepoConfig
         config = ScadConfig(
-            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+            name="demo", repos={"code": RepoConfig(path=str(tmp_path / "code"), workdir=True)}
         )
+        (tmp_path / "code").mkdir()
         mock_load.return_value = config
-        mock_run_agent.return_value = "demo-test-Mar03-1200"
+        run_id = "demo-test-Mar03-1200"
+        mock_run_agent.return_value = run_id
         mock_inject.return_value = "demo-test-Mar03-1200-job-001"
 
-        plan_file = tmp_path / "plan.md"
+        # Plan inside a configured repo — should resolve to container path
+        plan_file = tmp_path / "code" / "plan.md"
         plan_file.write_text("# My Plan\n\n### Task 1: Do stuff\n")
+
+        runner = CliRunner()
+        with patch("scad.cli.SCAD_DIR", tmp_path / ".scad"):
+            result = runner.invoke(main, [
+                "dispatch", "demo", "--tag", "test", "--plan", str(plan_file),
+            ])
+        assert result.exit_code == 0, result.output
+        mock_inject.assert_called_once()
+        _, kwargs = mock_inject.call_args
+        prompt = kwargs["prompt"]
+        assert "executing-plans" in prompt
+        assert "/workspace/code/plan.md" in prompt
+        assert "subagent-driven" in prompt
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_plan_errors_when_outside_repos(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, tmp_path
+    ):
+        """dispatch --plan errors when file is not inside any configured repo."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path=str(tmp_path / "code"), workdir=True)}
+        )
+        (tmp_path / "code").mkdir()
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-test-Mar03-1200"
+
+        plan_file = tmp_path / "external-plan.md"
+        plan_file.write_text("# External Plan\n")
 
         runner = CliRunner()
         result = runner.invoke(main, [
             "dispatch", "demo", "--tag", "test", "--plan", str(plan_file),
         ])
-        assert result.exit_code == 0
-        mock_inject.assert_called_once()
-        _, kwargs = mock_inject.call_args
-        prompt = kwargs["prompt"]
-        assert "executing-plans" in prompt
-        assert str(plan_file) in prompt or "My Plan" in prompt
+        assert result.exit_code != 0
+        assert "not inside any configured repo" in result.output
 
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.image_exists", return_value=True)
