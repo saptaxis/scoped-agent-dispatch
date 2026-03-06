@@ -803,6 +803,46 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
     return results
 
 
+def merge_fetched_branches(
+    fetched: list[dict], run_id: str
+) -> list[dict]:
+    """Attempt git merge --ff-only for each fetched branch into the source repo's current branch.
+
+    Returns list of dicts with keys: repo, branch, source, status ("merged" or "skipped"), detail.
+    """
+    results = []
+    for r in fetched:
+        source_path = r["source"]
+        branch = r["branch"]
+
+        # Check current branch in source repo
+        current = subprocess.run(
+            ["git", "-C", source_path, "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True,
+        )
+        if current.returncode != 0:
+            results.append({**r, "status": "skipped", "detail": "cannot determine current branch"})
+            continue
+
+        current_branch = current.stdout.strip()
+
+        # Attempt ff-only merge
+        merge = subprocess.run(
+            ["git", "-C", source_path, "merge", "--ff-only", branch],
+            capture_output=True, text=True,
+        )
+        if merge.returncode == 0:
+            results.append({**r, "status": "merged", "detail": f"{branch} → {current_branch}"})
+            log_event(run_id, "merge", f"{r['repo']} {branch} → {current_branch} (ff)")
+        else:
+            results.append({
+                **r, "status": "skipped",
+                "detail": f"not fast-forwardable onto {current_branch}",
+            })
+
+    return results
+
+
 def _detect_default_branch(clone_path: Path) -> Optional[str]:
     """Detect the default branch name (main or master)."""
     for name in ("main", "master"):

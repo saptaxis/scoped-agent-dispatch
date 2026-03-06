@@ -337,6 +337,61 @@ class TestHarvest:
         mock_diff.assert_called_once()
 
 
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.merge_fetched_branches")
+    @patch("scad.cli.log_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_merge_calls_merge(
+        self, mock_config, mock_log, mock_merge, mock_fetch, mock_validate
+    ):
+        """harvest --merge calls merge_fetched_branches with fetch results."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_config.return_value = config
+        fetched = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_fetch.return_value = fetched
+        mock_merge.return_value = [
+            {"repo": "code", "branch": "scad-test", "source": "/tmp/code",
+             "status": "merged", "detail": "scad-test → main"}
+        ]
+        mock_log.return_value = {}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run", "--merge"])
+        assert result.exit_code == 0
+        mock_merge.assert_called_once_with(fetched, "test-run")
+        assert "Merged code" in result.output
+
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.fetch_to_host")
+    @patch("scad.cli.merge_fetched_branches")
+    @patch("scad.cli.log_from_source")
+    @patch("scad.cli._config_for_run")
+    def test_harvest_merge_skipped_not_ff(
+        self, mock_config, mock_log, mock_merge, mock_fetch, mock_validate
+    ):
+        """harvest --merge reports skipped when not fast-forwardable."""
+        from scad.config import ScadConfig, RepoConfig
+        mock_config.return_value = ScadConfig(
+            name="test", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        fetched = [{"repo": "code", "branch": "scad-test", "source": "/tmp/code"}]
+        mock_fetch.return_value = fetched
+        mock_merge.return_value = [
+            {"repo": "code", "branch": "scad-test", "source": "/tmp/code",
+             "status": "skipped", "detail": "not fast-forwardable onto main"}
+        ]
+        mock_log.return_value = {}
+
+        runner = CliRunner()
+        result = runner.invoke(main, ["harvest", "test-run", "--merge"])
+        assert result.exit_code == 0
+        assert "Skipped code" in result.output
+
+
 class TestFinish:
     """Tests for scad finish — fetch + clean composite."""
 

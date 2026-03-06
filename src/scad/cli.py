@@ -29,6 +29,7 @@ from scad.container import (
     diff_from_source,
     fetch_to_host,
     log_from_source,
+    merge_fetched_branches,
     gc,
     generate_run_id,
     get_all_sessions,
@@ -1483,7 +1484,8 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
 @main.command()
 @click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--diff", is_flag=True, help="Show full diff instead of git log.")
-def harvest(run_id: str, diff: bool):
+@click.option("--merge", is_flag=True, help="Merge fetched branches into source (ff-only).")
+def harvest(run_id: str, diff: bool, merge: bool):
     """Fetch branches + show summary. The 'what did Claude produce?' command."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
@@ -1495,6 +1497,15 @@ def harvest(run_id: str, diff: bool):
             click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
     else:
         click.echo(f"[scad] Nothing to fetch for {run_id}")
+
+    # Merge (ff-only)
+    if merge and results:
+        merge_results = merge_fetched_branches(results, run_id)
+        for m in merge_results:
+            if m["status"] == "merged":
+                click.echo(f"[scad] Merged {m['repo']}: {m['detail']}")
+            else:
+                click.echo(f"[scad] Skipped {m['repo']}: {m['detail']}")
 
     # Summary
     try:
@@ -1519,9 +1530,10 @@ def harvest(run_id: str, diff: bool):
 @main.command()
 @click.argument("run_id", shell_complete=_complete_sessions_with_clones)
 @click.option("--no-fetch", is_flag=True, help="Skip fetching (risk losing unfetched branches).")
+@click.option("--merge", is_flag=True, help="Merge fetched branches into source (ff-only).")
 @click.option("--keep-session", is_flag=True, help="Keep the session after fetching.")
 @click.option("--force", is_flag=True, help="Clean even if session is running.")
-def finish(run_id: str, no_fetch: bool, keep_session: bool, force: bool):
+def finish(run_id: str, no_fetch: bool, merge: bool, keep_session: bool, force: bool):
     """Fetch branches + clean session. The 'I'm done' command."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
@@ -1532,6 +1544,13 @@ def finish(run_id: str, no_fetch: bool, keep_session: bool, force: bool):
         if results:
             for r in results:
                 click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
+        if merge and results:
+            merge_results = merge_fetched_branches(results, run_id)
+            for m in merge_results:
+                if m["status"] == "merged":
+                    click.echo(f"[scad] Merged {m['repo']}: {m['detail']}")
+                else:
+                    click.echo(f"[scad] Skipped {m['repo']}: {m['detail']}")
         try:
             diffs = diff_from_source(run_id, config)
             if diffs:

@@ -838,6 +838,88 @@ class TestFetchToHostMultiBranch:
             assert branch_name in branches.stdout
 
 
+class TestMergeFetchedBranches:
+    """Tests for merge_fetched_branches — ff-only merge into source repo."""
+
+    def test_ff_merge_succeeds(self, tmp_path):
+        """merge_fetched_branches merges when fast-forwardable."""
+        from scad.container import merge_fetched_branches
+
+        # Create source repo with initial commit
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"],
+            check=True, capture_output=True,
+        )
+        default_branch = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Create a branch with a commit ahead of default
+        subprocess.run(
+            ["git", "-C", str(source), "checkout", "-b", "feature-branch"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "--allow-empty", "-m", "feature work"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+
+        fetched = [{"repo": "code", "branch": "feature-branch", "source": str(source)}]
+        results = merge_fetched_branches(fetched, "test-run")
+        assert len(results) == 1
+        assert results[0]["status"] == "merged"
+        assert "feature-branch" in results[0]["detail"]
+
+    def test_non_ff_merge_skipped(self, tmp_path):
+        """merge_fetched_branches skips when not fast-forwardable."""
+        from scad.container import merge_fetched_branches
+
+        # Create source repo
+        source = tmp_path / "source"
+        source.mkdir()
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"],
+            check=True, capture_output=True,
+        )
+        default_branch = subprocess.run(
+            ["git", "-C", str(source), "rev-parse", "--abbrev-ref", "HEAD"],
+            capture_output=True, text=True, check=True,
+        ).stdout.strip()
+
+        # Create divergent branches
+        subprocess.run(
+            ["git", "-C", str(source), "checkout", "-b", "feature-branch"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "--allow-empty", "-m", "feature work"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "checkout", default_branch],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(source), "commit", "--allow-empty", "-m", "divergent work"],
+            check=True, capture_output=True,
+        )
+
+        fetched = [{"repo": "code", "branch": "feature-branch", "source": str(source)}]
+        results = merge_fetched_branches(fetched, "test-run")
+        assert len(results) == 1
+        assert results[0]["status"] == "skipped"
+        assert "not fast-forwardable" in results[0]["detail"]
+
+
 class TestSyncFromHost:
     def test_syncs_new_branches_into_clone(self, tmp_path, monkeypatch):
         """sync_from_host fetches source repo refs into clone."""
