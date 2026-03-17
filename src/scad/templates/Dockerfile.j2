@@ -6,24 +6,23 @@ RUN apt-get update && apt-get install -y \
     {% for pkg in apt_packages %}{{ pkg }} {% endfor %}\
     && rm -rf /var/lib/apt/lists/*
 
-# Python venv with project dependencies
+# Non-root user (created early so venv is owned by scad from the start)
+RUN useradd -m -s /bin/bash scad \
+    && mkdir -p /opt/venv /workspace /scad-logs \
+    && chown scad:scad /opt/venv /workspace /scad-logs
+
+# Python venv with project dependencies (as scad to avoid slow chown)
+USER scad
 RUN python3 -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
 
 {% if requirements_content %}
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install --no-cache-dir -r /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
 {% endif %}
 
-# Non-root user
-RUN useradd -m -s /bin/bash scad \
-    && chown -R scad:scad /opt/venv \
-    && mkdir -p /workspace /scad-logs \
-    && chown -R scad:scad /workspace /scad-logs
-
 # Set PATH before Claude install (suppresses "~/.local/bin not in PATH" warning)
-USER scad
 ENV PATH="/home/scad/.local/bin:$PATH"
 
 # Install Claude Code via native installer

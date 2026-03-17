@@ -194,7 +194,16 @@ def inject_job(
         container.exec_run(
             ["bash", "-c", f"cat > {launcher} <<'SCADEOF'\n#!/bin/bash\n{script}\nSCADEOF\nchmod +x {launcher}"],
         )
-        # Create tmux window running the launcher — run synchronously to catch errors
+        # Wait for tmux session to be ready (entrypoint may still be running)
+        for _attempt in range(30):
+            check = container.exec_run(["tmux", "has-session", "-t", "scad"])
+            if check.exit_code == 0:
+                break
+            time.sleep(1)
+        else:
+            raise RuntimeError("tmux session 'scad' not ready after 30s — entrypoint may have failed")
+
+        # Create tmux window running the launcher
         result = container.exec_run(
             ["bash", "-c", f"tmux new-window -t scad: -n {job_id} {launcher}"],
         )

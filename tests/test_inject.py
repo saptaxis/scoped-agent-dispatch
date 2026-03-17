@@ -211,10 +211,11 @@ class TestInjectJob:
         mock_container = MagicMock()
         mock_container.status = "running"
         mock_docker.return_value.containers.get.return_value = mock_container
-        # First calls succeed (prompt file write, launcher write), tmux fails
+        # First calls succeed (prompt file write, launcher write, tmux check), tmux new-window fails
         mock_container.exec_run.side_effect = [
             MagicMock(exit_code=0, output=b""),  # write prompt file
             MagicMock(exit_code=0, output=b""),  # write launcher script
+            MagicMock(exit_code=0, output=b""),  # tmux has-session check
             MagicMock(exit_code=1, output=b"tmux error"),  # tmux new-window fails
         ]
 
