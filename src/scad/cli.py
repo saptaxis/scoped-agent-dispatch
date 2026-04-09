@@ -595,7 +595,8 @@ def config_info(config_name: str):
 @main.command()
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("-v", "--verbose", is_flag=True, help="Show full Docker build output.")
-def build(config_name: str, verbose: bool):
+@click.option("--no-cache", is_flag=True, help="Rebuild without Docker layer cache.")
+def build(config_name: str, verbose: bool, no_cache: bool):
     """Build or rebuild the Docker image for a config."""
     try:
         config = load_config(config_name)
@@ -610,7 +611,7 @@ def build(config_name: str, verbose: bool):
     click.echo(f"[scad] Building image {tag}...")
     try:
         with tempfile.TemporaryDirectory() as build_dir:
-            for line in build_image(config, Path(build_dir)):
+            for line in build_image(config, Path(build_dir), no_cache=no_cache):
                 if verbose:
                     click.echo(f"  {line}")
                 elif line.startswith("Step "):

@@ -89,11 +89,15 @@ cd /workspace/{{ workdir_key }}
 source /opt/venv/bin/activate
 {% if requirements_file %}
 echo "[scad] Syncing Python dependencies..."
-pip install --no-cache-dir -q -r {{ requirements_file }} 2>&1
+pip install -q -r {{ requirements_file }} 2>&1
 {% endif %}
 {% if python_editable %}
 echo "[scad] Installing project in editable mode..."
-pip install --no-cache-dir -q -e . 2>&1
+pip install -q --no-deps -e . 2>&1
+{% endif %}
+{% if pip_install_repos %}
+echo "[scad] Installing editable packages: {{ pip_install_repos | join(', ') }}..."
+pip install -q --no-deps {% for repo_key in pip_install_repos %}-e /workspace/{{ repo_key }} {% endfor %}2>&1
 {% endif %}
 
 log_event "session-ready"

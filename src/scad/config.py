@@ -38,6 +38,7 @@ repos:
     # add_dir: false    # add to Claude context with --add-dir
     # worktree: true    # create local clone (false = direct mount)
     # focus: docs/      # subdir for context prompt
+    # pip_install: false # pip install -e at container start (for packages)
 
 # mounts:              # additional host paths to mount
 #   - host: ~/data
@@ -63,6 +64,7 @@ class RepoConfig(BaseModel):
     add_dir: bool = False
     worktree: bool = True
     focus: Optional[str] = None
+    pip_install: bool = False
 
     @property
     def resolved_path(self) -> Path:

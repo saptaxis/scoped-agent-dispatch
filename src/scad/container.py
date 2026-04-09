@@ -194,14 +194,20 @@ def inject_job(
         container.exec_run(
             ["bash", "-c", f"cat > {launcher} <<'SCADEOF'\n#!/bin/bash\n{script}\nSCADEOF\nchmod +x {launcher}"],
         )
-        # Wait for tmux session to be ready (entrypoint may still be running)
-        for _attempt in range(30):
+        # Wait for tmux session to be ready (entrypoint may still be running —
+        # pip installs can take minutes on first run)
+        for _attempt in range(300):
             check = container.exec_run(["tmux", "has-session", "-t", "scad"])
             if check.exit_code == 0:
                 break
+            container.reload()
+            if container.status != "running":
+                raise RuntimeError(
+                    f"Container exited during entrypoint — check: docker logs {container.name}"
+                )
             time.sleep(1)
         else:
-            raise RuntimeError("tmux session 'scad' not ready after 30s — entrypoint may have failed")
+            raise RuntimeError("tmux session 'scad' not ready after 5min — entrypoint may have failed")
 
         # Create tmux window running the launcher
         result = container.exec_run(
@@ -493,11 +499,13 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
 
     # Render entrypoint
     entrypoint_template = env.get_template("entrypoint.sh.j2")
+    pip_install_repos = [key for key, repo in config.repos.items() if repo.pip_install]
     entrypoint_content = entrypoint_template.render(
         config_name=config.name,
         workdir_key=workdir_key,
         requirements_file=requirements_file,
         python_editable=config.python.editable,
+        pip_install_repos=pip_install_repos,
     )
     (build_dir / "entrypoint.sh").write_text(entrypoint_content)
 
@@ -645,13 +653,13 @@ def prune_old_images(client, config_name: str, new_image_id: str) -> None:
         pass
 
 
-def build_image(config: ScadConfig, build_dir: Path):
+def build_image(config: ScadConfig, build_dir: Path, no_cache: bool = False):
     """Build a Docker image for the given config. Yields build log lines."""
     tag = f"scad-{config.name}"
     render_build_context(config, build_dir)
 
     client = docker.from_env()
-    for chunk in client.api.build(path=str(build_dir), tag=tag, rm=True, decode=True):
+    for chunk in client.api.build(path=str(build_dir), tag=tag, rm=True, decode=True, nocache=no_cache):
         if "stream" in chunk:
             line = chunk["stream"].rstrip()
             if line:
@@ -700,6 +708,11 @@ def run_container(
     gitconfig = Path.home() / ".gitconfig"
     if gitconfig.exists():
         volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
+
+    # SSH keys — mount read-only for git clone/fetch over SSH (submodules, private repos)
+    ssh_dir = Path.home() / ".ssh"
+    if ssh_dir.exists():
+        volumes[str(ssh_dir)] = {"bind": "/home/scad/.ssh", "mode": "ro"}
 
     # Data mounts — direct bind mounts (not managed by scad)
     for mount in config.mounts:
