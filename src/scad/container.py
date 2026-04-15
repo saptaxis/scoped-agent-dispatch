@@ -423,6 +423,14 @@ def create_clones(
                 ["git", "-C", str(clone_path), "submodule", "update", "--init", "--recursive"],
                 capture_output=True, check=False,
             )
+            # Create the scad branch inside each submodule too — so agent commits
+            # in submodules land on a named branch and harvest can fetch+merge them
+            # symmetrically with top-level repos.
+            subprocess.run(
+                ["git", "-C", str(clone_path), "submodule", "foreach", "--recursive",
+                 f"git checkout -b {branch}"],
+                capture_output=True, check=False,
+            )
             paths[key] = clone_path
         else:
             # Symlink non-worktree repos into workspace
@@ -860,38 +868,9 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
 
             sub_key = f"{key}/{sub_path}"
 
-            # Fetch current HEAD commit from submodule (may be detached — parent repo
-            # pins submodules by SHA, so commits often live outside named branches).
-            head_sha = subprocess.run(
-                ["git", "-C", str(clone_sub), "rev-parse", "HEAD"],
-                capture_output=True, text=True,
-            )
-            if head_sha.returncode == 0 and head_sha.stdout.strip():
-                sha = head_sha.stdout.strip()
-                try:
-                    # Fetch all objects reachable from HEAD. Stash the tip under a
-                    # refs/scad/<run-id> ref so it's discoverable and not GC'd.
-                    ref_name = f"refs/scad/{run_id}"
-                    subprocess.run(
-                        ["git", "-C", str(host_sub), "fetch",
-                         str(clone_sub), f"+HEAD:{ref_name}"],
-                        capture_output=True, text=True, check=True,
-                    )
-                    results.append({
-                        "repo": sub_key, "branch": f"HEAD({sha[:8]})",
-                        "source": str(host_sub), "ref": ref_name,
-                    })
-                    log_event(run_id, "fetch", f"{sub_key} HEAD {sha[:8]} → {host_sub} ({ref_name})")
-                except subprocess.CalledProcessError as e:
-                    err = (e.stderr or e.stdout or str(e)).strip()
-                    log_event(run_id, "fetch-failed", f"{sub_key} HEAD: {err}")
-                    results.append({
-                        "repo": sub_key, "branch": f"HEAD({sha[:8]})",
-                        "source": str(host_sub), "failed": True, "error": err,
-                    })
-
-            # Also fetch any named branches (beyond default) — user may have
-            # explicitly branched inside the submodule.
+            # Fetch non-default branches from submodule. create_clones creates the
+            # scad branch inside submodules too, so agent commits land on a named
+            # branch and get picked up here.
             default_sub = _detect_default_branch(clone_sub)
             sub_branches_out = subprocess.run(
                 ["git", "-C", str(clone_sub), "branch", "--list", "--format=%(refname:short)"],

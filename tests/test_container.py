@@ -203,8 +203,8 @@ class TestCloneLifecycle:
         with patch("scad.container.Path.home", return_value=tmp_path):
             paths = create_clones(config, "plan-22", "test-run-id")
 
-        # Calls: git clone --local, git checkout -b, git submodule update --init
-        assert mock_run.call_count == 3
+        # Calls: git clone --local, git checkout -b, submodule update, submodule foreach checkout
+        assert mock_run.call_count == 4
         clone_args = mock_run.call_args_list[0][0][0]
         assert "clone" in clone_args
         assert "--local" in clone_args
@@ -214,6 +214,10 @@ class TestCloneLifecycle:
         assert "plan-22" in checkout_args
         submodule_args = mock_run.call_args_list[2][0][0]
         assert "submodule" in submodule_args
+        assert "update" in submodule_args
+        foreach_args = mock_run.call_args_list[3][0][0]
+        assert "submodule" in foreach_args
+        assert "foreach" in foreach_args
 
     @patch("scad.container.subprocess.run")
     def test_create_clones_returns_paths(self, mock_run, tmp_path, monkeypatch):
@@ -245,8 +249,8 @@ class TestCloneLifecycle:
         assert paths["ref"].is_symlink()
         assert paths["ref"].resolve() == (tmp_path / "ref").resolve()
         assert "workspace" in str(paths["ref"])
-        # Three subprocess calls for code (clone + checkout + submodule), zero for ref
-        assert mock_run.call_count == 3
+        # Four subprocess calls for code (clone + checkout + submodule update + submodule foreach), zero for ref
+        assert mock_run.call_count == 4
 
     @patch("scad.container.shutil.rmtree")
     def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path, monkeypatch):
