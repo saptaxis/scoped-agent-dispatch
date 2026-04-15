@@ -821,11 +821,19 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
                     capture_output=True, text=True, check=True,
                 )
                 results.append({"repo": key, "branch": branch, "source": str(source_path)})
-            except subprocess.CalledProcessError:
-                pass
+            except subprocess.CalledProcessError as e:
+                err = (e.stderr or e.stdout or str(e)).strip()
+                log_event(run_id, "fetch-failed", f"{key} {branch}: {err}")
+                results.append({
+                    "repo": key, "branch": branch, "source": str(source_path),
+                    "failed": True, "error": err,
+                })
 
     for r in results:
-        log_event(run_id, "fetch", f"{r['repo']} {r['branch']} → {r['source']}")
+        if r.get("failed"):
+            log_event(run_id, "fetch", f"{r['repo']} {r['branch']} FAILED: {r['error']}")
+        else:
+            log_event(run_id, "fetch", f"{r['repo']} {r['branch']} → {r['source']}")
 
     # Fetch submodule branches
     for key, repo_cfg in config.repos.items():
@@ -850,6 +858,40 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
             if not clone_sub.exists() or not host_sub.exists():
                 continue
 
+            sub_key = f"{key}/{sub_path}"
+
+            # Fetch current HEAD commit from submodule (may be detached — parent repo
+            # pins submodules by SHA, so commits often live outside named branches).
+            head_sha = subprocess.run(
+                ["git", "-C", str(clone_sub), "rev-parse", "HEAD"],
+                capture_output=True, text=True,
+            )
+            if head_sha.returncode == 0 and head_sha.stdout.strip():
+                sha = head_sha.stdout.strip()
+                try:
+                    # Fetch all objects reachable from HEAD. Stash the tip under a
+                    # refs/scad/<run-id> ref so it's discoverable and not GC'd.
+                    ref_name = f"refs/scad/{run_id}"
+                    subprocess.run(
+                        ["git", "-C", str(host_sub), "fetch",
+                         str(clone_sub), f"+HEAD:{ref_name}"],
+                        capture_output=True, text=True, check=True,
+                    )
+                    results.append({
+                        "repo": sub_key, "branch": f"HEAD({sha[:8]})",
+                        "source": str(host_sub), "ref": ref_name,
+                    })
+                    log_event(run_id, "fetch", f"{sub_key} HEAD {sha[:8]} → {host_sub} ({ref_name})")
+                except subprocess.CalledProcessError as e:
+                    err = (e.stderr or e.stdout or str(e)).strip()
+                    log_event(run_id, "fetch-failed", f"{sub_key} HEAD: {err}")
+                    results.append({
+                        "repo": sub_key, "branch": f"HEAD({sha[:8]})",
+                        "source": str(host_sub), "failed": True, "error": err,
+                    })
+
+            # Also fetch any named branches (beyond default) — user may have
+            # explicitly branched inside the submodule.
             default_sub = _detect_default_branch(clone_sub)
             sub_branches_out = subprocess.run(
                 ["git", "-C", str(clone_sub), "branch", "--list", "--format=%(refname:short)"],
@@ -867,11 +909,11 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
                          str(clone_sub), f"{branch}:{branch}"],
                         capture_output=True, text=True, check=True,
                     )
-                    sub_key = f"{key}/{sub_path}"
                     results.append({"repo": sub_key, "branch": branch, "source": str(host_sub)})
                     log_event(run_id, "fetch", f"{sub_key} {branch} → {host_sub}")
-                except subprocess.CalledProcessError:
-                    pass
+                except subprocess.CalledProcessError as e:
+                    err = (e.stderr or e.stdout or str(e)).strip()
+                    log_event(run_id, "fetch-failed", f"{sub_key} {branch}: {err}")
 
     return results
 

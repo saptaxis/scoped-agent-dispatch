@@ -1495,13 +1495,17 @@ def harvest(run_id: str, diff: bool, merge: bool):
     results = fetch_to_host(run_id, config)
     if results:
         for r in results:
-            click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
+            if r.get("failed"):
+                click.echo(f"[scad] Fetch FAILED {r['repo']}: {r['error']}", err=True)
+            else:
+                click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
     else:
         click.echo(f"[scad] Nothing to fetch for {run_id}")
 
-    # Merge (ff-only)
-    if merge and results:
-        merge_results = merge_fetched_branches(results, run_id)
+    # Merge (ff-only) — only on successful fetches
+    successful = [r for r in results if not r.get("failed")]
+    if merge and successful:
+        merge_results = merge_fetched_branches(successful, run_id)
         for m in merge_results:
             if m["status"] == "merged":
                 click.echo(f"[scad] Merged {m['repo']}: {m['detail']}")
@@ -1544,9 +1548,13 @@ def finish(run_id: str, no_fetch: bool, merge: bool, keep_session: bool, force: 
         results = fetch_to_host(run_id, config)
         if results:
             for r in results:
-                click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
-        if merge and results:
-            merge_results = merge_fetched_branches(results, run_id)
+                if r.get("failed"):
+                    click.echo(f"[scad] Fetch FAILED {r['repo']}: {r['error']}", err=True)
+                else:
+                    click.echo(f"[scad] Fetched {r['repo']}: {r['branch']} \u2192 {r['source']}")
+        successful = [r for r in results if not r.get("failed")]
+        if merge and successful:
+            merge_results = merge_fetched_branches(successful, run_id)
             for m in merge_results:
                 if m["status"] == "merged":
                     click.echo(f"[scad] Merged {m['repo']}: {m['detail']}")
