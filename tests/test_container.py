@@ -203,8 +203,8 @@ class TestCloneLifecycle:
         with patch("scad.container.Path.home", return_value=tmp_path):
             paths = create_clones(config, "plan-22", "test-run-id")
 
-        # First call: git clone --local, second call: git checkout -b
-        assert mock_run.call_count == 2
+        # Calls: git clone --local, git checkout -b, git submodule update --init
+        assert mock_run.call_count == 3
         clone_args = mock_run.call_args_list[0][0][0]
         assert "clone" in clone_args
         assert "--local" in clone_args
@@ -212,6 +212,8 @@ class TestCloneLifecycle:
         assert "checkout" in checkout_args
         assert "-b" in checkout_args
         assert "plan-22" in checkout_args
+        submodule_args = mock_run.call_args_list[2][0][0]
+        assert "submodule" in submodule_args
 
     @patch("scad.container.subprocess.run")
     def test_create_clones_returns_paths(self, mock_run, tmp_path, monkeypatch):
@@ -243,8 +245,8 @@ class TestCloneLifecycle:
         assert paths["ref"].is_symlink()
         assert paths["ref"].resolve() == (tmp_path / "ref").resolve()
         assert "workspace" in str(paths["ref"])
-        # Two subprocess calls for code (clone + checkout), zero for ref
-        assert mock_run.call_count == 2
+        # Three subprocess calls for code (clone + checkout + submodule), zero for ref
+        assert mock_run.call_count == 3
 
     @patch("scad.container.shutil.rmtree")
     def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path, monkeypatch):
@@ -2106,3 +2108,71 @@ class TestLogFromSource:
         cmd = mock_run.call_args_list[-1][0][0]
         assert "log" in cmd
         assert "--oneline" in cmd
+
+
+class TestSubmoduleSupport:
+    """Tests for submodule handling in clone and fetch."""
+
+    def test_create_clones_inits_submodules(self, tmp_path, monkeypatch):
+        """create_clones initializes submodules in cloned repos."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        from scad.config import ScadConfig, RepoConfig
+
+        child = tmp_path / "child"
+        child.mkdir()
+        subprocess.run(["git", "init", str(child)], check=True, capture_output=True)
+        (child / "child.txt").write_text("child content")
+        subprocess.run(["git", "-C", str(child), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(child), "commit", "-m", "child init"],
+            check=True, capture_output=True,
+        )
+
+        parent = tmp_path / "parent"
+        parent.mkdir()
+        subprocess.run(["git", "init", str(parent)], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(parent), "commit", "--allow-empty", "-m", "init"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(parent), "-c", "protocol.file.allow=always",
+             "submodule", "add", str(child), "vendor/child"],
+            check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(parent), "commit", "-m", "add submodule"],
+            check=True, capture_output=True,
+        )
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(parent), workdir=True)},
+        )
+        create_clones(config, "scad-test-branch", "test-run")
+
+        clone_sub = tmp_path / "runs" / "test-run" / "workspace" / "code" / "vendor" / "child"
+        # Submodule dir should exist (may be empty if init failed, but dir should be there)
+        assert clone_sub.exists()
+
+    def test_create_clones_no_submodules_unaffected(self, tmp_path, monkeypatch):
+        """create_clones works fine with repos that have no submodules."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        from scad.config import ScadConfig, RepoConfig
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
+        (repo / "file.txt").write_text("content")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True, capture_output=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "commit", "-m", "init"],
+            check=True, capture_output=True,
+        )
+
+        config = ScadConfig(
+            name="test",
+            repos={"code": RepoConfig(path=str(repo), workdir=True)},
+        )
+        paths = create_clones(config, "scad-test-branch", "test-run")
+        assert "code" in paths

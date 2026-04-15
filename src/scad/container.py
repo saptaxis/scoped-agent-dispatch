@@ -418,6 +418,11 @@ def create_clones(
                  "checkout", "-b", branch],
                 check=True,
             )
+            # Initialize submodules if present (no-op if none)
+            subprocess.run(
+                ["git", "-C", str(clone_path), "submodule", "update", "--init", "--recursive"],
+                capture_output=True, check=False,
+            )
             paths[key] = clone_path
         else:
             # Symlink non-worktree repos into workspace
@@ -821,6 +826,52 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
 
     for r in results:
         log_event(run_id, "fetch", f"{r['repo']} {r['branch']} → {r['source']}")
+
+    # Fetch submodule branches
+    for key, repo_cfg in config.repos.items():
+        clone_path = clone_base / key
+        if not clone_path.exists() or clone_path.is_symlink() or not (clone_path / ".git").exists():
+            continue
+
+        source_path = repo_cfg.resolved_path
+
+        sub_result = subprocess.run(
+            ["git", "-C", str(clone_path), "submodule", "foreach", "--quiet", "--recursive",
+             "echo $path"],
+            capture_output=True, text=True,
+        )
+        if sub_result.returncode != 0 or not sub_result.stdout.strip():
+            continue
+
+        sub_paths = [p.strip() for p in sub_result.stdout.strip().split("\n") if p.strip()]
+        for sub_path in sub_paths:
+            clone_sub = clone_path / sub_path
+            host_sub = source_path / sub_path
+            if not clone_sub.exists() or not host_sub.exists():
+                continue
+
+            default_sub = _detect_default_branch(clone_sub)
+            sub_branches_out = subprocess.run(
+                ["git", "-C", str(clone_sub), "branch", "--list", "--format=%(refname:short)"],
+                capture_output=True, text=True,
+            )
+            if sub_branches_out.returncode != 0:
+                continue
+            sub_branches = [b.strip() for b in sub_branches_out.stdout.strip().split("\n") if b.strip()]
+            sub_branches_to_fetch = [b for b in sub_branches if b != default_sub and b != "HEAD"]
+
+            for branch in sub_branches_to_fetch:
+                try:
+                    subprocess.run(
+                        ["git", "-C", str(host_sub), "fetch",
+                         str(clone_sub), f"{branch}:{branch}"],
+                        capture_output=True, text=True, check=True,
+                    )
+                    sub_key = f"{key}/{sub_path}"
+                    results.append({"repo": sub_key, "branch": branch, "source": str(host_sub)})
+                    log_event(run_id, "fetch", f"{sub_key} {branch} → {host_sub}")
+                except subprocess.CalledProcessError:
+                    pass
 
     return results
 
