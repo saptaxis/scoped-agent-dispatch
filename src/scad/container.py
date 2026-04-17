@@ -423,6 +423,37 @@ def create_clones(
                 ["git", "-C", str(clone_path), "submodule", "update", "--init", "--recursive"],
                 capture_output=True, check=False,
             )
+            # Fetch host's submodule objects into each container submodule. Needed
+            # because `submodule update --init` clones from the submodule's remote
+            # (git@github.com:...), which may lack commits that exist only on host
+            # (from prior scad sessions whose commits weren't pushed). Without this,
+            # the parent repo's submodule pointer may reference missing commits.
+            sub_paths_out = subprocess.run(
+                ["git", "-C", str(clone_path), "submodule", "foreach", "--quiet", "--recursive",
+                 "echo $displaypath"],
+                capture_output=True, text=True,
+            )
+            if sub_paths_out.returncode == 0:
+                for sub_path in sub_paths_out.stdout.strip().split("\n"):
+                    sub_path = sub_path.strip()
+                    if not sub_path:
+                        continue
+                    host_sub = repo.resolved_path / sub_path
+                    container_sub = clone_path / sub_path
+                    if host_sub.exists() and (host_sub / ".git").exists():
+                        subprocess.run(
+                            ["git", "-C", str(container_sub), "fetch", str(host_sub),
+                             "+refs/heads/*:refs/remotes/host/*",
+                             "+refs/scad/*:refs/scad/*",
+                             "--tags"],
+                            capture_output=True, check=False,
+                        )
+                # Re-run submodule update now that all host objects are available —
+                # the pinned commit may not have been reachable the first time.
+                subprocess.run(
+                    ["git", "-C", str(clone_path), "submodule", "update", "--recursive"],
+                    capture_output=True, check=False,
+                )
             # Create the scad branch inside each submodule too — so agent commits
             # in submodules land on a named branch and harvest can fetch+merge them
             # symmetrically with top-level repos.
