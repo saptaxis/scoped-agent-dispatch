@@ -99,6 +99,7 @@ class ScadConfig(BaseModel):
     apt_packages: list[str] = []
     python: PythonConfig = PythonConfig()
     claude: ClaudeConfig = ClaudeConfig()
+    gpu: bool = False
 
     @property
     def base_image(self) -> str:

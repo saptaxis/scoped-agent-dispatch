@@ -781,6 +781,14 @@ def run_container(
     environment["DISABLE_ERROR_REPORTING"] = "1"
     environment["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] = "1"
 
+    # GPU passthrough — requires nvidia-container-toolkit on host
+    device_requests = None
+    if config.gpu:
+        device_requests = [
+            docker.types.DeviceRequest(count=-1, capabilities=[["gpu"]])
+        ]
+        environment["NVIDIA_VISIBLE_DEVICES"] = "all"
+
     container_name = f"scad-{run_id}"
 
     container = client.containers.run(
@@ -789,6 +797,7 @@ def run_container(
         name=container_name,
         volumes=volumes,
         environment=environment,
+        device_requests=device_requests,
         labels={
             "scad.managed": "true",
             "scad.config": config.name,

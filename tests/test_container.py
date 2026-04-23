@@ -1381,6 +1381,51 @@ class TestRunContainerTelemetry:
         assert env["CLAUDE_CODE_DISABLE_FEEDBACK_SURVEY"] == "1"
 
 
+class TestGpuPassthrough:
+    """Test GPU device_requests in run_container."""
+
+    @patch("scad.container.docker.from_env")
+    def test_gpu_enabled_passes_device_requests(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """gpu: true sets device_requests and NVIDIA_VISIBLE_DEVICES=all."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        sample_config.gpu = True
+
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock(id="abc")
+        mock_docker.return_value = mock_client
+
+        (tmp_path / "runs" / "test-run" / "claude").mkdir(parents=True)
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
+
+        run_container(sample_config, "feat", "test-run", worktree_paths)
+
+        kwargs = mock_client.containers.run.call_args[1]
+        assert kwargs["device_requests"] is not None
+        assert len(kwargs["device_requests"]) == 1
+        assert kwargs["environment"]["NVIDIA_VISIBLE_DEVICES"] == "all"
+
+    @patch("scad.container.docker.from_env")
+    def test_gpu_disabled_no_device_requests(self, mock_docker, sample_config, tmp_path, monkeypatch):
+        """gpu default (False) leaves device_requests unset and no NVIDIA env."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+
+        mock_client = MagicMock()
+        mock_client.containers.run.return_value = MagicMock(id="abc")
+        mock_docker.return_value = mock_client
+
+        (tmp_path / "runs" / "test-run" / "claude").mkdir(parents=True)
+        worktree_paths = {"code": tmp_path / "runs" / "test-run" / "workspace" / "code"}
+
+        run_container(sample_config, "feat", "test-run", worktree_paths)
+
+        kwargs = mock_client.containers.run.call_args[1]
+        assert kwargs["device_requests"] is None
+        assert "NVIDIA_VISIBLE_DEVICES" not in kwargs["environment"]
+
+
 class TestGetSessionUsageParsing:
     """Test ccusage JSON parsing and key mapping."""
 
