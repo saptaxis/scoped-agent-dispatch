@@ -2,7 +2,24 @@
 
 ## [Unreleased]
 
-Composite workflows, Claude Code plugin, small features. Stable release prep.
+Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-repo pip install.
+
+### Added
+- GPU passthrough — `gpu: true` config option adds an NVIDIA `DeviceRequest` (all GPUs) to the container; requires nvidia-container-toolkit on host
+- Submodule support — `create_clones` runs `git submodule update --init --recursive`; `code fetch` walks submodules and fetches their non-default branches back to the host
+- `pip_install` per-repo config — `pip install --no-deps -e /workspace/<key>` at startup
+- SSH key mount — `~/.ssh` mounted read-only at `/home/scad/.ssh` for SSH git operations (submodules, private repos)
+- `scad build --no-cache` — bust Docker layer cache
+- `harvest --merge` / `finish --merge` — fast-forward-only merge of fetched branches per repo
+
+### Fixed
+- Submodule fetch — create `scad-*` branch inside submodules, fetch detached submodule HEAD, fetch host submodule objects into container clones, surface fetch errors
+- tmux inject race — poll `tmux has-session` before `new-window`, with container crash detection
+- Dockerfile build speed — create user before pip install, drop `--no-cache-dir`
+
+## [0.3.0] — 2026-03-03
+
+Composite workflows, Claude Code plugin, small features. Stable release.
 
 ### Added
 - `dispatch --plan <path>` — auto-generate execution prompt from plan file
