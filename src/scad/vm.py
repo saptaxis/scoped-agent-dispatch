@@ -87,7 +87,10 @@ def get_docker_client() -> docker.DockerClient:
             client = docker.DockerClient(base_url=base_url)
         client.ping()
         return client
-    except Exception as exc:  # docker-py leaks requests/OS errors on a dead socket
+    except (DockerException, OSError) as exc:
+        # docker-py leaks connection failures rather than raising DockerException:
+        # requests.exceptions.RequestException subclasses OSError, so this pair
+        # covers a dead or missing socket without depending on requests directly.
         raise DockerUnavailable(_unavailable_message()) from exc
 
 
