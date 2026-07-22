@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import os
 import platform
+import shutil
+import subprocess
 from pathlib import Path
 
 import click
 import docker
+import yaml
 from docker.errors import DockerException
 
 SCAD_PROFILE = "scad"
@@ -105,3 +108,156 @@ def docker_cli_env() -> dict[str, str]:
     if is_macos():
         env["DOCKER_HOST"] = f"unix://{colima_socket_path()}"
     return env
+
+
+# Creating a Colima VM pulls an image and formats a disk — allow generous time.
+COLIMA_TIMEOUT = 900
+
+
+def colima_installed() -> bool:
+    """True when the colima binary is on PATH."""
+    return shutil.which("colima") is not None
+
+
+def _require_macos(action: str) -> None:
+    """Raise unless we are on macOS — VM management is macOS-only."""
+    if not is_macos():
+        raise VMUnsupported(
+            f"'{action}' is macOS-only. On Linux scad uses the native Docker "
+            "daemon directly — there is no scad VM to manage."
+        )
+
+
+def _require_colima() -> None:
+    """Raise unless the colima binary is available."""
+    if not colima_installed():
+        raise VMUnsupported(
+            "colima is not installed.\n"
+            "  Install it with:  brew install colima docker\n"
+            "  Or re-run scad's install.sh, which does it for you."
+        )
+
+
+def _colima(*args: str) -> subprocess.CompletedProcess:
+    """Run a colima subcommand, raising VMUnsupported with its stderr on failure."""
+    result = subprocess.run(
+        ["colima", *args],
+        capture_output=True,
+        text=True,
+        timeout=COLIMA_TIMEOUT,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "").strip()
+        raise VMUnsupported(
+            f"colima {' '.join(args)} failed:\n{detail}\n"
+            "  If this machine predates macOS 13, set qemu/sshfs in "
+            "~/.scad/settings.yml:\n"
+            "    colima:\n      vm_type: qemu\n      mount_type: sshfs"
+        )
+    return result
+
+
+def vm_state() -> str:
+    """State of the scad VM: 'running', 'stopped', or 'absent'.
+
+    Derived from the profile directory plus a daemon ping rather than colima's
+    output format, so a stale socket left behind by a crash reads as 'stopped'.
+    """
+    if not colima_profile_dir().exists():
+        return "absent"
+    if not colima_socket_path().exists():
+        return "stopped"
+    try:
+        get_docker_client()
+        return "running"
+    except DockerException:
+        return "stopped"
+
+
+def read_vm_config() -> dict:
+    """Parsed ~/.colima/scad/colima.yaml, or {} when the profile does not exist."""
+    path = colima_profile_dir() / "colima.yaml"
+    if not path.exists():
+        return {}
+    return yaml.safe_load(path.read_text()) or {}
+
+
+def read_vm_mounts() -> list[str]:
+    """Host paths currently mounted into the scad VM beyond the $HOME default."""
+    mounts = []
+    for entry in read_vm_config().get("mounts") or []:
+        location = entry.get("location") if isinstance(entry, dict) else str(entry)
+        if location:
+            mounts.append(str(Path(location).expanduser()))
+    return mounts
+
+
+def vm_start(mounts: list[str] | None = None) -> None:
+    """Start the scad Colima VM, creating the profile on first run.
+
+    Sizing flags are passed only at creation — on an existing profile colima
+    reuses its persisted config. When `mounts` is given it must be the COMPLETE
+    desired set: colima replaces the configured mount list rather than merging.
+    """
+    _require_macos("scad vm start")
+    _require_colima()
+
+    args = ["start", SCAD_PROFILE]
+    if vm_state() == "absent":
+        from scad.config import load_settings
+
+        colima = load_settings().colima
+        args += [
+            "--cpu", str(colima.cpu),
+            "--memory", str(colima.memory),
+            "--disk", str(colima.disk),
+            "--vm-type", colima.vm_type,
+            "--mount-type", colima.mount_type,
+        ]
+    for mount in mounts or []:
+        args += ["--mount", f"{mount}:w"]
+
+    _colima(*args)
+
+
+def vm_stop() -> None:
+    """Stop the scad Colima VM. Containers survive; the daemon goes away."""
+    _require_macos("scad vm stop")
+    _require_colima()
+    _colima("stop", SCAD_PROFILE)
+
+
+def vm_delete() -> None:
+    """Delete the scad Colima VM and everything inside it (images, containers)."""
+    _require_macos("scad vm delete")
+    _require_colima()
+    _colima("delete", "--force", SCAD_PROFILE)
+
+
+def vm_info() -> dict:
+    """Descriptive state of the scad VM for `scad vm info`."""
+    _require_macos("scad vm info")
+    config = read_vm_config()
+    return {
+        "profile": SCAD_PROFILE,
+        "state": vm_state(),
+        "socket": str(colima_socket_path()),
+        "cpu": config.get("cpu"),
+        "memory_gib": config.get("memory"),
+        "disk_gib": config.get("disk"),
+        "vm_type": config.get("vmType"),
+        "mount_type": config.get("mountType"),
+        "mounts": read_vm_mounts(),
+    }
+
+
+def ensure_vm_running() -> None:
+    """Bring the scad VM up if it is down. No-op on Linux."""
+    if not is_macos():
+        return
+    if vm_state() == "running":
+        return
+    _require_colima()
+    click.echo(f"[scad] Starting scad VM (colima profile '{SCAD_PROFILE}')...")
+    vm_start()
+    click.echo("[scad] VM ready")

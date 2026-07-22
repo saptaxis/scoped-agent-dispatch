@@ -108,3 +108,141 @@ class TestNoBareFromEnv:
             if "docker.from_env()" in line and p.name != "vm.py"
         ]
         assert offenders == [], f"bare docker.from_env() outside vm.py: {offenders}"
+
+
+class TestVMState:
+    @patch("scad.vm.colima_profile_dir")
+    def test_absent_when_profile_dir_missing(self, mock_dir, tmp_path):
+        from scad.vm import vm_state
+        mock_dir.return_value = tmp_path / "nope"
+        assert vm_state() == "absent"
+
+    @patch("scad.vm.colima_socket_path")
+    @patch("scad.vm.colima_profile_dir")
+    def test_stopped_when_socket_missing(self, mock_dir, mock_sock, tmp_path):
+        from scad.vm import vm_state
+        mock_dir.return_value = tmp_path
+        mock_sock.return_value = tmp_path / "docker.sock"
+        assert vm_state() == "stopped"
+
+    @patch("scad.vm.get_docker_client")
+    @patch("scad.vm.colima_socket_path")
+    @patch("scad.vm.colima_profile_dir")
+    def test_running_when_socket_pings(self, mock_dir, mock_sock, mock_client, tmp_path):
+        from scad.vm import vm_state
+        mock_dir.return_value = tmp_path
+        sock = tmp_path / "docker.sock"
+        sock.touch()
+        mock_sock.return_value = sock
+        assert vm_state() == "running"
+
+    @patch("scad.vm.get_docker_client", side_effect=DockerUnavailable("down"))
+    @patch("scad.vm.colima_socket_path")
+    @patch("scad.vm.colima_profile_dir")
+    def test_stopped_when_socket_is_stale(self, mock_dir, mock_sock, _client, tmp_path):
+        from scad.vm import vm_state
+        mock_dir.return_value = tmp_path
+        sock = tmp_path / "docker.sock"
+        sock.touch()
+        mock_sock.return_value = sock
+        assert vm_state() == "stopped"
+
+
+class TestReadVMMounts:
+    @patch("scad.vm.colima_profile_dir")
+    def test_empty_when_no_config(self, mock_dir, tmp_path):
+        from scad.vm import read_vm_mounts
+        mock_dir.return_value = tmp_path
+        assert read_vm_mounts() == []
+
+    @patch("scad.vm.colima_profile_dir")
+    def test_reads_mount_locations(self, mock_dir, tmp_path):
+        from scad.vm import read_vm_mounts
+        mock_dir.return_value = tmp_path
+        (tmp_path / "colima.yaml").write_text(
+            "cpu: 2\nmounts:\n"
+            "  - location: /Volumes/data\n    writable: true\n"
+            "  - location: /srv/models\n    writable: true\n"
+        )
+        assert read_vm_mounts() == ["/Volumes/data", "/srv/models"]
+
+
+class TestVMStart:
+    @patch("scad.vm._colima")
+    @patch("scad.vm.vm_state", return_value="absent")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_creation_passes_sizing_flags(self, _m, _i, _s, mock_colima, tmp_path, monkeypatch):
+        from scad.vm import vm_start
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        vm_start()
+        args = mock_colima.call_args[0]
+        assert args[:2] == ("start", "scad")
+        assert "--cpu" in args and "2" in args
+        assert "--memory" in args and "4" in args
+        assert "--disk" in args and "60" in args
+        assert "--vm-type" in args and "vz" in args
+        assert "--mount-type" in args and "virtiofs" in args
+
+    @patch("scad.vm._colima")
+    @patch("scad.vm.vm_state", return_value="stopped")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_existing_profile_no_sizing_flags(self, _m, _i, _s, mock_colima):
+        from scad.vm import vm_start
+        vm_start()
+        args = mock_colima.call_args[0]
+        assert args == ("start", "scad")
+
+    @patch("scad.vm._colima")
+    @patch("scad.vm.vm_state", return_value="stopped")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_mounts_passed_writable(self, _m, _i, _s, mock_colima):
+        from scad.vm import vm_start
+        vm_start(mounts=["/Volumes/data", "/srv/models"])
+        args = mock_colima.call_args[0]
+        assert "--mount" in args
+        assert "/Volumes/data:w" in args
+        assert "/srv/models:w" in args
+
+    @patch("scad.vm.colima_installed", return_value=False)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_errors_when_colima_missing(self, _m, _i):
+        from scad.vm import VMUnsupported, vm_start
+        with pytest.raises(VMUnsupported) as exc:
+            vm_start()
+        assert "brew install colima" in str(exc.value)
+
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_errors_on_linux(self, _m):
+        from scad.vm import VMUnsupported, vm_start
+        with pytest.raises(VMUnsupported) as exc:
+            vm_start()
+        assert "native Docker" in str(exc.value)
+
+
+class TestEnsureVMRunning:
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_noop_on_linux(self, _m, mock_start):
+        from scad.vm import ensure_vm_running
+        ensure_vm_running()
+        mock_start.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_noop_when_already_running(self, _m, _s, mock_start):
+        from scad.vm import ensure_vm_running
+        ensure_vm_running()
+        mock_start.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_state", return_value="stopped")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_starts_when_stopped(self, _m, _i, _s, mock_start):
+        from scad.vm import ensure_vm_running
+        ensure_vm_running()
+        mock_start.assert_called_once_with()
