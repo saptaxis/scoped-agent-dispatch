@@ -1285,6 +1285,38 @@ class TestGetAllSessions:
         assert results[0]["container"] == "cleaned"
         assert results[0]["clones"] == "-"
 
+    @patch("scad.container.get_docker_client")
+    def test_hoists_docker_client_construction_out_of_the_run_dir_loop(
+        self, mock_docker, tmp_path, monkeypatch
+    ):
+        """Regression test: get_docker_client() (which now also pings) used
+        to be called once per run directory scanned -- `scad status` on a
+        machine with many old runs opened a fresh connection per directory
+        instead of one for the whole scan."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        mock_client = MagicMock()
+        mock_client.containers.list.return_value = []  # step 1: no running containers
+        mock_client.containers.get.side_effect = docker.errors.NotFound("gone")
+        mock_docker.return_value = mock_client
+
+        for i in range(5):
+            run_dir = tmp_path / "runs" / f"demo-{i}-Feb28-1400"
+            run_dir.mkdir(parents=True)
+            (run_dir / "events.log").write_text(
+                f"2026-02-28T14:0{i} start config=demo branch=scad-{i}\n"
+            )
+
+        results = get_all_sessions()
+
+        assert len(results) == 5
+        # One call from list_scad_containers() (step 1) + one hoisted call
+        # for the whole run-dir scan (step 2) -- NOT one per run dir.
+        assert mock_docker.call_count == 2, (
+            f"get_docker_client() must be called a constant number of times "
+            f"regardless of run-dir count, got {mock_docker.call_count} calls "
+            f"for 5 run dirs"
+        )
+
 
 class TestGetSessionInfo:
     def test_basic_info_from_events_log(self, tmp_path, monkeypatch):

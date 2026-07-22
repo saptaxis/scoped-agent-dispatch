@@ -1224,6 +1224,14 @@ def get_all_sessions() -> list[dict]:
 
     # 2. Scan runs dir for all sessions
     if RUNS_DIR.exists():
+        # Connect once for the whole scan rather than once per run dir --
+        # `scad status` on a machine with many old runs used to open (and
+        # ping) a fresh Docker client per directory.
+        try:
+            client = get_docker_client()
+        except (DockerNotFound, DockerException):
+            client = None
+
         for d in RUNS_DIR.iterdir():
             if not d.is_dir() or d.name in sessions:
                 continue
@@ -1231,12 +1239,14 @@ def get_all_sessions() -> list[dict]:
             info = _parse_events_log(run_id)
 
             # Determine container state
-            try:
-                client = get_docker_client()
-                container = client.containers.get(f"scad-{run_id}")
-                container_state = "stopped" if container.status != "running" else "running"
-            except (DockerNotFound, DockerException):
+            if client is None:
                 container_state = "removed"
+            else:
+                try:
+                    container = client.containers.get(f"scad-{run_id}")
+                    container_state = "stopped" if container.status != "running" else "running"
+                except (DockerNotFound, DockerException):
+                    container_state = "removed"
 
             has_clones = _has_workspace_or_worktrees(run_id)
 
