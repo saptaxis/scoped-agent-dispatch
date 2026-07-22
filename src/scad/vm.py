@@ -140,12 +140,19 @@ def _require_colima() -> None:
 
 def _colima(*args: str) -> subprocess.CompletedProcess:
     """Run a colima subcommand, raising VMUnsupported with its stderr on failure."""
-    result = subprocess.run(
-        ["colima", *args],
-        capture_output=True,
-        text=True,
-        timeout=COLIMA_TIMEOUT,
-    )
+    try:
+        result = subprocess.run(
+            ["colima", *args],
+            capture_output=True,
+            text=True,
+            timeout=COLIMA_TIMEOUT,
+        )
+    except subprocess.TimeoutExpired:
+        raise VMUnsupported(
+            f"colima {' '.join(args)} timed out after {COLIMA_TIMEOUT}s.\n"
+            f"  Check on it with:  colima status {SCAD_PROFILE}\n"
+            f"  Or run it by hand: colima start {SCAD_PROFILE}"
+        )
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "").strip()
         raise VMUnsupported(
@@ -179,7 +186,8 @@ def read_vm_config() -> dict:
     path = colima_profile_dir() / "colima.yaml"
     if not path.exists():
         return {}
-    return yaml.safe_load(path.read_text()) or {}
+    parsed = yaml.safe_load(path.read_text())
+    return parsed if isinstance(parsed, dict) else {}
 
 
 def read_vm_mounts() -> list[str]:

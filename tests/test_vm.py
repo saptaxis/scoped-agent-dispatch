@@ -177,12 +177,14 @@ class TestVMStart:
         monkeypatch.setenv("SCAD_HOME", str(tmp_path))
         vm_start()
         args = mock_colima.call_args[0]
-        assert args[:2] == ("start", "scad")
-        assert "--cpu" in args and "2" in args
-        assert "--memory" in args and "4" in args
-        assert "--disk" in args and "60" in args
-        assert "--vm-type" in args and "vz" in args
-        assert "--mount-type" in args and "virtiofs" in args
+        assert args == (
+            "start", "scad",
+            "--cpu", "2",
+            "--memory", "4",
+            "--disk", "60",
+            "--vm-type", "vz",
+            "--mount-type", "virtiofs",
+        )
 
     @patch("scad.vm._colima")
     @patch("scad.vm.vm_state", return_value="stopped")
@@ -202,9 +204,12 @@ class TestVMStart:
         from scad.vm import vm_start
         vm_start(mounts=["/Volumes/data", "/srv/models"])
         args = mock_colima.call_args[0]
-        assert "--mount" in args
-        assert "/Volumes/data:w" in args
-        assert "/srv/models:w" in args
+        assert args == (
+            "start", "scad",
+            "--mount", "/Volumes/data:w",
+            "--mount", "/srv/models:w",
+        )
+        assert args.count("--mount") == 2
 
     @patch("scad.vm.colima_installed", return_value=False)
     @patch("scad.vm.is_macos", return_value=True)
