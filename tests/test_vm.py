@@ -503,10 +503,65 @@ class TestRequiredHostPaths:
             repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}},
             mounts=[{"host": str(tmp_path / "data"), "container": "/data"}],
         )
+        (tmp_path / "data").mkdir()
         paths = [str(p) for p in required_host_paths(config)]
         assert str(tmp_path / "scadhome") in paths
         assert str((tmp_path / "repo").resolve()) in paths
         assert str((tmp_path / "data").resolve()) in paths
+
+    def test_skips_nonexistent_mount_host_unplugged_drive(self, tmp_path, monkeypatch, capsys):
+        """Regression test: an unplugged external drive (mounts[].host does
+        not exist) must be skipped, not passed through to mount_root() where
+        it would silently widen to the parent (e.g. /Volumes)."""
+        from scad.config import ScadConfig
+        from scad.vm import required_host_paths
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scadhome"))
+        volumes = tmp_path / "Volumes"
+        volumes.mkdir()
+        unplugged = volumes / "BigDisk"  # never created -- simulates unplugged
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}},
+            mounts=[{"host": str(unplugged), "container": "/data"}],
+        )
+        paths = [str(p) for p in required_host_paths(config)]
+        assert str(unplugged.resolve()) not in paths
+        assert str(volumes.resolve()) not in paths
+        err = capsys.readouterr().err
+        assert "does not exist" in err
+        assert str(unplugged) in err
+
+    def test_skips_nonexistent_mount_host_typo(self, tmp_path, monkeypatch):
+        """Regression test: a typo'd mounts[].host (e.g. /dat for /data) must
+        be skipped rather than resolving to a dangerously broad parent."""
+        from scad.config import ScadConfig
+        from scad.vm import required_host_paths
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scadhome"))
+        typo = tmp_path / "dat"  # meant "data"; never created
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}},
+            mounts=[{"host": str(typo), "container": "/data"}],
+        )
+        paths = [str(p) for p in required_host_paths(config)]
+        assert str(typo.resolve()) not in paths
+        assert str(tmp_path.resolve()) not in paths
+
+    def test_existing_mount_host_still_included(self, tmp_path, monkeypatch):
+        """Sanity: the skip only applies to non-existent hosts -- a real
+        mount must still come through."""
+        from scad.config import ScadConfig
+        from scad.vm import required_host_paths
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scadhome"))
+        data = tmp_path / "data"
+        data.mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        paths = [str(p) for p in required_host_paths(config)]
+        assert str(data.resolve()) in paths
 
 
 class TestPartitionPaths:
@@ -534,6 +589,34 @@ class TestMountRoot:
         f.parent.mkdir()
         f.touch()
         assert mount_root(f) == (tmp_path / "d").resolve()
+
+    def test_nonexistent_path_maps_to_itself_not_parent(self, tmp_path):
+        """Regression test: an unplugged drive or typo'd path must not
+        silently widen to its parent directory. `/Volumes/BigDisk` unplugged
+        used to resolve to `/Volumes` (every other mounted volume); a
+        typo'd `/dat` (meant `/data`) used to resolve to `/`."""
+        from scad.vm import mount_root
+        missing = tmp_path / "Volumes" / "BigDisk"
+        missing.parent.mkdir()  # parent exists (e.g. /Volumes); the leaf doesn't
+        assert mount_root(missing) == missing.resolve()
+        assert mount_root(missing) != missing.parent.resolve()
+
+    def test_nonexistent_path_with_missing_parent_also_maps_to_itself(self, tmp_path):
+        from scad.vm import mount_root
+        missing = tmp_path / "dat"  # typo for "/data"; tmp_path stands in for "/"
+        assert mount_root(missing) == missing.resolve()
+        assert mount_root(missing) != tmp_path.resolve()
+
+    def test_dangling_symlink_maps_to_itself_not_parent(self, tmp_path):
+        """A dangling symlink resolves to its (non-existent) target, which is
+        neither a real directory nor a real file -- must not widen to the
+        containing directory either."""
+        from scad.vm import mount_root
+        target = tmp_path / "does-not-exist"
+        link = tmp_path / "link"
+        link.symlink_to(target)
+        assert mount_root(link) == target.resolve()
+        assert mount_root(link) != tmp_path.resolve()
 
 
 class TestPathVisibleInVM:
@@ -639,6 +722,7 @@ class TestReconcileVMMounts:
             "scad.vm.colima_default_mounts",
             lambda: {str(home.resolve()), "/tmp/colima"},
         )
+        monkeypatch.setattr("scad.vm._running_scad_container_names", lambda: [])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         config = ScadConfig(
@@ -705,6 +789,7 @@ class TestReconcileVMMounts:
             lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: ["/srv/old"])
+        monkeypatch.setattr("scad.vm._running_scad_container_names", lambda: [])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         config = ScadConfig(
@@ -867,6 +952,7 @@ class TestReconcileVMMounts:
             "scad.vm.colima_default_mounts",
             lambda: {str(home.resolve()), "/tmp/colima"},
         )
+        monkeypatch.setattr("scad.vm._running_scad_container_names", lambda: [])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         config = ScadConfig(
@@ -939,6 +1025,7 @@ class TestReconcileVMMounts:
             lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: [str(data.resolve())])
+        monkeypatch.setattr("scad.vm._running_scad_container_names", lambda: [])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         config = ScadConfig(
@@ -951,3 +1038,170 @@ class TestReconcileVMMounts:
         mock_start.assert_called_once_with(
             mounts=sorted([str(data.resolve()), str(home.resolve()), "/tmp/colima"])
         )
+
+
+class TestReconcileVMMountsPreservesRunningSessions:
+    """Regression tests for the silent-session-kill bug: reconcile_vm_mounts()
+    used to go straight from vm_stop() to vm_start() with no memory of what
+    was running. `colima stop` stops every container in the VM, and
+    run_container() sets no restart policy, so nothing came back -- a
+    headless agent 40 minutes into a job in session A died because session B
+    was started with a new `mounts:` entry. This runs implicitly on every
+    `session start` / `dispatch` / `batch` and cannot prompt (unlike
+    `code_add`'s handling of the identical hazard), so it must warn by name
+    and bring the same containers back up once the VM restart completes."""
+
+    def _config_that_needs_restart(self, tmp_path, monkeypatch):
+        from scad.config import ScadConfig
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
+        )
+        monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: ["/srv/old"])
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        return ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_warns_by_name_before_stopping_running_sessions(
+        self, _mac, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        from scad.vm import reconcile_vm_mounts
+        config = self._config_that_needs_restart(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "scad.vm._running_scad_container_names",
+            lambda: ["scad-alice-Jul22-1000", "scad-bob-Jul22-1030"],
+        )
+        monkeypatch.setattr("scad.vm._restart_scad_containers", lambda names: None)
+
+        result = subprocess_output = None
+        import io
+        import contextlib
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = reconcile_vm_mounts(config)
+        out = buf.getvalue()
+
+        assert result is True
+        assert "scad-alice-Jul22-1000" in out
+        assert "scad-bob-Jul22-1030" in out
+        assert "stop every running scad session" in out
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_restarts_containers_that_were_running_before_the_vm_restart(
+        self, _mac, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """The core of the fix: containers running before the VM restart must
+        actually be started again afterwards, not just named in a warning."""
+        from scad.vm import reconcile_vm_mounts
+        config = self._config_that_needs_restart(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "scad.vm._running_scad_container_names",
+            lambda: ["scad-alice-Jul22-1000"],
+        )
+        mock_client = MagicMock()
+        with patch("scad.vm.get_docker_client", return_value=mock_client):
+            assert reconcile_vm_mounts(config) is True
+
+        mock_client.containers.get.assert_called_once_with("scad-alice-Jul22-1000")
+        mock_client.containers.get.return_value.start.assert_called_once_with()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_no_running_sessions_no_warning_no_restart_calls(
+        self, _mac, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """No running containers -> no false-alarm warning, and no spurious
+        client calls to restart nothing."""
+        from scad.vm import reconcile_vm_mounts
+        config = self._config_that_needs_restart(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.vm._running_scad_container_names", lambda: [])
+        mock_client = MagicMock()
+        with patch("scad.vm.get_docker_client", return_value=mock_client) as mock_get:
+            import io
+            import contextlib
+            buf = io.StringIO()
+            with contextlib.redirect_stdout(buf):
+                assert reconcile_vm_mounts(config) is True
+            out = buf.getvalue()
+        assert "stop every running scad session" not in out
+        mock_client.containers.get.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_reports_container_that_fails_to_restart(
+        self, _mac, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """A container that fails to come back must be reported, not left
+        silently dead."""
+        from scad.vm import reconcile_vm_mounts
+        config = self._config_that_needs_restart(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            "scad.vm._running_scad_container_names",
+            lambda: ["scad-broken-Jul22-1000"],
+        )
+        mock_client = MagicMock()
+        mock_client.containers.get.return_value.start.side_effect = (
+            docker.errors.APIError("container gone")
+        )
+        with patch("scad.vm.get_docker_client", return_value=mock_client):
+            import io
+            import contextlib
+            buf_out, buf_err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(buf_err):
+                assert reconcile_vm_mounts(config) is True
+            combined = buf_out.getvalue() + buf_err.getvalue()
+        assert "scad-broken-Jul22-1000" in combined
+        assert "Failed to restart" in combined
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_running_container_names_come_from_scad_managed_label(
+        self, _mac, _state, mock_stop, mock_start
+    ):
+        """_running_scad_container_names() must filter on the scad.managed
+        label and the scad- name prefix, not list every container in the VM
+        indiscriminately."""
+        from scad.vm import _running_scad_container_names
+        mock_client = MagicMock()
+        managed = MagicMock(name="managed")
+        managed.name = "scad-alice-Jul22-1000"
+        mock_client.containers.list.return_value = [managed]
+        with patch("scad.vm.get_docker_client", return_value=mock_client):
+            names = _running_scad_container_names()
+        assert names == ["scad-alice-Jul22-1000"]
+        mock_client.containers.list.assert_called_once_with(
+            filters={"label": "scad.managed=true"}
+        )
+
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_running_container_names_empty_when_daemon_unreachable(self, _mac):
+        """Enumerating running containers must never itself blow up
+        reconcile -- an unreachable daemon just means nothing is known to be
+        running, which is the safe assumption right before stopping the VM."""
+        from scad.vm import DockerUnavailable, _running_scad_container_names
+        with patch(
+            "scad.vm.get_docker_client", side_effect=DockerUnavailable("down")
+        ):
+            assert _running_scad_container_names() == []

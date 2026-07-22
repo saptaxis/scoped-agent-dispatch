@@ -443,7 +443,27 @@ def required_host_paths(config: "ScadConfig") -> list[Path]:
         paths.append(repo.resolved_path)
 
     for mount in config.mounts:
-        paths.append(Path(mount.host).expanduser().resolve())
+        host_path = Path(mount.host).expanduser().resolve()
+        # Unlike the ~/.claude / ~/.ssh / CLAUDE.md candidates above, a
+        # declared mounts[].host is user-authored and can be wrong: an
+        # unplugged external drive, or a typo. Without this guard, a
+        # non-existent host path reaches mount_root() downstream, which used
+        # to fall back to the path's *parent* for anything that wasn't a
+        # directory -- and a non-existent path isn't a directory either. An
+        # unplugged `/Volumes/BigDisk` silently mounted `/Volumes` (every
+        # other volume on the machine) into the VM; a typo'd `/dat` (meant
+        # `/data`) silently mounted `/`. Skipping here means the mount is
+        # dropped for this reconcile rather than silently widened -- when the
+        # drive comes back (or the typo is fixed), the next reconcile picks
+        # it up normally.
+        if not host_path.exists():
+            click.echo(
+                f"[scad] Warning: mounts: host path does not exist, skipping: "
+                f"{mount.host}",
+                err=True,
+            )
+            continue
+        paths.append(host_path)
 
     if isinstance(config.claude.claude_md, str):
         claude_md_path = Path(config.claude.claude_md).expanduser().resolve()
@@ -472,14 +492,27 @@ def partition_paths(paths: list[Path]) -> tuple[list[Path], list[Path]]:
 
 
 def mount_root(path: Path) -> Path:
-    """Directory to mount for a path — the path itself, or its parent for a file.
+    """Directory to mount for a path — the path itself for a directory, its
+    parent for an existing regular file, and itself again for anything that
+    does not exist on the host.
 
-    A path that does not exist on the host is not a directory either, so it
-    resolves to its parent — a typo'd `mounts:` host path silently mounts the
-    parent directory rather than raising.
+    The parent-fallback is deliberately restricted to existing regular files.
+    A non-existent path is NOT a directory either, but must map to itself,
+    not its parent -- the earlier version fell back to `resolved.parent` for
+    "anything that isn't a directory", which silently widened the mount for
+    any non-existent path: an unplugged `/Volumes/BigDisk` resolved to
+    `/Volumes` (every other mounted volume on the machine), and a typo'd
+    `/dat` (meant `/data`) resolved to `/`. Callers that build the VM's mount
+    list are expected to have already filtered out non-existent paths (see
+    required_host_paths()); returning the path itself here is a second line
+    of defense against exactly that landing here anyway -- it may still not
+    match anything real, but it can never widen to an ancestor the caller
+    never asked for.
     """
     resolved = path.resolve()
-    return resolved if resolved.is_dir() else resolved.parent
+    if resolved.is_file():
+        return resolved.parent
+    return resolved
 
 
 def path_visible_in_vm(path: Path) -> bool:
@@ -495,12 +528,71 @@ def path_visible_in_vm(path: Path) -> bool:
     return str(mount_root(path)) in read_vm_mounts()
 
 
+def _running_scad_container_names() -> list[str]:
+    """Names of currently-running scad-managed containers.
+
+    Used by reconcile_vm_mounts() to know what a VM restart is about to kill
+    (`colima stop` stops every container in the VM) so it can warn and bring
+    them back afterwards. Never raises -- an unreachable daemon just means
+    "nothing known to be running", which is the safe assumption right before
+    stopping the VM anyway.
+    """
+    try:
+        client = get_docker_client()
+        containers = client.containers.list(filters={"label": "scad.managed=true"})
+    except DockerException:
+        return []
+    return sorted(c.name for c in containers if c.name.startswith("scad-"))
+
+
+def _restart_scad_containers(names: list[str]) -> None:
+    """Start each named container back up after a VM restart.
+
+    Mirrors the `client.containers.get(...).start()` approach `code_add`
+    already uses to bring a container back after adding a VM mount. Reports
+    (rather than raises on) any container that fails to come back, since this
+    runs at the end of a restart that already succeeded -- the VM itself is
+    fine even if one session container won't start.
+    """
+    try:
+        client = get_docker_client()
+    except DockerException as exc:
+        click.echo(
+            f"[scad] Could not reach the VM to restart sessions: {exc}\n"
+            f"[scad]   Affected: {', '.join(names)}",
+            err=True,
+        )
+        return
+    failed = []
+    for name in names:
+        try:
+            client.containers.get(name).start()
+            click.echo(f"[scad] Restarted session container: {name}")
+        except DockerException as exc:
+            failed.append((name, exc))
+    if failed:
+        click.echo("[scad] Failed to restart these sessions:", err=True)
+        for name, exc in failed:
+            click.echo(f"[scad]   {name}: {exc}", err=True)
+        click.echo("[scad]   Check them with: scad status", err=True)
+
+
 def reconcile_vm_mounts(config: "ScadConfig") -> bool:
     """Ensure every non-$HOME host path this config needs is mounted in the VM.
 
     Restarts the VM only when the required mount set is not already covered, so
     repeat sessions on an unchanged config never pay a restart. Non-$HOME data
     paths are mounted writable — scad supports bidirectional data mounts.
+
+    A VM restart (`colima stop` + `colima start`) stops every container
+    running in the VM, and run_container() sets no restart policy, so nothing
+    comes back on its own -- a session hours into a headless job in one
+    terminal would otherwise die silently because a *different* session was
+    started with a new `mounts:` entry. This runs implicitly on every
+    `session start` / `dispatch` / `batch`, so it cannot prompt for
+    confirmation the way `code_add` does for the same hazard; instead it
+    names what it's about to stop, and restarts those same containers once
+    the VM is back up, reporting any that fail to come back.
 
     Returns True if the VM was restarted. No-op on Linux.
     """
@@ -525,11 +617,25 @@ def reconcile_vm_mounts(config: "ScadConfig") -> bool:
     if not missing:
         return False
 
+    running = _running_scad_container_names()
+
     click.echo("[scad] VM mount set changed — restarting scad VM to expose:")
     for path in missing:
         click.echo(f"[scad]   {path}")
+    if running:
+        click.echo(
+            "[scad] This will stop every running scad session. Restarting "
+            "these afterwards:"
+        )
+        for name in running:
+            click.echo(f"[scad]   {name}")
+
     if vm_state() == "running":
         vm_stop()
     vm_start(mounts=sorted(current | required))
     click.echo("[scad] VM restarted with updated mounts")
+
+    if running:
+        _restart_scad_containers(running)
+
     return True
