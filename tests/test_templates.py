@@ -81,6 +81,19 @@ class TestDockerfileTemplate:
         )
         assert "DISABLE_AUTOUPDATER=1" in result
 
+    def test_git_delta_arch_resolved_at_build_time(self, jinja_env, sample_config):
+        template = jinja_env.get_template("Dockerfile.j2")
+        result = template.render(
+            base_image=sample_config.base_image,
+            apt_packages=[],
+            requirements_content=False,
+        )
+        # Must not hardcode amd64 - that breaks arm64 containers (e.g. the
+        # Linux VM scad uses on Apple Silicon under Colima).
+        assert "git-delta_0.18.2_amd64.deb" not in result
+        # Arch must be resolved inside the RUN via dpkg, not hardcoded.
+        assert "dpkg --print-architecture" in result
+
     def test_has_entrypoint(self, jinja_env, sample_config):
         template = jinja_env.get_template("Dockerfile.j2")
         result = template.render(

@@ -43,8 +43,10 @@ COPY statusline.sh /home/scad/statusline.sh
 RUN chmod +x /home/scad/statusline.sh
 COPY seed-claude.json seed-settings.json /home/scad/
 
-# git-delta for better diffs
-RUN curl -fsSL https://github.com/dandavison/delta/releases/download/0.18.2/git-delta_0.18.2_amd64.deb -o /tmp/delta.deb \
+# git-delta for better diffs (arch resolved at build time: amd64 on
+# x86_64 Linux, arm64 in the Linux VM scad uses on Apple Silicon)
+RUN DELTA_ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL "https://github.com/dandavison/delta/releases/download/0.18.2/git-delta_0.18.2_${DELTA_ARCH}.deb" -o /tmp/delta.deb \
     && dpkg -i /tmp/delta.deb \
     && rm /tmp/delta.deb
 
