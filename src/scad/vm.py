@@ -28,6 +28,15 @@ if TYPE_CHECKING:
 
 SCAD_PROFILE = "scad"
 
+# Paths Colima mounts into the VM by default when `--mount` is NOT passed at
+# all. Passing any `--mount` flag REPLACES this default set rather than
+# extending it -- confirmed live on 2026-07-22: adding one non-$HOME mount via
+# `--mount` dropped $HOME from the VM entirely, so `~/.claude.json` etc. were
+# invisible and Docker silently bind-mounted empty stub directories in their
+# place. Whenever vm_start() passes explicit mounts, these must be unioned in
+# so Colima's defaults survive.
+COLIMA_DEFAULT_MOUNTS = (str(Path.home()), "/tmp/colima")
+
 # macOS Keychain service name Claude Code stores its OAuth credentials under.
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 
@@ -282,6 +291,11 @@ def vm_start(mounts: list[str] | None = None) -> None:
     Sizing flags are passed only at creation — on an existing profile colima
     reuses its persisted config. When `mounts` is given it must be the COMPLETE
     desired set: colima replaces the configured mount list rather than merging.
+    Passing --mount at all also replaces Colima's own default mount set (see
+    COLIMA_DEFAULT_MOUNTS), so whenever `mounts` is non-empty those defaults
+    are unioned in here to keep them alive. When `mounts` is empty/None, no
+    --mount flags are emitted at all, so colima's defaults (or the profile's
+    persisted config) apply untouched.
     """
     _require_macos("scad vm start")
     _require_colima()
@@ -298,8 +312,9 @@ def vm_start(mounts: list[str] | None = None) -> None:
             "--vm-type", colima.vm_type,
             "--mount-type", colima.mount_type,
         ]
-    for mount in mounts or []:
-        args += ["--mount", f"{mount}:w"]
+    if mounts:
+        for mount in sorted(set(mounts) | set(COLIMA_DEFAULT_MOUNTS)):
+            args += ["--mount", f"{mount}:w"]
 
     _colima(*args)
 

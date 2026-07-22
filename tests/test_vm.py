@@ -301,15 +301,57 @@ class TestVMStart:
     @patch("scad.vm.colima_installed", return_value=True)
     @patch("scad.vm.is_macos", return_value=True)
     def test_mounts_passed_writable(self, _m, _i, _s, mock_colima):
-        from scad.vm import vm_start
+        from scad.vm import COLIMA_DEFAULT_MOUNTS, vm_start
         vm_start(mounts=["/Volumes/data", "/srv/models"])
         args = mock_colima.call_args[0]
-        assert args == (
-            "start", "scad",
-            "--mount", "/Volumes/data:w",
-            "--mount", "/srv/models:w",
+        expected_mounts = sorted(
+            {"/Volumes/data", "/srv/models", *COLIMA_DEFAULT_MOUNTS}
         )
-        assert args.count("--mount") == 2
+        expected_args = ["start", "scad"]
+        for mount in expected_mounts:
+            expected_args += ["--mount", f"{mount}:w"]
+        assert args == tuple(expected_args)
+        assert args.count("--mount") == len(expected_mounts)
+
+    @patch("scad.vm._colima")
+    @patch("scad.vm.vm_state", return_value="stopped")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_mounts_include_colima_defaults(self, _m, _i, _s, mock_colima):
+        """Explicit --mount flags replace Colima's own defaults rather than
+        extending them, so vm_start() must union $HOME and /tmp/colima back
+        in whenever it passes any mounts at all -- otherwise a session with
+        one extra data mount silently loses $HOME (and everything under it,
+        including /workspace's git checkouts) inside the VM.
+
+        Regression test for the live macOS bug confirmed 2026-07-22: adding
+        a single non-$HOME `--mount` dropped $HOME from the running VM,
+        `ls -A ~` inside the VM returned only Docker's empty auto-created
+        stub directories, and the container failed to start.
+        """
+        from scad.vm import vm_start
+        vm_start(mounts=["/ext"])
+        args = mock_colima.call_args[0]
+        mount_flags = [
+            args[i + 1] for i in range(len(args)) if args[i] == "--mount"
+        ]
+        assert f"{Path.home()}:w" in mount_flags
+        assert "/tmp/colima:w" in mount_flags
+        assert "/ext:w" in mount_flags
+
+    @patch("scad.vm._colima")
+    @patch("scad.vm.vm_state", return_value="stopped")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_no_mounts_emits_no_mount_flags(self, _m, _i, _s, mock_colima):
+        """`colima start scad` with no --mount at all reuses the profile's
+        persisted mount config -- passing defaults unconditionally would
+        silently override whatever the user last configured."""
+        from scad.vm import vm_start
+        vm_start()
+        args = mock_colima.call_args[0]
+        assert args == ("start", "scad")
+        assert "--mount" not in args
 
     @patch("scad.vm.colima_installed", return_value=False)
     @patch("scad.vm.is_macos", return_value=True)
@@ -588,3 +630,41 @@ class TestReconcileVMMounts:
         mock_start.assert_called_once_with(
             mounts=sorted(["/srv/old", str(data.resolve())])
         )
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_converges_once_colima_yaml_holds_defaults_plus_extra(
+        self, _mac, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """Regression test for the convergence guarantee: once a restart has
+        written $HOME, /tmp/colima, and the extra mount into colima.yaml,
+        read_vm_mounts() reports all three back on the *next* reconcile.
+        required_host_paths() only ever asks for the non-$HOME one (the
+        $HOME-rooted ones are filtered out by partition_paths), so `missing`
+        must be empty and reconcile must NOT restart the VM a second time.
+        A regression here means the VM restarts on every single session.
+        """
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        # Simulate colima.yaml as left behind by a prior restart: the
+        # defaults vm_start() unioned in, plus the one extra mount.
+        monkeypatch.setattr(
+            "scad.vm.read_vm_mounts",
+            lambda: sorted([str(home.resolve()), "/tmp/colima", str(data.resolve())]),
+        )
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        assert reconcile_vm_mounts(config) is False
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
