@@ -568,6 +568,9 @@ class TestReconcileVMMounts:
         data = tmp_path / "volumes" / "data"
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         config = ScadConfig(
@@ -578,7 +581,9 @@ class TestReconcileVMMounts:
         assert reconcile_vm_mounts(config) is True
         mock_stop.assert_called_once_with()
         mock_start.assert_called_once_with(
-            mounts=sorted(["/srv/old", str(data.resolve())])
+            mounts=sorted(
+                ["/srv/old", str(data.resolve()), str(home.resolve()), "/tmp/colima"]
+            )
         )
 
     @patch("scad.vm.vm_start")
@@ -586,6 +591,8 @@ class TestReconcileVMMounts:
     @patch("scad.vm.is_macos", return_value=True)
     def test_already_mounted_no_restart(self, _mac, mock_stop, mock_start,
                                         tmp_path, monkeypatch):
+        """A healthy VM -- one whose mount list already carries the required
+        path *and* Colima's defaults -- must not be restarted."""
         from scad.config import ScadConfig
         from scad.vm import reconcile_vm_mounts
         home = tmp_path / "home"
@@ -593,7 +600,13 @@ class TestReconcileVMMounts:
         data = tmp_path / "volumes" / "data"
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
-        monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: [str(data.resolve())])
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
+        monkeypatch.setattr(
+            "scad.vm.read_vm_mounts",
+            lambda: [str(data.resolve()), str(home.resolve()), "/tmp/colima"],
+        )
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         config = ScadConfig(
@@ -618,6 +631,9 @@ class TestReconcileVMMounts:
         data = tmp_path / "volumes" / "data"
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
         monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: ["/srv/old"])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
@@ -628,7 +644,9 @@ class TestReconcileVMMounts:
         )
         reconcile_vm_mounts(config)
         mock_start.assert_called_once_with(
-            mounts=sorted(["/srv/old", str(data.resolve())])
+            mounts=sorted(
+                ["/srv/old", str(data.resolve()), str(home.resolve()), "/tmp/colima"]
+            )
         )
 
     @patch("scad.vm.vm_start")
@@ -652,6 +670,9 @@ class TestReconcileVMMounts:
         data = tmp_path / "volumes" / "data"
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
         # Simulate colima.yaml as left behind by a prior restart: the
@@ -668,3 +689,140 @@ class TestReconcileVMMounts:
         assert reconcile_vm_mounts(config) is False
         mock_stop.assert_not_called()
         mock_start.assert_not_called()
+
+
+    # -- Self-healing: once a VM has (or is about to get) an explicit mount
+    # list, Colima's implicit defaults no longer apply, so reconcile must
+    # carry them explicitly. The four cases below are the ones called out in
+    # the hardening spec: a fresh VM needing nothing extra must not pay a
+    # restart (unchanged from before), a fresh VM needing an extra path picks
+    # up the defaults too, an already-healthy VM (defaults + extra already
+    # present) is left alone, and a VM whose defaults were dropped -- the
+    # live bug this reconcile exists to prevent -- gets repaired.
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.read_vm_mounts", return_value=[])
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_fresh_vm_nothing_outside_home_no_restart(
+        self, _mac, _read, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """Fresh VM (current={}), config needs nothing outside $HOME
+        (required={}): no defaults are added, missing={}, no restart --
+        Colima's own implicit defaults are still in force. Must not regress."""
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        monkeypatch.setattr("scad.vm.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        (tmp_path / "repo").mkdir()
+        config = ScadConfig(
+            name="t", repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}}
+        )
+        assert reconcile_vm_mounts(config) is False
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="absent")
+    @patch("scad.vm.read_vm_mounts", return_value=[])
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_fresh_vm_needs_outside_path_restarts_with_defaults(
+        self, _mac, _read, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """Fresh VM (current={}), config needs /ext outside $HOME: required
+        becomes {/ext, $HOME, /tmp/colima} -- the VM is about to get an
+        explicit mount list for the first time, so the defaults must be
+        carried into it or it comes up with $HOME unmounted."""
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        assert reconcile_vm_mounts(config) is True
+        mock_stop.assert_not_called()  # absent VM: nothing to stop
+        mock_start.assert_called_once_with(
+            mounts=sorted([str(data.resolve()), str(home.resolve()), "/tmp/colima"])
+        )
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_healthy_vm_with_defaults_and_extra_no_restart(
+        self, _mac, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """Healthy VM already holding {$HOME, /tmp/colima, /ext}, config
+        needs /ext: missing={}, no restart. The 'never pay a restart on an
+        unchanged config' guarantee must hold."""
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
+        monkeypatch.setattr(
+            "scad.vm.read_vm_mounts",
+            lambda: [str(home.resolve()), "/tmp/colima", str(data.resolve())],
+        )
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        assert reconcile_vm_mounts(config) is False
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_damaged_vm_missing_defaults_restarts_with_repaired_union(
+        self, _mac, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """Damaged VM holding only {/ext} (this is the exact live state left
+        behind by the pre-fix code: colima.yaml holds one external mount and
+        $HOME is not mounted), config needs /ext: missing={$HOME, /tmp/colima}
+        -- reconcile must restart and repair the VM even though the only
+        thing required_host_paths() ever asks for (/ext) is already present."""
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+        )
+        monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: [str(data.resolve())])
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        assert reconcile_vm_mounts(config) is True
+        mock_stop.assert_called_once_with()
+        mock_start.assert_called_once_with(
+            mounts=sorted([str(data.resolve()), str(home.resolve()), "/tmp/colima"])
+        )

@@ -469,6 +469,17 @@ def reconcile_vm_mounts(config: "ScadConfig") -> bool:
     _, outside = partition_paths(required_host_paths(config))
     required = {str(mount_root(p)) for p in outside}
     current = set(read_vm_mounts())
+
+    # Once the VM has (or is about to get) an explicit mount list, Colima's
+    # implicit defaults ($HOME and /tmp/colima) no longer apply -- passing
+    # any --mount flag replaces them rather than extending them (see
+    # COLIMA_DEFAULT_MOUNTS above). So whenever `current` or `required` is
+    # non-empty, the defaults must be carried explicitly in `required` too,
+    # or a VM left with only non-default mounts (e.g. by the pre-fix code
+    # path, or by any other explicit-mount source) will never be repaired.
+    if current or required:
+        required |= set(COLIMA_DEFAULT_MOUNTS)
+
     missing = sorted(required - current)
     if not missing:
         return False
