@@ -1471,3 +1471,56 @@ class TestLazyVMStart:
 
         expected_order = [call.ensure_gpu_supported(config), call.ensure_vm_running()]
         assert manager.mock_calls == expected_order
+
+
+class TestCodeAddVMVisibility:
+    @patch("scad.cli.workspace_add")
+    @patch("scad.cli.path_visible_in_vm", return_value=True)
+    @patch("scad.cli.validate_run_id")
+    def test_visible_path_adds_silently(self, _v, _vis, mock_add, runner):
+        result = runner.invoke(
+            main, ["code", "add", "run-1", "--path", "/Users/t/x", "--name", "x"]
+        )
+        assert result.exit_code == 0
+        assert "restart" not in result.output.lower()
+        mock_add.assert_called_once()
+
+    @patch("scad.cli.workspace_add")
+    @patch("scad.cli.is_macos", return_value=True)
+    @patch("scad.cli.path_visible_in_vm", return_value=False)
+    @patch("scad.cli.validate_run_id")
+    def test_invisible_path_warns_and_skips_by_default(
+        self, _v, _vis, _mac, mock_add, runner
+    ):
+        result = runner.invoke(
+            main, ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d"],
+            input="n\n",
+        )
+        assert result.exit_code != 0
+        assert "not visible" in result.output.lower()
+        mock_add.assert_not_called()
+
+    @patch("scad.cli.get_docker_client")
+    @patch("scad.cli.vm_start")
+    @patch("scad.cli.vm_stop")
+    @patch("scad.cli.vm_state", return_value="running")
+    @patch("scad.cli.read_vm_mounts", return_value=[])
+    @patch("scad.cli.mount_root", return_value=Path("/Volumes/d"))
+    @patch("scad.cli.workspace_add")
+    @patch("scad.cli.is_macos", return_value=True)
+    @patch("scad.cli.path_visible_in_vm", return_value=False)
+    @patch("scad.cli.validate_run_id")
+    def test_restart_vm_flag_adds_mount_then_adds_path(
+        self, _v, _vis, _mac, mock_add, _root, _read, _state,
+        mock_stop, mock_start, mock_client, runner
+    ):
+        result = runner.invoke(
+            main,
+            ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d",
+             "--restart-vm"],
+        )
+        assert result.exit_code == 0
+        mock_stop.assert_called_once_with()
+        mock_start.assert_called_once_with(mounts=["/Volumes/d"])
+        mock_add.assert_called_once()
+        mock_client.return_value.containers.get.assert_called_once_with("scad-run-1")

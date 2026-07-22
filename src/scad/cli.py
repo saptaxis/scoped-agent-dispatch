@@ -27,6 +27,9 @@ from scad.vm import (
     ensure_vm_running,
     get_docker_client,
     is_macos,
+    mount_root,
+    path_visible_in_vm,
+    read_vm_mounts,
     reconcile_vm_mounts,
     vm_delete,
     vm_info,
@@ -1256,11 +1259,49 @@ def session_refresh(run_id: str):
 @click.option("--path", required=True, help="Host path to add.")
 @click.option("--name", required=True, help="Name in workspace/.")
 @click.option("--clone", is_flag=True, help="Git clone instead of symlink.")
-def code_add(run_id: str, path: str, name: str, clone: bool):
+@click.option(
+    "--restart-vm",
+    is_flag=True,
+    help="macOS: add the path to the scad VM and restart it (stops running sessions).",
+)
+def code_add(run_id: str, path: str, name: str, clone: bool, restart_vm: bool):
     """Add a directory to a session's workspace."""
     validate_run_id(run_id)
+
+    # A VM mount can only be added at (re)start, so a non-$HOME path on macOS
+    # cannot be hot-added — without this check the container would see an empty
+    # directory rather than the data.
+    if not path_visible_in_vm(Path(path).expanduser()):
+        target = str(mount_root(Path(path).expanduser()))
+        click.echo(
+            f"[scad] '{target}' is not visible inside the scad VM.\n"
+            "[scad] It lives outside $HOME, and VM mounts can only be added at "
+            "restart.\n"
+            "[scad] Restarting the VM stops every running scad session; scad will "
+            f"restart this one ({run_id}) afterwards.",
+            err=True,
+        )
+        if not restart_vm:
+            click.confirm("[scad] Add the mount and restart the VM now?", abort=True)
+
+        mounts = sorted(set(read_vm_mounts()) | {target})
+        if vm_state() == "running":
+            vm_stop()
+        vm_start(mounts=mounts)
+        click.echo(f"[scad] VM restarted with {target} mounted")
+
+        try:
+            get_docker_client().containers.get(f"scad-{run_id}").start()
+            click.echo(f"[scad] Restarted session container: {run_id}")
+        except docker.errors.DockerException as e:
+            click.echo(
+                f"[scad] Could not restart the session container: {e}\n"
+                f"[scad] Check it with: scad status",
+                err=True,
+            )
+
     try:
-        result = workspace_add(run_id, path, name, clone=clone)
+        workspace_add(run_id, path, name, clone=clone)
         mode = "cloned" if clone else "symlinked"
         click.echo(f"[scad] Added {name} ({mode}): {path}")
     except FileExistsError as e:
