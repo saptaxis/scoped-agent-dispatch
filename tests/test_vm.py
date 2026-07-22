@@ -32,6 +32,25 @@ class TestPlatformDetection:
         assert is_macos() is False
 
 
+class TestColimaDefaultMountsDocstring:
+    """colima_default_mounts()'s docstring must not claim /tmp/colima is a
+    real Colima default -- live profile inspection (2026-07-22) shows
+    Colima's only actual implicit mount is $HOME."""
+
+    def test_does_not_claim_tmp_colima_is_a_real_colima_default(self):
+        import scad.vm as vm
+        doc = vm.colima_default_mounts.__doc__ or ""
+        assert "is not one of Colima's defaults" in doc or "not a real colima default" in doc.lower()
+
+    def test_still_returns_both_entries(self):
+        """Behavior is unchanged by the docstring fix -- both entries still
+        get unioned in defensively."""
+        from scad.vm import colima_default_mounts
+        result = colima_default_mounts()
+        assert str(Path("/tmp/colima").resolve()) in result
+        assert str(Path.home().resolve()) in result
+
+
 class TestSocketResolution:
     def test_profile_name_is_scad(self):
         assert SCAD_PROFILE == "scad"
@@ -82,6 +101,35 @@ class TestGetDockerClient:
         with pytest.raises(DockerUnavailable) as exc:
             get_docker_client()
         assert "dockerd" in str(exc.value)
+
+    @patch("scad.vm.is_macos", return_value=False)
+    @patch(
+        "scad.vm.docker.from_env",
+        side_effect=PermissionError(13, "Permission denied"),
+    )
+    def test_linux_failure_includes_underlying_error_detail(self, _from_env, _mac):
+        """`raise ... from exc` alone only sets __cause__, which no caller
+        prints -- a Linux user not in the docker group used to see the real
+        PermissionError(13); after DockerUnavailable this collapsed to the
+        generic "is dockerd running?" guidance, sending them to check
+        `systemctl status docker` (which reports it active) instead of the
+        actual fix. The underlying exception text must be in the message
+        itself, not just __cause__."""
+        with pytest.raises(DockerUnavailable) as exc:
+            get_docker_client()
+        assert "Permission denied" in str(exc.value)
+        assert "13" in str(exc.value)
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.Path.home", return_value=Path("/Users/tester"))
+    @patch(
+        "scad.vm.docker.DockerClient",
+        side_effect=OSError("No such file or directory: '/Users/tester/.colima/scad/docker.sock'"),
+    )
+    def test_macos_failure_includes_underlying_error_detail(self, _cls, _home, _mac):
+        with pytest.raises(DockerUnavailable) as exc:
+            get_docker_client()
+        assert "No such file or directory" in str(exc.value)
 
     def test_docker_unavailable_is_a_docker_exception(self):
         assert issubclass(DockerUnavailable, docker.errors.DockerException)
@@ -367,6 +415,25 @@ class TestVMStart:
         with pytest.raises(VMUnsupported) as exc:
             vm_start()
         assert "native Docker" in str(exc.value)
+
+    @patch("scad.vm._colima")
+    @patch("scad.vm.vm_state", return_value="absent")
+    @patch("scad.vm.colima_installed", return_value=True)
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_malformed_settings_raises_vm_unsupported_not_raw_error(
+        self, _m, _i, _s, mock_colima, tmp_path, monkeypatch
+    ):
+        """A typo'd ~/.scad/settings.yml key must surface as a clean
+        VMUnsupported (`[scad] ...`) out of vm_start(), not a bare pydantic
+        ValidationError traceback."""
+        from scad.vm import VMUnsupported, vm_start
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        settings_path = tmp_path / "settings.yml"
+        settings_path.write_text("colima:\n  cpus: 6\n")
+        with pytest.raises(VMUnsupported) as exc:
+            vm_start()
+        assert str(settings_path) in str(exc.value)
+        mock_colima.assert_not_called()
 
 
 class TestEnsureVMRunning:

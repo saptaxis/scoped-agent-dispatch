@@ -29,13 +29,24 @@ if TYPE_CHECKING:
 SCAD_PROFILE = "scad"
 
 def colima_default_mounts() -> set[str]:
-    """Paths Colima mounts into the VM by default when `--mount` is NOT passed
-    at all. Passing any `--mount` flag REPLACES this default set rather than
-    extending it -- confirmed live on 2026-07-22: adding one non-$HOME mount
-    via `--mount` dropped $HOME from the VM entirely, so `~/.claude.json` etc.
-    were invisible and Docker silently bind-mounted empty stub directories in
-    their place. Whenever vm_start() passes explicit mounts, these must be
-    unioned in so Colima's defaults survive.
+    """Paths this set treats as Colima's implicit mounts -- the set that must
+    be carried explicitly into any `--mount` flag list, since passing `--mount`
+    at all REPLACES Colima's own implicit mounts rather than extending them --
+    confirmed live on 2026-07-22: adding one non-$HOME mount via `--mount`
+    dropped $HOME from the VM entirely, so `~/.claude.json` etc. were invisible
+    and Docker silently bind-mounted empty stub directories in their place.
+    Whenever vm_start() passes explicit mounts, these must be unioned in so
+    $HOME survives.
+
+    Note this set is broader than Colima's *actual* default: live profile
+    inspection (2026-07-22) shows Colima's only real implicit mount is $HOME
+    -- `/tmp/colima` is not one of Colima's defaults. It is kept in this set
+    anyway as a defensive no-op: `/tmp/colima` is scad's own scratch mount
+    from earlier in this branch's history, and unioning in a path that
+    happens not to be a real Colima default is harmless (it just always ends
+    up in `required`), whereas dropping a path that *is* a real default
+    (i.e. getting this set too narrow) reproduces the $HOME-disappears bug
+    above. Do not read this docstring as documenting a real colima default.
 
     A function rather than a module-level constant so `Path.home()` is
     resolved on every call instead of being frozen at import time -- that
@@ -91,18 +102,29 @@ def docker_base_url() -> str | None:
     return None
 
 
-def _unavailable_message() -> str:
-    """Actionable guidance for an unreachable daemon, per platform."""
+def _unavailable_message(exc: Exception) -> str:
+    """Actionable guidance for an unreachable daemon, per platform.
+
+    Includes the underlying exception text as a `Detail:` line. `raise ... from
+    exc` alone only sets `__cause__`, which no caller here prints -- a Linux
+    user not in the `docker` group used to see the real
+    `PermissionError(13, 'Permission denied')`; after DockerUnavailable was
+    introduced they saw only the generic "is dockerd running?" guidance, which
+    sends them to check `systemctl status docker` (which reports it active)
+    instead of the actual fix (re-login after `usermod -aG docker`).
+    """
     if is_macos():
-        return (
+        guidance = (
             f"Cannot reach the scad Docker daemon at {colima_socket_path()}.\n"
             "  Start it with:  scad vm start\n"
             "  Not installed?  re-run scad's install.sh (or: brew install colima docker)"
         )
-    return (
-        "Cannot reach the Docker daemon — is dockerd running?\n"
-        "  Try:  systemctl status docker   (or: sudo systemctl start docker)"
-    )
+    else:
+        guidance = (
+            "Cannot reach the Docker daemon — is dockerd running?\n"
+            "  Try:  systemctl status docker   (or: sudo systemctl start docker)"
+        )
+    return f"{guidance}\n  Detail: {exc}"
 
 
 def get_docker_client() -> docker.DockerClient:
@@ -126,7 +148,7 @@ def get_docker_client() -> docker.DockerClient:
         # docker-py leaks connection failures rather than raising DockerException:
         # requests.exceptions.RequestException subclasses OSError, so this pair
         # covers a dead or missing socket without depending on requests directly.
-        raise DockerUnavailable(_unavailable_message()) from exc
+        raise DockerUnavailable(_unavailable_message(exc)) from exc
 
 
 def docker_cli_env() -> dict[str, str]:
@@ -314,9 +336,16 @@ def vm_start(mounts: list[str] | None = None) -> None:
 
     args = ["start", SCAD_PROFILE]
     if vm_state() == "absent":
-        from scad.config import load_settings
+        from scad.config import SettingsError, load_settings
 
-        colima = load_settings().colima
+        try:
+            colima = load_settings().colima
+        except SettingsError as exc:
+            # Surfaced as VMUnsupported (a click.ClickException) so every
+            # call site that already does `except VMUnsupported as e:
+            # click.echo(f"[scad] {e.message}")` picks this up for free,
+            # instead of a bare pydantic/yaml traceback escaping vm_start().
+            raise VMUnsupported(str(exc)) from exc
         args += [
             "--cpu", str(colima.cpu),
             "--memory", str(colima.memory),

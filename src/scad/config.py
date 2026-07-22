@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Optional
 
 import yaml
-from pydantic import BaseModel, model_validator
+from pydantic import BaseModel, ValidationError, model_validator
 
 
 def get_scad_home() -> Path:
@@ -153,13 +153,34 @@ def get_settings_path() -> Path:
     return get_scad_home() / "settings.yml"
 
 
+class SettingsError(Exception):
+    """~/.scad/settings.yml is malformed YAML or fails schema validation.
+
+    Raised instead of letting a bare `yaml.YAMLError` or pydantic
+    `ValidationError` escape `load_settings()` as a raw traceback -- callers
+    (e.g. `scad.vm.vm_start()`) turn this into a clean `[scad] ...` message
+    naming the settings file. The original exception is chained via `from`.
+    """
+
+
 def load_settings() -> ScadSettings:
-    """Load ~/.scad/settings.yml, falling back to defaults when absent."""
+    """Load ~/.scad/settings.yml, falling back to defaults when absent.
+
+    Raises SettingsError (naming the settings file) on malformed YAML or a
+    schema mismatch (e.g. a typo'd key), instead of letting a bare
+    yaml.YAMLError / pydantic.ValidationError escape as a raw traceback.
+    """
     path = get_settings_path()
     if not path.exists():
         return ScadSettings()
-    raw = yaml.safe_load(path.read_text()) or {}
-    return ScadSettings(**raw)
+    try:
+        raw = yaml.safe_load(path.read_text()) or {}
+    except yaml.YAMLError as exc:
+        raise SettingsError(f"{path} is not valid YAML: {exc}") from exc
+    try:
+        return ScadSettings(**raw)
+    except ValidationError as exc:
+        raise SettingsError(f"{path} has invalid settings: {exc}") from exc
 
 
 def _ensure_config_dir() -> None:

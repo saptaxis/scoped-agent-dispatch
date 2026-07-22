@@ -346,9 +346,28 @@ class TestScadSettings:
         assert get_settings_path() == tmp_path / "settings.yml"
 
     def test_unknown_key_rejected(self, tmp_path, monkeypatch):
-        from scad.config import load_settings
+        """A typo'd key (e.g. 'cpus' for 'cpu') must surface as a clean
+        SettingsError naming the settings file, not a bare pydantic
+        ValidationError traceback escaping load_settings()."""
+        from scad.config import SettingsError, load_settings
         import pydantic
         monkeypatch.setenv("SCAD_HOME", str(tmp_path))
-        (tmp_path / "settings.yml").write_text("colima:\n  cpus: 6\n")
-        with pytest.raises(pydantic.ValidationError):
+        settings_path = tmp_path / "settings.yml"
+        settings_path.write_text("colima:\n  cpus: 6\n")
+        with pytest.raises(SettingsError) as exc_info:
             load_settings()
+        assert str(settings_path) in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, pydantic.ValidationError)
+
+    def test_malformed_yaml_raises_settings_error(self, tmp_path, monkeypatch):
+        """Malformed YAML must surface as SettingsError, not a bare
+        yaml.YAMLError traceback."""
+        from scad.config import SettingsError, load_settings
+        import yaml
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        settings_path = tmp_path / "settings.yml"
+        settings_path.write_text("colima:\n  cpu: [unterminated\n")
+        with pytest.raises(SettingsError) as exc_info:
+            load_settings()
+        assert str(settings_path) in str(exc_info.value)
+        assert isinstance(exc_info.value.__cause__, yaml.YAMLError)
