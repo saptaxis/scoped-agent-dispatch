@@ -8,6 +8,7 @@ testing the Python helper it calls for plugin registration.
 import json
 import os
 import subprocess
+import tempfile
 import textwrap
 from pathlib import Path
 from unittest.mock import patch, MagicMock
@@ -414,6 +415,137 @@ class TestPlatformBranch:
         )
         assert result.returncode == 0
         assert "Docker provider" in result.stdout
+
+
+class TestDockerCheckNonFatalOnLinux:
+    """Regression tests for the Linux Step 1.5 daemon check: it must warn and
+    continue, never abort the install, since the standard Linux bootstrap
+    (install Docker -> usermod -aG docker $USER -> install scad -> log out/in)
+    always fails this check in the *current* session."""
+
+    def _script(self):
+        return Path(__file__).parent.parent / "install.sh"
+
+    def _linux_branch(self):
+        content = self._script().read_text()
+        # Step 1.5 is the second Linux/Darwin platform switch in the file
+        # (the first is the --dry-run preview block) -- scope past that.
+        step_1_5 = content.split("# --- Step 1.5:", 1)[1]
+        after_linux = step_1_5.split('elif [[ "$OS" == "Linux" ]]; then', 1)[1]
+        return after_linux.split('elif [[ "$OS" == "Darwin" ]]; then', 1)[0]
+
+    def test_linux_daemon_check_does_not_exit_on_failure(self):
+        """The Linux branch's daemon-check failure path must not `exit 1` --
+        that's the bug: pip install already ran, but symlink/completions/
+        plugin registration (Steps 2-5) never get a chance to run."""
+        branch = self._linux_branch()
+        # Isolate just the failure arm of the `if ... ; else ... fi` --
+        # anchored on the indented `else`/`fi` lines, not a bare substring
+        # match (which false-positives on words like "fi" inside "first").
+        failure_arm = branch.split("\n    else\n", 1)[1].split("\n    fi\n", 1)[0]
+        assert "exit 1" not in failure_arm, (
+            "Linux docker-check failure must be a warning, not exit 1 "
+            f"-- found in:\n{failure_arm}"
+        )
+
+    def test_linux_daemon_check_says_it_is_continuing(self):
+        branch = self._linux_branch()
+        assert "Continuing install" in branch or "continuing" in branch.lower()
+
+    def test_macos_daemon_check_still_exits_on_failure(self):
+        """macOS stays fatal -- a missing VM there means nothing will work."""
+        content = self._script().read_text()
+        step_1_5 = content.split("# --- Step 1.5:", 1)[1]
+        macos_branch = step_1_5.split('elif [[ "$OS" == "Darwin" ]]; then', 1)[1]
+        # The second (scad-VM) daemon check in the macOS branch.
+        section = macos_branch.split("Verifying scad Docker daemon", 1)[1]
+        failure_arm = section.split("\n    else\n", 1)[1].split("\n    fi\n", 1)[0]
+        assert "exit 1" in failure_arm
+
+    def test_dry_run_still_works_after_the_change(self, tmp_path):
+        """Sanity: --dry-run still exits 0 and never reaches Step 1.5."""
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path)
+        env["SCAD_INSTALL_VENV"] = str(tmp_path / "venv")
+        result = subprocess.run(
+            [str(self._script()), "--dry-run"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert result.returncode == 0
+
+
+class TestDescribeDockerCheckFailure:
+    """`describe_docker_check_failure()` must distinguish a genuinely
+    unreachable daemon from `ModuleNotFoundError: scad.vm` (install.sh run
+    against a PyPI release predating macOS/Colima support) -- commit f813eb4
+    claimed to do this but only ever appended a `Detail:` line under the same
+    hard-coded 'no reachable Docker daemon' header, regardless of cause.
+
+    These tests extract and execute the real function body from install.sh
+    (rather than reimplementing the logic), so an edit that regresses the
+    distinction in the live script fails them.
+    """
+
+    def _run_function(self, detail: str, default_header: str) -> str:
+        """Extract describe_docker_check_failure() from the live install.sh
+        into a temp file and source+call it -- exercises the real function
+        body, not a reimplementation. (A `source <(...)` process substitution
+        was tried first but silently fails to define the function under this
+        sandbox's /bin/bash 3.2, so a real temp file is used instead.)"""
+        script = Path(__file__).parent.parent / "install.sh"
+        extract = subprocess.run(
+            ["sed", "-n", "/^describe_docker_check_failure() {/,/^}/p", str(script)],
+            capture_output=True, text=True, timeout=10,
+        )
+        assert extract.stdout.strip(), "could not find describe_docker_check_failure() in install.sh"
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write(extract.stdout)
+            func_file = f.name
+        try:
+            result = subprocess.run(
+                ["bash", "-c",
+                 'source "$1"; VENV_DIR=/fake/venv describe_docker_check_failure "$2" "$3"',
+                 "install-sh-test", func_file, detail, default_header],
+                capture_output=True, text=True, timeout=10,
+            )
+        finally:
+            os.unlink(func_file)
+        assert result.returncode == 0, result.stderr
+        return result.stdout
+
+    def test_module_not_found_gets_upgrade_message_not_daemon_message(self):
+        out = self._run_function(
+            "ModuleNotFoundError: No module named 'scad.vm'",
+            "[scad] ERROR: no reachable Docker daemon.",
+        )
+        assert "predates macOS/Colima support" in out
+        assert "pip install --upgrade" in out
+        assert "no reachable Docker daemon" not in out
+
+    def test_alternate_module_not_found_phrasing_also_detected(self):
+        """Python's ImportError phrasing for a missing submodule varies
+        slightly by version; cover the `No module named 'scad.vm'` form too."""
+        out = self._run_function(
+            "Traceback (most recent call last):\n"
+            "ImportError: No module named 'scad.vm'",
+            "[scad] ERROR: no reachable Docker daemon.",
+        )
+        assert "predates macOS/Colima support" in out
+
+    def test_genuine_daemon_failure_uses_the_default_header(self):
+        out = self._run_function(
+            "PermissionError(13, 'Permission denied')",
+            "[scad] WARNING: no reachable Docker daemon (yet).",
+        )
+        assert out.strip() == "[scad] WARNING: no reachable Docker daemon (yet)."
+        assert "predates macOS" not in out
+
+    def test_macos_default_header_preserved(self):
+        out = self._run_function(
+            "OSError: no such file or directory",
+            "[scad] ERROR: the scad VM is not serving Docker.",
+        )
+        assert out.strip() == "[scad] ERROR: the scad VM is not serving Docker."
 
 
 class TestPortableUninstall:

@@ -212,6 +212,27 @@ else
 fi
 
 # --- Step 1.5: Docker provider (platform-branched) ---
+#
+# describe_docker_check_failure: prints a header line that matches the real
+# cause. `get_docker_client()` fails two very different ways and they need
+# very different advice:
+#   - ModuleNotFoundError: scad.vm  -- install.sh ran against a PyPI release
+#     that predates this branch (no scad.vm module at all). No amount of
+#     dockerd/group wrangling fixes this; the venv has the wrong scad.
+#   - anything else -- the daemon genuinely could not be reached (permission,
+#     not running, wrong socket, ...).
+describe_docker_check_failure() {
+    local detail="$1"
+    local default_header="$2"
+    if [[ "$detail" == *"ModuleNotFoundError"*"scad.vm"* ]] || [[ "$detail" == *"No module named 'scad.vm'"* ]]; then
+        echo "[scad] ERROR: installed scad predates macOS/Colima support (scad.vm module not found)."
+        echo "[scad]   This venv installed an older scoped-agent-dispatch release from PyPI."
+        echo "[scad]   Upgrade it:  $VENV_DIR/bin/pip install --upgrade scoped-agent-dispatch"
+    else
+        echo "$default_header"
+    fi
+}
+
 if $SKIP_VM; then
     echo "[scad] Skipping Docker provider setup (--no-vm)"
 elif [[ "$OS" == "Linux" ]]; then
@@ -219,12 +240,21 @@ elif [[ "$OS" == "Linux" ]]; then
     if DOCKER_CHECK_ERR="$("$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>&1)"; then
         echo "[scad] Docker daemon reachable"
     else
-        echo "[scad] ERROR: no reachable Docker daemon."
+        # Non-fatal: standard Linux bootstrap is install Docker -> usermod -aG
+        # docker $USER -> install scad -> log out/in. Group membership isn't
+        # active in *this* session, so the check above fails here even on a
+        # correct setup. Aborting would leave scad half-installed (pip install
+        # already ran, but no symlink/completions/plugin) with no way for the
+        # printed advice to un-stick the user -- re-running hits the exact
+        # same not-yet-logged-in-again failure. Warn and keep going instead;
+        # `scad status` / the first real command will tell them if it's still
+        # broken after they log back in.
+        describe_docker_check_failure "$DOCKER_CHECK_ERR" "[scad] WARNING: no reachable Docker daemon (yet)."
         echo "[scad]   Install Docker Engine, then:  sudo systemctl enable --now docker"
         echo "[scad]   Add yourself to the docker group:  sudo usermod -aG docker \$USER"
-        echo "[scad]   Then re-run: ./install.sh"
+        echo "[scad]   Then log out and back in (group membership needs a fresh session)"
         echo "[scad]   Detail: $DOCKER_CHECK_ERR"
-        exit 1
+        echo "[scad] Continuing install — scad will not work until the daemon is reachable."
     fi
 elif [[ "$OS" == "Darwin" ]]; then
     echo "[scad] macOS detected — scad uses a dedicated Colima VM"
@@ -271,7 +301,7 @@ print(c.cpu, c.memory, c.disk, c.vm_type, c.mount_type)
     if DOCKER_CHECK_ERR="$("$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>&1)"; then
         echo "[scad] scad Docker daemon reachable: $HOME/.colima/$COLIMA_PROFILE/docker.sock"
     else
-        echo "[scad] ERROR: the scad VM is not serving Docker."
+        describe_docker_check_failure "$DOCKER_CHECK_ERR" "[scad] ERROR: the scad VM is not serving Docker."
         echo "[scad]   Try:  colima start $COLIMA_PROFILE"
         echo "[scad]   On macOS 12 or older, set qemu/sshfs in ~/.scad/settings.yml:"
         echo "[scad]     colima:"
