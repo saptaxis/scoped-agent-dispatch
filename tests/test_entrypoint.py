@@ -1,5 +1,11 @@
 """Entrypoint and Dockerfile template rendering tests."""
 
+import os
+import socket
+import subprocess
+import tempfile
+from pathlib import Path
+
 import pytest
 from jinja2 import Environment, PackageLoader
 
@@ -115,6 +121,159 @@ class TestEntrypointTemplate:
         """Entrypoint configures git to use delta as pager."""
         result = _render_entrypoint(jinja_env)
         assert "core.pager" in result or "delta" in result
+
+
+class TestSSHKeyStagingResilience:
+    """Regression tests for fix 7: the entrypoint's SSH key staging must not
+    kill the container when ~/.ssh contains something `cp -r` can't handle.
+    `cp -r /mnt/host-ssh/. "$HOME/.ssh/"` was unguarded under `set -euo
+    pipefail`; `cp -r` fails on sockets and dangling symlinks. A user with
+    `ControlPath ~/.ssh/cm-%r@%h:%p` (very common) has live control-master
+    sockets in ~/.ssh -> `cp` errors -> entrypoint exits -> container dies
+    immediately, while `session start` had already printed "Container
+    started" and returned success -- the failure only surfaces later as a
+    tmux timeout.
+
+    These tests extract the real SSH-staging block from the rendered
+    template and execute it in a real bash subprocess (substituting a temp
+    directory for the hardcoded /mnt/host-ssh, since that path only exists
+    inside the container), so a regression in the actual shell logic is
+    caught, not just a string search over the template source.
+    """
+
+    def _extract_and_run(self, host_ssh_dir: Path, home_dir: Path) -> subprocess.CompletedProcess:
+        env = Environment(loader=PackageLoader("scad", "templates"))
+        template = env.get_template("entrypoint.sh.j2")
+        rendered = template.render(
+            config_name="test", workdir_key="code", requirements_file=None,
+        )
+        start = rendered.index("# Copy staged SSH keys")
+        # The block ends at the first `fi` on its own line after `start`.
+        end = rendered.index("\nfi\n", start) + len("\nfi\n")
+        block = rendered[start:end]
+        assert "/mnt/host-ssh" in block, "SSH staging block not found as expected"
+        block = block.replace("/mnt/host-ssh", str(host_ssh_dir))
+
+        script = f"#!/bin/bash\nset -euo pipefail\nHOME={home_dir}\n{block}\n"
+        with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as f:
+            f.write(script)
+            script_path = f.name
+        try:
+            return subprocess.run(
+                ["bash", script_path], capture_output=True, text=True, timeout=10,
+            )
+        finally:
+            os.unlink(script_path)
+
+    def _bind_socket(self, path: Path) -> socket.socket:
+        """AF_UNIX bind paths are limited to ~104 bytes on macOS/BSD -- well
+        under pytest's deeply-nested tmp_path. Bind via a relative path after
+        chdir'ing into the target directory to stay under that limit
+        regardless of how long tmp_path itself is."""
+        sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        cwd = os.getcwd()
+        os.chdir(path.parent)
+        try:
+            sock.bind(path.name)
+        finally:
+            os.chdir(cwd)
+        return sock
+
+    def test_survives_a_control_master_socket(self, tmp_path):
+        """The exact live-reported scenario: a ControlMaster socket sitting
+        directly in ~/.ssh must not crash the copy."""
+        host_ssh = tmp_path / "host-ssh"
+        host_ssh.mkdir()
+        (host_ssh / "id_rsa").write_text("fake-private-key")
+        (host_ssh / "id_rsa.pub").write_text("fake-public-key")
+        sock_path = host_ssh / "cm-user@host_22"
+        sock = self._bind_socket(sock_path)
+        assert sock_path.is_socket()
+
+        home = tmp_path / "home"
+        home.mkdir()
+
+        result = self._extract_and_run(host_ssh, home)
+        sock.close()
+
+        assert result.returncode == 0, (
+            f"SSH staging must not fail on a socket -- stdout={result.stdout!r} "
+            f"stderr={result.stderr!r}"
+        )
+
+    def test_still_copies_real_keys_alongside_the_socket(self, tmp_path):
+        host_ssh = tmp_path / "host-ssh"
+        host_ssh.mkdir()
+        (host_ssh / "id_rsa").write_text("fake-private-key")
+        (host_ssh / "id_rsa.pub").write_text("fake-public-key")
+        (host_ssh / "config").write_text("Host *\n  ForwardAgent yes\n")
+        sock_path = host_ssh / "cm-user@host_22"
+        sock = self._bind_socket(sock_path)
+
+        home = tmp_path / "home"
+        home.mkdir()
+
+        result = self._extract_and_run(host_ssh, home)
+        sock.close()
+
+        assert result.returncode == 0
+        ssh_dir = home / ".ssh"
+        assert (ssh_dir / "id_rsa").read_text() == "fake-private-key"
+        assert (ssh_dir / "id_rsa.pub").read_text() == "fake-public-key"
+        assert (ssh_dir / "config").exists()
+        assert not (ssh_dir / "cm-user@host_22").exists(), (
+            "the socket itself must not be copied into the container"
+        )
+
+    def test_keys_still_land_with_correct_permissions(self, tmp_path):
+        """The permission guarantee (0700 dir / 0600 files) must survive
+        even with a socket present."""
+        host_ssh = tmp_path / "host-ssh"
+        host_ssh.mkdir()
+        (host_ssh / "id_rsa").write_text("fake-private-key")
+        sock = self._bind_socket(host_ssh / "cm-user@host_22")
+
+        home = tmp_path / "home"
+        home.mkdir()
+
+        result = self._extract_and_run(host_ssh, home)
+        sock.close()
+
+        assert result.returncode == 0
+        ssh_dir = home / ".ssh"
+        assert oct(ssh_dir.stat().st_mode)[-3:] == "700"
+        assert oct((ssh_dir / "id_rsa").stat().st_mode)[-3:] == "600"
+
+    def test_survives_a_dangling_symlink(self, tmp_path):
+        """A dangling symlink (e.g. from a password manager's SSH agent
+        integration that isn't running) must not crash the copy either."""
+        host_ssh = tmp_path / "host-ssh"
+        host_ssh.mkdir()
+        (host_ssh / "id_rsa").write_text("fake-private-key")
+        (host_ssh / "dangling").symlink_to(host_ssh / "does-not-exist")
+
+        home = tmp_path / "home"
+        home.mkdir()
+
+        result = self._extract_and_run(host_ssh, home)
+
+        assert result.returncode == 0, (
+            f"SSH staging must not fail on a dangling symlink -- "
+            f"stdout={result.stdout!r} stderr={result.stderr!r}"
+        )
+        assert (home / ".ssh" / "id_rsa").read_text() == "fake-private-key"
+
+    def test_no_host_ssh_dir_is_a_noop(self, tmp_path):
+        """Sanity: when nothing is mounted at /mnt/host-ssh, the block must
+        not run at all (guarded by the `[ -d ... ]` check)."""
+        host_ssh = tmp_path / "does-not-exist"
+        home = tmp_path / "home"
+        home.mkdir()
+
+        result = self._extract_and_run(host_ssh, home)
+
+        assert result.returncode == 0
+        assert not (home / ".ssh").exists()
 
 
 class TestDockerfileTemplate:

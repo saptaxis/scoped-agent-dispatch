@@ -52,10 +52,25 @@ if [ -f /mnt/host-gitconfig ]; then
 fi
 git config --global --add safe.directory '*'
 
-# Copy staged SSH keys if mounted (macOS: VM mount layer loses 0600 key modes)
+# Copy staged SSH keys if mounted (macOS: VM mount layer loses 0600 key modes).
+# `cp -r ... .` fails under `set -e` on anything `cp` can't copy -- sockets
+# (a very common one: `ControlPath ~/.ssh/cm-%r@%h:%p` leaves a live
+# control-master socket sitting in ~/.ssh on the host) and dangling symlinks.
+# An unguarded `cp -r` there kills the entrypoint outright -- the container
+# exits immediately, `session start` has *already* printed "Container
+# started" and returned success, and the failure only surfaces minutes later
+# as a tmux timeout. Copy entries one at a time and skip sockets explicitly;
+# `|| true` on the copy itself is a second line of defense for anything else
+# `cp` can't handle (e.g. a dangling symlink). The chmod pass always runs
+# afterwards regardless, so whatever *did* land still gets 0700 dir / 0600
+# files.
 if [ -d /mnt/host-ssh ]; then
     mkdir -p "$HOME/.ssh"
-    cp -r /mnt/host-ssh/. "$HOME/.ssh/"
+    for entry in /mnt/host-ssh/.[!.]* /mnt/host-ssh/*; do
+        [ -e "$entry" ] || [ -L "$entry" ] || continue
+        [ -S "$entry" ] && continue  # skip sockets, e.g. ssh ControlMaster
+        cp -r "$entry" "$HOME/.ssh/" || true
+    done
     chmod 700 "$HOME/.ssh"
     find "$HOME/.ssh" -type f -exec chmod 600 {} +
 fi

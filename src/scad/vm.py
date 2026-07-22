@@ -216,7 +216,13 @@ def stage_claude_credentials(run_id: str) -> Path | None:
     path = get_scad_home() / "runs" / run_id / "claude-credentials.json"
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    # O_NOFOLLOW: this path holds a live OAuth token, so a symlink planted
+    # here (e.g. by another process racing this write, in a run dir that's
+    # otherwise writable) must not be followed -- open() raises ELOOP instead
+    # of silently writing the token through to wherever the symlink points.
+    fd = os.open(
+        path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | os.O_NOFOLLOW, 0o600
+    )
     os.chmod(path, 0o600)  # guarantee 0600 even if the file pre-existed
     with os.fdopen(fd, "w") as f:
         f.write(raw)

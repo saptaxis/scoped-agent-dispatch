@@ -305,6 +305,19 @@ class TestCloneLifecycle:
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
         cleanup_clones("nonexistent")  # should not raise
 
+    def test_cleanup_clones_removes_staged_credentials(self, tmp_path, monkeypatch):
+        """cleanup_clones() must also remove the staged Keychain token."""
+        runs_dir = tmp_path / ".scad" / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        run_dir = runs_dir / "test-run-id"
+        (run_dir / "workspace").mkdir(parents=True)
+        creds_path = run_dir / "claude-credentials.json"
+        creds_path.write_text('{"claudeAiOauth": {"accessToken": "sk-fake-token"}}')
+
+        cleanup_clones("test-run-id")
+
+        assert not creds_path.exists()
+
 
 class TestBuildImage:
     @patch("scad.container.get_docker_client")
@@ -424,6 +437,41 @@ class TestStopContainer:
         )
         result = stop_container("nonexistent")
         assert result is False
+
+    @patch("scad.container.get_docker_client")
+    def test_stop_removes_staged_credentials(self, mock_docker, tmp_path, monkeypatch):
+        """Regression test: a stopped session used to leave the staged
+        Keychain token (macOS) sitting in ~/.scad/runs/<id>/ indefinitely --
+        only `session clean` / `gc` removed it, never a plain `session stop`.
+        A user with many old run dirs ends up with that many plaintext
+        copies of tokens, some still valid."""
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        creds_path = runs_dir / "test-run" / "claude-credentials.json"
+        creds_path.parent.mkdir(parents=True)
+        creds_path.write_text('{"claudeAiOauth": {"accessToken": "sk-fake-token"}}')
+
+        mock_container = MagicMock()
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        result = stop_container("test-run")
+
+        assert result is True
+        assert not creds_path.exists()
+
+    @patch("scad.container.get_docker_client")
+    def test_stop_without_staged_credentials_does_not_raise(
+        self, mock_docker, tmp_path, monkeypatch
+    ):
+        """Idempotent: no staged credentials file (Linux, or already
+        cleaned) must not make stop_container() fail."""
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        mock_container = MagicMock()
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        result = stop_container("test-run")
+        assert result is True
 
 
 class TestRunContainerWorkspaceMounts:

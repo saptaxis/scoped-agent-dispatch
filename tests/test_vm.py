@@ -222,6 +222,29 @@ class TestStageClaudeCredentials:
         assert staged_path.read_text() == '{"fresh": true}'
         assert oct(staged_path.stat().st_mode)[-3:] == "600"
 
+    @patch("scad.vm.read_claude_credentials", return_value='{"claudeAiOauth": {"accessToken": "sk-live-token"}}')
+    def test_refuses_to_follow_a_symlink_planted_at_the_staged_path(
+        self, _creds, tmp_path, monkeypatch
+    ):
+        """O_NOFOLLOW regression test: if something has planted a symlink at
+        the staged-credentials path (e.g. a race, or a hostile run dir), the
+        write must not silently follow it and leak the live OAuth token to
+        wherever the symlink points."""
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        staged_dir = tmp_path / "runs" / "run-1"
+        staged_dir.mkdir(parents=True)
+        staged_path = staged_dir / "claude-credentials.json"
+        escape_target = tmp_path / "elsewhere.json"
+        escape_target.write_text("do-not-overwrite-me")
+        staged_path.symlink_to(escape_target)
+
+        with pytest.raises(OSError):
+            stage_claude_credentials("run-1")
+
+        # The symlink target must be untouched -- the token was never
+        # written through it.
+        assert escape_target.read_text() == "do-not-overwrite-me"
+
 
 class TestNoBareFromEnv:
     """The provider resolver is the only way scad reaches a Docker daemon."""

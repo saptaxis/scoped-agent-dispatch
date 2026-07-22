@@ -484,17 +484,41 @@ def create_clones(
     return paths
 
 
+def _remove_staged_credentials(run_id: str) -> None:
+    """Remove the run-scoped staged Keychain token (macOS), if any.
+
+    stage_claude_credentials() (scad.vm) writes a plaintext copy of the
+    user's Claude OAuth token to ~/.scad/runs/<run_id>/claude-credentials.json
+    on every `session start`, and it used to be cleaned up only by
+    `session clean` / `gc` (which delete the whole run dir) -- `session stop`
+    left it behind indefinitely. A user with many old run dirs ends up with
+    that many plaintext copies of tokens, some still valid.
+
+    Called from both stop_container() and cleanup_clones() so the token is
+    gone as soon as a session stops, not just when it's later cleaned.
+    Idempotent (missing file is not an error) and never raises -- must not
+    fail the stop it's called from.
+    """
+    creds_path = RUNS_DIR / run_id / "claude-credentials.json"
+    try:
+        creds_path.unlink()
+    except OSError:
+        pass
+
+
 def cleanup_clones(run_id: str) -> None:
     """Remove clones for a completed run.
 
     Does NOT fetch branches back — user does that separately.
-    Just deletes the workspace subdirectory under the run dir.
+    Just deletes the workspace subdirectory under the run dir, and the
+    staged Keychain credentials file if one was written for this run.
     """
     # Support both old (worktrees) and new (workspace) layouts
     for subdir in ("workspace", "worktrees"):
         clone_base = RUNS_DIR / run_id / subdir
         if clone_base.exists():
             shutil.rmtree(clone_base)
+    _remove_staged_credentials(run_id)
 
 
 def clean_run(run_id: str) -> None:
@@ -667,7 +691,13 @@ def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
 
 
 def stop_container(run_id: str) -> bool:
-    """Stop a scad container by run ID. Does NOT remove — use clean for that."""
+    """Stop a scad container by run ID. Does NOT remove — use clean for that.
+
+    Also removes this run's staged Keychain credentials file (macOS), if
+    any -- it was previously only cleaned up by `session clean` / `gc`, so a
+    stopped-but-not-cleaned session left a plaintext OAuth token sitting on
+    disk indefinitely.
+    """
     try:
         client = get_docker_client()
     except docker.errors.DockerException:
@@ -676,6 +706,7 @@ def stop_container(run_id: str) -> bool:
     try:
         container = client.containers.get(container_name)
         container.stop(timeout=10)
+        _remove_staged_credentials(run_id)
         return True
     except docker.errors.NotFound:
         return False
