@@ -87,6 +87,44 @@ class TestRenderBuildContext:
         assert req_file.exists()
         assert "numpy" in req_file.read_text()
 
+    def test_requirements_file_mode_is_deterministic(self, sample_config, tmp_path):
+        # Simulate a host checkout where source files are locked down to
+        # 0600 (e.g. Dropbox/iCloud CloudStorage). The copied file in the
+        # build context must still be world-readable regardless, so that
+        # the unprivileged `scad` user in the image can read it after COPY.
+        fake_repo = Path(sample_config.repos["code"].path)
+        fake_repo.mkdir(parents=True, exist_ok=True)
+        src = fake_repo / "requirements.txt"
+        src.write_text("numpy\n")
+        src.chmod(0o600)
+
+        render_build_context(sample_config, tmp_path)
+
+        req_file = tmp_path / "requirements.txt"
+        mode = req_file.stat().st_mode & 0o777
+        assert mode == 0o644, f"expected 0o644, got {oct(mode)}"
+
+    def test_bootstrap_script_mode_is_deterministic(self, sample_config, tmp_path):
+        # Same guarantee for template-sourced files copied from
+        # src/scad/templates/, which are read by the `scad` user at
+        # container runtime (not just build time).
+        import scad.container as container_module
+
+        bootstrap_script = (
+            Path(container_module.__file__).parent
+            / "templates"
+            / "bootstrap-claude.sh"
+        )
+        original_mode = bootstrap_script.stat().st_mode & 0o777
+        try:
+            bootstrap_script.chmod(0o600)
+            render_build_context(sample_config, tmp_path)
+            copied = tmp_path / "bootstrap-claude.sh"
+            mode = copied.stat().st_mode & 0o777
+            assert mode == 0o644, f"expected 0o644, got {oct(mode)}"
+        finally:
+            bootstrap_script.chmod(original_mode)
+
     def test_no_requirements_file(self, tmp_path):
         config = ScadConfig(
             name="test",

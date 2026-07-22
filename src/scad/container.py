@@ -513,6 +513,19 @@ def clean_run(run_id: str) -> None:
         shutil.rmtree(run_dir)
 
 
+def _copy_with_deterministic_mode(src: Path, dst: Path, mode: int = 0o644) -> None:
+    """Copy file contents only (not permission bits) and set a fixed mode.
+
+    Unlike shutil.copy2/copy, this does not inherit the source file's mode,
+    so the build context is not affected by the ambient umask or by
+    restrictive host permissions (e.g. Dropbox/iCloud sync folders forcing
+    0600). This keeps `docker build` COPY results deterministic regardless
+    of where the repo is checked out.
+    """
+    shutil.copyfile(src, dst)
+    os.chmod(dst, mode)
+
+
 def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     """Render Dockerfile and entrypoint into a build context directory."""
     env = _get_jinja_env()
@@ -525,7 +538,7 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
     if config.python.requirements:
         req_path = workdir_repo.resolved_path / config.python.requirements
         if req_path.exists():
-            shutil.copy2(req_path, build_dir / "requirements.txt")
+            _copy_with_deterministic_mode(req_path, build_dir / "requirements.txt")
             requirements_content = True
 
     # Determine requirements file path inside container for entrypoint pip sync
@@ -563,15 +576,15 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
 
     # Copy static bootstrap script
     bootstrap_script = Path(__file__).parent / "templates" / "bootstrap-claude.sh"
-    shutil.copy2(bootstrap_script, build_dir / "bootstrap-claude.sh")
+    _copy_with_deterministic_mode(bootstrap_script, build_dir / "bootstrap-claude.sh")
 
     # Copy .tmux.conf template
     tmux_conf_src = Path(__file__).parent / "templates" / ".tmux.conf"
-    shutil.copy2(tmux_conf_src, build_dir / ".tmux.conf")
+    _copy_with_deterministic_mode(tmux_conf_src, build_dir / ".tmux.conf")
 
     # Copy statusline script
     statusline_src = Path(__file__).parent / "templates" / "statusline.sh"
-    shutil.copy2(statusline_src, build_dir / "statusline.sh")
+    _copy_with_deterministic_mode(statusline_src, build_dir / "statusline.sh")
 
     # Render seed JSON files for entrypoint config seeding
     from scad.claude_config import render_claude_json, render_settings_json
