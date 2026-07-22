@@ -5,6 +5,11 @@
 Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-repo pip install.
 
 ### Added
+- macOS support — scad runs on macOS via a dedicated `scad` Colima VM it owns, isolated from any other Docker. `get_docker_client()` resolves the daemon per-OS (Linux: native; macOS: `~/.colima/scad/docker.sock`); Linux behaviour is unchanged
+- `scad vm start|stop|status|info|delete` — manage the macOS VM; `build`, `session start`, `dispatch`, and `batch` all start it lazily
+- Auto mount-translation on macOS — non-`$HOME` repo and `mounts:` paths are added to the VM's mount list (writable) and the VM restarted, only when the required set changed
+- `~/.scad/settings.yml` — user-level settings; `colima.cpu` (2), `colima.memory` (4 GiB), `colima.disk` (60 GiB), `colima.vm_type` (vz), `colima.mount_type` (virtiofs)
+- `install.sh` platform branch — Linux verifies a reachable dockerd; macOS installs Colima via Homebrew and creates the `scad` profile (`--no-vm` to skip)
 - GPU passthrough — `gpu: true` config option adds an NVIDIA `DeviceRequest` (all GPUs) to the container; requires nvidia-container-toolkit on host
 - Submodule support — `create_clones` runs `git submodule update --init --recursive`; `code fetch` walks submodules and fetches their non-default branches back to the host
 - `pip_install` per-repo config — `pip install --no-deps -e /workspace/<key>` at startup
@@ -12,7 +17,12 @@ Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-re
 - `scad build --no-cache` — bust Docker layer cache
 - `harvest --merge` / `finish --merge` — fast-forward-only merge of fetched branches per repo
 
+### Changed
+- `gpu: true` now errors on macOS — no GPU passthrough into a Lima VM
+
 ### Fixed
+- `install.sh --uninstall` on macOS — shell-config cleanup used GNU-only `sed -i "/x/,+2d"`, which BSD sed silently ignored; rewritten with portable awk and now cleans `~/.bashrc` too
+- macOS container mounts — `/etc/localtime` is no longer bind-mounted (it resolves outside `$HOME` and is invisible in the VM; `TZ` already covers it), and `~/.ssh` is staged through `/mnt/host-ssh` so the entrypoint can restore the 0600 modes OpenSSH requires
 - Submodule fetch — create `scad-*` branch inside submodules, fetch detached submodule HEAD, fetch host submodule objects into container clones, surface fetch errors
 - tmux inject race — poll `tmux has-session` before `new-window`, with container crash detection
 - Dockerfile build speed — create user before pip install, drop `--no-cache-dir`

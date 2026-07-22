@@ -48,7 +48,41 @@ Operational visibility: `scad status` shows running sessions and their jobs, `sc
 
 ## Install
 
-Requires Python 3.11+, Git, and Docker.
+Requires Python 3.11+ and Git.
+
+**Linux** — needs a running Docker daemon. `install.sh` verifies it is reachable and errors with setup guidance if not.
+
+**macOS** — there is no native Docker, so scad runs containers in a dedicated [Colima](https://github.com/abiosoft/colima) VM it owns, under the profile name `scad`, isolated from any other Docker you use. `install.sh` installs Colima via Homebrew if needed and creates the profile; pass `--no-vm` to skip and wire it up yourself. Manage the VM with `scad vm`:
+
+```bash
+scad vm start      # start (creates it on first run)
+scad vm status     # is scad's Docker daemon reachable?
+scad vm info       # sizing, socket, extra mounts
+scad vm stop       # stop; containers are preserved
+scad vm delete     # destroy the VM and everything in it
+```
+
+`build`, `session start`, `dispatch`, and `batch` all start the VM automatically if it is down, so `scad vm start` is rarely needed by hand.
+
+Size the VM in `~/.scad/settings.yml` (defaults shown):
+
+```yaml
+colima:
+  cpu: 2
+  memory: 4          # GiB
+  disk: 60           # GiB
+  vm_type: vz        # "qemu" on macOS 12 or older
+  mount_type: virtiofs   # "sshfs" on macOS 12 or older
+```
+
+Sizing applies at VM creation. To resize: `scad vm delete && scad vm start`.
+
+**macOS caveats**
+
+- Host paths **outside `$HOME`** (external drives, `/Volumes/…`, `/data`) are not visible to the VM by default. scad reconciles this for you at `session start` — it adds any such `mounts:` or repo paths to the VM and restarts it, but only when the set actually changed.
+- `scad code add` of a non-`$HOME` path **cannot** hot-add: a VM mount is only addable at restart. scad warns and offers to restart (`--restart-vm` to skip the prompt); the restart stops running sessions, and scad restarts the target session afterwards.
+- `gpu: true` is **unsupported** on macOS — there is no NVIDIA runtime in a Lima VM. It errors clearly. GPU passthrough stays Linux-only.
+- Docker Desktop and Podman are not supported targets. Colima is *the* macOS provider.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/saptaxis/scoped-agent-dispatch/main/install-remote.sh | bash
@@ -130,6 +164,7 @@ scad config remove <name>                          # unregister config
 
 # Infrastructure
 scad build <config>                                # build/rebuild Docker image
+scad vm start|stop|status|info|delete              # macOS: manage scad's Docker VM
 scad gc [--force]                                  # garbage collection
 ```
 
