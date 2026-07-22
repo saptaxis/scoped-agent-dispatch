@@ -350,3 +350,50 @@ class TestUninstall:
         settings = json.loads(settings_file.read_text())
         assert "scad" not in settings["enabledPlugins"]
         assert settings["enabledPlugins"]["other-plugin"] is True
+
+
+class TestPlatformBranch:
+    def _script(self):
+        return Path(__file__).parent.parent / "install.sh"
+
+    def test_detects_platform(self):
+        content = self._script().read_text()
+        assert "uname -s" in content
+
+    def test_documents_no_vm_flag(self):
+        content = self._script().read_text()
+        assert "--no-vm" in content
+
+    def test_no_vm_flag_is_parsed(self):
+        content = self._script().read_text()
+        assert "SKIP_VM=true" in content
+
+    def test_mentions_colima_profile(self):
+        content = self._script().read_text()
+        assert "colima start scad" in content or 'colima start "$COLIMA_PROFILE"' in content
+
+    def test_linux_branch_verifies_daemon(self):
+        content = self._script().read_text()
+        assert "get_docker_client" in content
+
+    def test_brew_absent_is_a_clear_error(self):
+        content = self._script().read_text()
+        assert "brew install colima" in content
+
+    def test_dry_run_mentions_provider(self, tmp_path):
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path)
+        result = subprocess.run(
+            [str(self._script()), "--dry-run"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert result.returncode == 0
+        assert "Docker provider" in result.stdout
+
+
+class TestPortableUninstall:
+    def test_uninstall_uses_awk_not_gnu_sed(self):
+        content = (Path(__file__).parent.parent / "install.sh").read_text()
+        # BSD sed rejects `sed -i "/x/,+2d"`; the uninstall path must be portable.
+        assert 'sed -i "/$MARKER/,+2d"' not in content
+        assert "awk" in content

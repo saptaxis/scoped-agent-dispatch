@@ -10,8 +10,11 @@ set -euo pipefail
 #   ./install.sh --no-plugin         # skip Claude Code plugin registration
 #   ./install.sh --no-completions    # skip shell completion setup
 #   ./install.sh --uninstall         # remove scad (keeps SCAD_HOME data)
+#   ./install.sh --no-vm             # skip Docker provider provisioning (macOS: no Colima)
 #
-# Assumes: Python 3.11+ and Docker already installed.
+# Assumes: Python 3.11+.
+# Docker provider: Linux — verifies a reachable dockerd. macOS — installs Colima
+# via Homebrew if missing and creates the dedicated `scad` profile (--no-vm skips).
 # Creates a venv, installs scad, symlinks to ~/.local/bin,
 # sets up shell completions, and registers the Claude Code plugin.
 # Auto-detects: shell type (zsh/bash), Claude Code presence.
@@ -25,7 +28,10 @@ DRY_RUN=false
 UNINSTALL=false
 SKIP_PLUGIN=false
 SKIP_COMPLETIONS=false
+SKIP_VM=false
 REPO_DIR=""
+OS="$(uname -s 2>/dev/null || echo unknown)"
+COLIMA_PROFILE="scad"
 
 # --- Parse arguments ---
 while [[ $# -gt 0 ]]; do
@@ -50,9 +56,13 @@ while [[ $# -gt 0 ]]; do
             SKIP_COMPLETIONS=true
             shift
             ;;
+        --no-vm)
+            SKIP_VM=true
+            shift
+            ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: install.sh [--home PATH] [--dry-run] [--uninstall] [--no-plugin] [--no-completions]"
+            echo "Usage: install.sh [--home PATH] [--dry-run] [--uninstall] [--no-plugin] [--no-completions] [--no-vm]"
             exit 1
             ;;
     esac
@@ -89,16 +99,20 @@ if $UNINSTALL; then
         echo "[scad] Removed symlink: $LOCAL_BIN/scad"
     fi
 
-    # Remove zshrc lines (marker-based)
-    ZSHRC="$HOME/.zshrc"
+    # Remove shell config lines (marker-based). awk, not sed: BSD sed (macOS)
+    # rejects `-i` without an argument and the GNU `,+N` address form.
     MARKER="# scad — managed by install.sh"
-    if [[ -f "$ZSHRC" ]] && grep -qF "$MARKER" "$ZSHRC"; then
-        # Remove marker line and the 2 lines after it (SCAD_HOME export + completion eval)
-        sed -i "/$MARKER/,+2d" "$ZSHRC"
-        # Remove trailing blank line if we left one
-        sed -i -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$ZSHRC"
-        echo "[scad] Removed scad lines from ~/.zshrc"
-    fi
+    for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
+        if [[ -f "$RC" ]] && grep -qF "$MARKER" "$RC"; then
+            awk -v marker="$MARKER" '
+                skip > 0            { skip--; next }
+                index($0, marker)==1 { skip = 2; blank = 0; next }
+                /^[[:space:]]*$/    { blank++; next }
+                                    { while (blank > 0) { print ""; blank-- }; print }
+            ' "$RC" > "$RC.scad-tmp" && mv "$RC.scad-tmp" "$RC"
+            echo "[scad] Removed scad lines from $RC"
+        fi
+    done
 
     # Deregister Claude Code plugin
     if [[ -d "$HOME/.claude" ]]; then
@@ -152,6 +166,14 @@ if $DRY_RUN; then
     echo "[scad] Would install: scoped-agent-dispatch into venv"
     echo "[scad] Would symlink: $VENV_DIR/bin/scad → $LOCAL_BIN/scad"
     echo "[scad] Would create: $SCAD_HOME/configs/"
+    if $SKIP_VM; then
+        echo "[scad] Would skip Docker provider setup (--no-vm)"
+    elif [[ "$OS" == "Linux" ]]; then
+        echo "[scad] Would verify Docker provider: native dockerd reachable"
+    elif [[ "$OS" == "Darwin" ]]; then
+        echo "[scad] Would set up Docker provider: colima (brew install if missing)"
+        echo "[scad] Would create Colima profile: $COLIMA_PROFILE"
+    fi
     if $SKIP_COMPLETIONS; then
         echo "[scad] Skipping shell completions (--no-completions)"
     elif [[ -f "$HOME/.zshrc" ]]; then
@@ -180,6 +202,71 @@ if [[ -n "$REPO_DIR" ]]; then
     "$VENV_DIR/bin/pip" install --quiet -e "$REPO_DIR"
 else
     "$VENV_DIR/bin/pip" install --quiet scoped-agent-dispatch
+fi
+
+# --- Step 1.5: Docker provider (platform-branched) ---
+if $SKIP_VM; then
+    echo "[scad] Skipping Docker provider setup (--no-vm)"
+elif [[ "$OS" == "Linux" ]]; then
+    echo "[scad] Verifying Docker daemon..."
+    if "$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>/dev/null; then
+        echo "[scad] Docker daemon reachable"
+    else
+        echo "[scad] ERROR: no reachable Docker daemon."
+        echo "[scad]   Install Docker Engine, then:  sudo systemctl enable --now docker"
+        echo "[scad]   Add yourself to the docker group:  sudo usermod -aG docker \$USER"
+        echo "[scad]   Then re-run: ./install.sh"
+        exit 1
+    fi
+elif [[ "$OS" == "Darwin" ]]; then
+    echo "[scad] macOS detected — scad uses a dedicated Colima VM"
+    if ! command -v colima &>/dev/null; then
+        if ! command -v brew &>/dev/null; then
+            echo "[scad] ERROR: Homebrew not found and colima is not installed."
+            echo "[scad]   Install Homebrew (https://brew.sh), then re-run ./install.sh"
+            echo "[scad]   Or install colima yourself:  brew install colima docker"
+            echo "[scad]   Or skip provisioning:        ./install.sh --no-vm"
+            exit 1
+        fi
+        echo "[scad] Installing colima + docker CLI via Homebrew..."
+        brew install colima docker
+    else
+        echo "[scad] colima already installed"
+    fi
+
+    if [[ -d "$HOME/.colima/$COLIMA_PROFILE" ]]; then
+        echo "[scad] Colima profile '$COLIMA_PROFILE' already exists"
+    else
+        # Sizing comes from ~/.scad/settings.yml (defaults 2 CPU / 4 GiB / 60 GiB)
+        # so bash and Python never disagree about the defaults.
+        read -r VM_CPU VM_MEM VM_DISK VM_TYPE VM_MOUNT <<<"$(
+            "$VENV_DIR/bin/python" -c "
+from scad.config import load_settings
+c = load_settings().colima
+print(c.cpu, c.memory, c.disk, c.vm_type, c.mount_type)
+"
+        )"
+        echo "[scad] Creating Colima profile '$COLIMA_PROFILE' (${VM_CPU} CPU, ${VM_MEM} GiB RAM, ${VM_DISK} GiB disk)..."
+        colima start "$COLIMA_PROFILE" \
+            --cpu "$VM_CPU" --memory "$VM_MEM" --disk "$VM_DISK" \
+            --vm-type "$VM_TYPE" --mount-type "$VM_MOUNT"
+    fi
+
+    echo "[scad] Verifying scad Docker daemon..."
+    if "$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>/dev/null; then
+        echo "[scad] scad Docker daemon reachable: $HOME/.colima/$COLIMA_PROFILE/docker.sock"
+    else
+        echo "[scad] ERROR: the scad VM is not serving Docker."
+        echo "[scad]   Try:  colima start $COLIMA_PROFILE"
+        echo "[scad]   On macOS 12 or older, set qemu/sshfs in ~/.scad/settings.yml:"
+        echo "[scad]     colima:"
+        echo "[scad]       vm_type: qemu"
+        echo "[scad]       mount_type: sshfs"
+        exit 1
+    fi
+else
+    echo "[scad] Unrecognised platform '$OS' — skipping Docker provider setup"
+    echo "[scad] scad supports Linux (native Docker) and macOS (Colima)"
 fi
 
 # --- Step 2: Symlink to PATH ---
