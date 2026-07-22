@@ -18,7 +18,20 @@ import yaml
 
 from scad.config import load_config, list_configs, CONFIG_DIR, SCAD_DIR, ScadConfig
 from scad.prompts import parse_prompt_file
-from scad.vm import docker_cli_env, get_docker_client
+from scad.vm import (
+    SCAD_PROFILE,
+    VMUnsupported,
+    colima_socket_path,
+    docker_cli_env,
+    ensure_vm_running,
+    get_docker_client,
+    is_macos,
+    vm_delete,
+    vm_info,
+    vm_start,
+    vm_state,
+    vm_stop,
+)
 from scad.container import (
     build_image,
     check_claude_auth,
@@ -628,6 +641,120 @@ def build(config_name: str, verbose: bool, no_cache: bool):
     except docker.errors.DockerException as e:
         click.echo(f"[scad] Docker error: {e}", err=True)
         sys.exit(3)
+
+
+def _vm_macos_only(action: str) -> None:
+    """Echo the macOS-only guidance for `action` and exit 2.
+
+    Checked at the CLI layer (via the imported ``is_macos``) rather than
+    relying solely on the VMUnsupported raised inside scad.vm, so that the
+    "Linux" behaviour of these commands is exercised the same way `status`
+    and `info` are — by patching `scad.cli.is_macos` — instead of depending
+    on the real host platform or on colima being installed.
+    """
+    click.echo(
+        f"[scad] '{action}' is macOS-only. On Linux scad uses the native "
+        "Docker daemon directly — there is no scad VM to manage.",
+        err=True,
+    )
+    sys.exit(2)
+
+
+@main.group()
+def vm():
+    """Manage the scad Docker VM (macOS only)."""
+    pass
+
+
+@vm.command("start")
+def vm_start_cmd():
+    """Start the scad VM, creating it on first run."""
+    if not is_macos():
+        _vm_macos_only("scad vm start")
+    try:
+        vm_start()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
+    click.echo(f"[scad] VM '{SCAD_PROFILE}' running — socket: {colima_socket_path()}")
+
+
+@vm.command("stop")
+def vm_stop_cmd():
+    """Stop the scad VM. Containers are preserved but not running."""
+    if not is_macos():
+        _vm_macos_only("scad vm stop")
+    try:
+        vm_stop()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
+    click.echo(f"[scad] VM '{SCAD_PROFILE}' stopped")
+
+
+@vm.command("status")
+def vm_status_cmd():
+    """Show whether scad's Docker daemon is reachable."""
+    if not is_macos():
+        try:
+            get_docker_client()
+            click.echo("[scad] linux — native Docker daemon: reachable")
+        except docker.errors.DockerException as e:
+            click.echo(f"[scad] linux — native Docker daemon: unreachable\n{e}")
+        return
+    state = vm_state()
+    click.echo(f"[scad] VM '{SCAD_PROFILE}': {state}")
+    if state == "absent":
+        click.echo("[scad] Create it with: scad vm start")
+    elif state == "stopped":
+        click.echo("[scad] Start it with: scad vm start")
+
+
+@vm.command("info")
+def vm_info_cmd():
+    """Show the scad VM's sizing, socket, and mounts."""
+    if not is_macos():
+        click.echo("[scad] linux — native Docker daemon, no scad VM")
+        return
+    try:
+        info = vm_info()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
+    click.echo(f"[scad] Profile:    {info['profile']}")
+    click.echo(f"[scad] State:      {info['state']}")
+    click.echo(f"[scad] Socket:     {info['socket']}")
+    click.echo(f"[scad] CPU:        {info['cpu']}")
+    click.echo(f"[scad] Memory:     {info['memory_gib']} GiB")
+    click.echo(f"[scad] Disk:       {info['disk_gib']} GiB")
+    click.echo(f"[scad] VM type:    {info['vm_type']}")
+    click.echo(f"[scad] Mount type: {info['mount_type']}")
+    if info["mounts"]:
+        click.echo("[scad] Extra mounts (beyond $HOME):")
+        for m in info["mounts"]:
+            click.echo(f"[scad]   {m}")
+    else:
+        click.echo("[scad] Extra mounts (beyond $HOME): none")
+
+
+@vm.command("delete")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+def vm_delete_cmd(yes: bool):
+    """Delete the scad VM, including every image and container inside it."""
+    if not is_macos():
+        _vm_macos_only("scad vm delete")
+    if not yes:
+        click.confirm(
+            f"[scad] Delete VM '{SCAD_PROFILE}'? All scad images and containers "
+            "inside it are destroyed.",
+            abort=True,
+        )
+    try:
+        vm_delete()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
+    click.echo(f"[scad] VM '{SCAD_PROFILE}' deleted")
 
 
 @session.command("info")

@@ -1349,3 +1349,68 @@ class TestTopLevelStatus:
         result = runner.invoke(main, ["status", "demo", "--cost"])
         assert result.exit_code == 0
         assert "$3.84" in result.output
+
+
+class TestVMGroup:
+    @patch("scad.cli.vm_start")
+    @patch("scad.cli.is_macos", return_value=True)
+    def test_start_calls_vm_start(self, _mac, mock_start, runner):
+        result = runner.invoke(main, ["vm", "start"])
+        assert result.exit_code == 0
+        mock_start.assert_called_once_with()
+
+    @patch("scad.cli.vm_stop")
+    @patch("scad.cli.is_macos", return_value=True)
+    def test_stop_calls_vm_stop(self, _mac, mock_stop, runner):
+        result = runner.invoke(main, ["vm", "stop"])
+        assert result.exit_code == 0
+        mock_stop.assert_called_once_with()
+
+    @patch("scad.cli.vm_delete")
+    @patch("scad.cli.is_macos", return_value=True)
+    def test_delete_requires_confirmation(self, _mac, mock_delete, runner):
+        result = runner.invoke(main, ["vm", "delete"], input="n\n")
+        mock_delete.assert_not_called()
+        assert result.exit_code != 0
+
+    @patch("scad.cli.vm_delete")
+    @patch("scad.cli.is_macos", return_value=True)
+    def test_delete_yes_skips_prompt(self, _mac, mock_delete, runner):
+        result = runner.invoke(main, ["vm", "delete", "--yes"])
+        assert result.exit_code == 0
+        mock_delete.assert_called_once_with()
+
+    @patch("scad.cli.vm_state", return_value="running")
+    @patch("scad.cli.is_macos", return_value=True)
+    def test_status_reports_state(self, _mac, _state, runner):
+        result = runner.invoke(main, ["vm", "status"])
+        assert result.exit_code == 0
+        assert "running" in result.output
+
+    @patch("scad.cli.get_docker_client")
+    @patch("scad.cli.is_macos", return_value=False)
+    def test_status_on_linux_reports_native_docker(self, _mac, _client, runner):
+        result = runner.invoke(main, ["vm", "status"])
+        assert result.exit_code == 0
+        assert "native Docker" in result.output
+
+    @patch("scad.cli.is_macos", return_value=False)
+    def test_start_on_linux_errors(self, _mac, runner):
+        result = runner.invoke(main, ["vm", "start"])
+        assert result.exit_code == 2
+        assert "macOS-only" in result.output
+
+    @patch("scad.cli.vm_info")
+    @patch("scad.cli.is_macos", return_value=True)
+    def test_info_prints_mounts(self, _mac, mock_info, runner):
+        mock_info.return_value = {
+            "profile": "scad", "state": "running",
+            "socket": "/Users/t/.colima/scad/docker.sock",
+            "cpu": 2, "memory_gib": 4, "disk_gib": 60,
+            "vm_type": "vz", "mount_type": "virtiofs",
+            "mounts": ["/Volumes/data"],
+        }
+        result = runner.invoke(main, ["vm", "info"])
+        assert result.exit_code == 0
+        assert "/Volumes/data" in result.output
+        assert "virtiofs" in result.output
