@@ -166,6 +166,27 @@ class TestReadVMMounts:
         )
         assert read_vm_mounts() == ["/Volumes/data", "/srv/models"]
 
+    @patch("scad.vm.colima_profile_dir")
+    def test_symlinked_mount_matches_reconcile_normalisation(self, mock_dir, tmp_path):
+        """A colima.yaml mount written through a symlink must normalise to the
+        same string reconcile_vm_mounts() computes via mount_root() — otherwise
+        the two sides never agree and the VM restarts on every session."""
+        from scad.vm import mount_root, read_vm_mounts
+        mock_dir.return_value = tmp_path
+
+        real_dir = tmp_path / "real" / "data"
+        real_dir.mkdir(parents=True)
+        link_dir = tmp_path / "link"
+        link_dir.symlink_to(real_dir)
+
+        (tmp_path / "colima.yaml").write_text(
+            f"mounts:\n  - location: {link_dir}\n    writable: true\n"
+        )
+
+        current = read_vm_mounts()
+        required = str(mount_root(link_dir))
+        assert current == [required]
+
 
 class TestVMStart:
     @patch("scad.vm._colima")
@@ -358,7 +379,7 @@ class TestReconcileVMMounts:
     @patch("scad.vm.vm_start")
     @patch("scad.vm.vm_stop")
     @patch("scad.vm.vm_state", return_value="running")
-    @patch("scad.vm.read_vm_mounts", return_value=[])
+    @patch("scad.vm.read_vm_mounts", return_value=["/srv/old"])
     @patch("scad.vm.is_macos", return_value=True)
     def test_new_outside_path_restarts_with_full_set(
         self, _mac, _read, _state, mock_stop, mock_start, tmp_path, monkeypatch
@@ -379,7 +400,9 @@ class TestReconcileVMMounts:
         )
         assert reconcile_vm_mounts(config) is True
         mock_stop.assert_called_once_with()
-        mock_start.assert_called_once_with(mounts=[str(data.resolve())])
+        mock_start.assert_called_once_with(
+            mounts=sorted(["/srv/old", str(data.resolve())])
+        )
 
     @patch("scad.vm.vm_start")
     @patch("scad.vm.vm_stop")

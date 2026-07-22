@@ -195,12 +195,18 @@ def read_vm_config() -> dict:
 
 
 def read_vm_mounts() -> list[str]:
-    """Host paths currently mounted into the scad VM beyond the $HOME default."""
+    """Host paths currently mounted into the scad VM beyond the $HOME default.
+
+    Normalised with expanduser + resolve to match the fully-resolved strings
+    `reconcile_vm_mounts()` builds via `mount_root()` — otherwise a symlink or
+    `~` segment in colima.yaml would make the two sides compare unequal and
+    force a VM restart on every session.
+    """
     mounts = []
     for entry in read_vm_config().get("mounts") or []:
         location = entry.get("location") if isinstance(entry, dict) else str(entry)
         if location:
-            mounts.append(str(Path(location).expanduser()))
+            mounts.append(str(Path(location).expanduser().resolve()))
     return mounts
 
 
@@ -301,7 +307,13 @@ def required_host_paths(config: "ScadConfig") -> list[Path]:
     home = Path.home()
     paths: list[Path] = [get_scad_home()]
 
-    for candidate in (home / ".claude", home / ".ssh", home / ".gitconfig"):
+    candidates = [home / ".claude", home / ".ssh", home / ".gitconfig"]
+    if config.claude.claude_md is None:
+        # Matches claude_config.get_volume_mounts()'s fallback when claude_md
+        # is unset: it mounts home / "CLAUDE.md" implicitly, so that implicit
+        # path needs the same existence guard as the other candidates.
+        candidates.append(home / "CLAUDE.md")
+    for candidate in candidates:
         if candidate.exists():
             paths.append(candidate)
 
@@ -312,7 +324,9 @@ def required_host_paths(config: "ScadConfig") -> list[Path]:
         paths.append(Path(mount.host).expanduser().resolve())
 
     if isinstance(config.claude.claude_md, str):
-        paths.append(Path(config.claude.claude_md).expanduser().resolve())
+        claude_md_path = Path(config.claude.claude_md).expanduser().resolve()
+        if claude_md_path.exists():
+            paths.append(claude_md_path)
 
     return paths
 
@@ -336,7 +350,12 @@ def partition_paths(paths: list[Path]) -> tuple[list[Path], list[Path]]:
 
 
 def mount_root(path: Path) -> Path:
-    """Directory to mount for a path — the path itself, or its parent for a file."""
+    """Directory to mount for a path — the path itself, or its parent for a file.
+
+    A path that does not exist on the host is not a directory either, so it
+    resolves to its parent — a typo'd `mounts:` host path silently mounts the
+    parent directory rather than raising.
+    """
     resolved = path.resolve()
     return resolved if resolved.is_dir() else resolved.parent
 
