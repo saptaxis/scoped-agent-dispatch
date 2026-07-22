@@ -4,7 +4,7 @@ import pytest
 import click
 from click.testing import CliRunner
 from pathlib import Path
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, Mock, call
 
 import docker
 from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions, get_project_status, get_session_usage
@@ -1453,9 +1453,19 @@ class TestLazyVMStart:
     def test_run_agent_guards_then_ensures(self, mock_gpu, mock_ensure, *_rest):
         from scad.cli import run_agent
         from scad.config import ScadConfig
+
+        # Attach both mocks to a shared manager so we can assert relative
+        # call order (a regression swapping the two calls should fail this).
+        manager = Mock()
+        manager.attach_mock(mock_gpu, "ensure_gpu_supported")
+        manager.attach_mock(mock_ensure, "ensure_vm_running")
+
         config = ScadConfig(
             name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
         )
         run_agent(config, branch="b", tag="tg")
         mock_gpu.assert_called_once_with(config)
         mock_ensure.assert_called_once_with()
+
+        expected_order = [call.ensure_gpu_supported(config), call.ensure_vm_running()]
+        assert manager.mock_calls == expected_order

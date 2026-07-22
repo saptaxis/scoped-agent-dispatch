@@ -6,10 +6,22 @@ from click.testing import CliRunner
 import pytest
 
 from scad.cli import main
+from scad.vm import VMUnsupported
 
 
 class TestDispatch:
     """Tests for scad dispatch — start + inject composite."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_vm_guards(self):
+        """Every dispatch invocation now calls these before the build block.
+
+        Real macOS test runners have no colima installed, so these must be
+        mocked in every test that doesn't specifically exercise them.
+        """
+        with patch("scad.cli.ensure_vm_running") as mock_vm, \
+                patch("scad.cli.ensure_gpu_supported") as mock_gpu:
+            yield mock_vm, mock_gpu
 
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.image_exists", return_value=True)
@@ -246,6 +258,59 @@ class TestDispatch:
         assert result.exit_code == 0
         mock_build.assert_called_once()
 
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    def test_dispatch_ensures_vm_running(
+        self, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, _mock_vm_guards
+    ):
+        """dispatch brings the VM up (macOS-lazy-start) before touching Docker."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-test-Mar03-1200"
+        mock_inject.return_value = "demo-test-Mar03-1200-job-001"
+        mock_vm, mock_gpu = _mock_vm_guards
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test", "--prompt", "Do the thing",
+        ])
+        assert result.exit_code == 0
+        mock_vm.assert_called_once_with()
+        mock_gpu.assert_called_once_with(config)
+
+    @patch("scad.cli.build_image")
+    @patch("scad.cli.image_exists")
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.load_config")
+    def test_dispatch_gpu_unsupported_exits_before_build(
+        self, mock_load, mock_auth, mock_img, mock_build, _mock_vm_guards
+    ):
+        """A gpu:true config fails cleanly before the image build even starts."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", gpu=True,
+            repos={"code": RepoConfig(path="/tmp/code", workdir=True)},
+        )
+        mock_load.return_value = config
+        mock_vm, mock_gpu = _mock_vm_guards
+        mock_gpu.side_effect = VMUnsupported("gpu: true is not supported on macOS")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "dispatch", "demo", "--tag", "test", "--prompt", "Do the thing",
+        ])
+        assert result.exit_code == 2
+        assert "gpu" in result.output.lower()
+        mock_img.assert_not_called()
+        mock_build.assert_not_called()
+        mock_vm.assert_not_called()
+
 
 class TestHarvest:
     """Tests for scad harvest — fetch + summary composite."""
@@ -458,6 +523,17 @@ class TestFinish:
 class TestBatch:
     """Tests for scad batch — parallel headless jobs."""
 
+    @pytest.fixture(autouse=True)
+    def _mock_vm_guards(self):
+        """Every batch invocation now calls these before the build block.
+
+        Real macOS test runners have no colima installed, so these must be
+        mocked in every test that doesn't specifically exercise them.
+        """
+        with patch("scad.cli.ensure_vm_running") as mock_vm, \
+                patch("scad.cli.ensure_gpu_supported") as mock_gpu:
+            yield mock_vm, mock_gpu
+
     @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
     @patch("scad.cli.image_exists", return_value=True)
     @patch("scad.cli.run_agent")
@@ -584,3 +660,60 @@ class TestBatch:
             "--parallel", "2",
         ])
         assert result.exit_code == 0
+
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.run_agent")
+    @patch("scad.cli.inject_job")
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.parse_prompt_file")
+    def test_batch_ensures_vm_running(
+        self, mock_parse, mock_load, mock_inject, mock_run_agent, mock_img, mock_auth, _mock_vm_guards
+    ):
+        """batch brings the VM up (macOS-lazy-start) before touching Docker."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", repos={"code": RepoConfig(path="/tmp/code", workdir=True)}
+        )
+        mock_load.return_value = config
+        mock_run_agent.return_value = "demo-batch-Mar03-1200"
+        mock_parse.return_value = ["Prompt A"]
+        mock_inject.return_value = ("demo-batch-Mar03-1200-job-001", 0)
+        mock_vm, mock_gpu = _mock_vm_guards
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "batch", "--prompt-file", "/tmp/prompts.txt",
+        ])
+        assert result.exit_code == 0
+        mock_vm.assert_called_once_with()
+        mock_gpu.assert_called_once_with(config)
+
+    @patch("scad.cli.build_image")
+    @patch("scad.cli.image_exists")
+    @patch("scad.cli.check_claude_auth", return_value=(True, 8.0))
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.parse_prompt_file")
+    def test_batch_gpu_unsupported_exits_before_build(
+        self, mock_parse, mock_load, mock_auth, mock_img, mock_build, _mock_vm_guards
+    ):
+        """A gpu:true config fails cleanly before the image build even starts."""
+        from scad.config import ScadConfig, RepoConfig
+        config = ScadConfig(
+            name="demo", gpu=True,
+            repos={"code": RepoConfig(path="/tmp/code", workdir=True)},
+        )
+        mock_load.return_value = config
+        mock_parse.return_value = ["Prompt A"]
+        mock_vm, mock_gpu = _mock_vm_guards
+        mock_gpu.side_effect = VMUnsupported("gpu: true is not supported on macOS")
+
+        runner = CliRunner()
+        result = runner.invoke(main, [
+            "batch", "demo", "--tag", "batch", "--prompt-file", "/tmp/prompts.txt",
+        ])
+        assert result.exit_code == 2
+        assert "gpu" in result.output.lower()
+        mock_img.assert_not_called()
+        mock_build.assert_not_called()
+        mock_vm.assert_not_called()

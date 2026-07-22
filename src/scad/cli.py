@@ -1339,6 +1339,14 @@ def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
         click.echo(f"[scad] Error: {e}", err=True)
         sys.exit(2)
 
+    # --- Pre-flight: platform capability, then VM (mirrors run_agent order) ---
+    try:
+        ensure_gpu_supported(config)
+        ensure_vm_running()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
+        sys.exit(2)
+
     # --- Auth check ---
     valid, hours = check_claude_auth()
     if not valid:
@@ -1465,6 +1473,14 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
         sys.exit(2)
     except Exception as e:
         click.echo(f"[scad] Config validation error: {e}", err=True)
+        sys.exit(2)
+
+    # --- Pre-flight: platform capability, then VM (mirrors run_agent order) ---
+    try:
+        ensure_gpu_supported(config)
+        ensure_vm_running()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
         sys.exit(2)
 
     # --- Pre-flight: auth check ---
