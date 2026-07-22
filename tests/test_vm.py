@@ -282,3 +282,151 @@ class TestGpuGuard:
             name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}, gpu=True
         )
         ensure_gpu_supported(config)  # must not raise
+
+
+class TestRequiredHostPaths:
+    def test_includes_repos_mounts_and_scad_home(self, tmp_path, monkeypatch):
+        from scad.config import ScadConfig
+        from scad.vm import required_host_paths
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scadhome"))
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}},
+            mounts=[{"host": str(tmp_path / "data"), "container": "/data"}],
+        )
+        paths = [str(p) for p in required_host_paths(config)]
+        assert str(tmp_path / "scadhome") in paths
+        assert str((tmp_path / "repo").resolve()) in paths
+        assert str((tmp_path / "data").resolve()) in paths
+
+
+class TestPartitionPaths:
+    @patch("scad.vm.Path.home", return_value=Path("/Users/tester"))
+    def test_splits_on_home(self, _home):
+        from scad.vm import partition_paths
+        inside, outside = partition_paths(
+            [Path("/Users/tester/code"), Path("/Volumes/data"), Path("/Users/tester")]
+        )
+        assert Path("/Users/tester/code") in inside
+        assert Path("/Users/tester") in inside
+        assert outside == [Path("/Volumes/data")]
+
+
+class TestMountRoot:
+    def test_directory_maps_to_itself(self, tmp_path):
+        from scad.vm import mount_root
+        d = tmp_path / "d"
+        d.mkdir()
+        assert mount_root(d) == d.resolve()
+
+    def test_file_maps_to_parent(self, tmp_path):
+        from scad.vm import mount_root
+        f = tmp_path / "d" / "CLAUDE.md"
+        f.parent.mkdir()
+        f.touch()
+        assert mount_root(f) == (tmp_path / "d").resolve()
+
+
+class TestReconcileVMMounts:
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_noop_on_linux(self, _mac):
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
+        )
+        assert reconcile_vm_mounts(config) is False
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.read_vm_mounts", return_value=[])
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_all_home_paths_no_restart(self, _mac, _read, mock_stop, mock_start,
+                                       tmp_path, monkeypatch):
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        monkeypatch.setattr("scad.vm.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        (tmp_path / "repo").mkdir()
+        config = ScadConfig(
+            name="t", repos={"code": {"path": str(tmp_path / "repo"), "workdir": True}}
+        )
+        assert reconcile_vm_mounts(config) is False
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.read_vm_mounts", return_value=[])
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_new_outside_path_restarts_with_full_set(
+        self, _mac, _read, _state, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        assert reconcile_vm_mounts(config) is True
+        mock_stop.assert_called_once_with()
+        mock_start.assert_called_once_with(mounts=[str(data.resolve())])
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_already_mounted_no_restart(self, _mac, mock_stop, mock_start,
+                                        tmp_path, monkeypatch):
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: [str(data.resolve())])
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        assert reconcile_vm_mounts(config) is False
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.vm_state", return_value="running")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_existing_mounts_are_preserved(self, _mac, _state, mock_stop, mock_start,
+                                           tmp_path, monkeypatch):
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+        home = tmp_path / "home"
+        home.mkdir()
+        data = tmp_path / "volumes" / "data"
+        data.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: ["/srv/old"])
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(data), "container": "/data"}],
+        )
+        reconcile_vm_mounts(config)
+        mock_start.assert_called_once_with(
+            mounts=sorted(["/srv/old", str(data.resolve())])
+        )

@@ -288,3 +288,96 @@ def ensure_gpu_supported(config: "ScadConfig") -> None:
             f"  Remove 'gpu: true' from the '{config.name}' config, or run this "
             "config on a Linux host with nvidia-container-toolkit."
         )
+
+
+def required_host_paths(config: "ScadConfig") -> list[Path]:
+    """Host paths a session for this config needs visible inside the VM.
+
+    Repo sources, declared data mounts, and scad's own state directories. On
+    Linux nothing consumes this — the daemon already sees the whole filesystem.
+    """
+    from scad.config import get_scad_home
+
+    home = Path.home()
+    paths: list[Path] = [get_scad_home()]
+
+    for candidate in (home / ".claude", home / ".ssh", home / ".gitconfig"):
+        if candidate.exists():
+            paths.append(candidate)
+
+    for repo in config.repos.values():
+        paths.append(repo.resolved_path)
+
+    for mount in config.mounts:
+        paths.append(Path(mount.host).expanduser().resolve())
+
+    if isinstance(config.claude.claude_md, str):
+        paths.append(Path(config.claude.claude_md).expanduser().resolve())
+
+    return paths
+
+
+def partition_paths(paths: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Split paths into (inside $HOME, outside $HOME).
+
+    Colima mounts $HOME into the VM by default, so only the second group needs
+    to be added to the VM's mount list.
+    """
+    home = Path.home().resolve()
+    inside: list[Path] = []
+    outside: list[Path] = []
+    for path in paths:
+        try:
+            path.resolve().relative_to(home)
+            inside.append(path)
+        except ValueError:
+            outside.append(path)
+    return inside, outside
+
+
+def mount_root(path: Path) -> Path:
+    """Directory to mount for a path — the path itself, or its parent for a file."""
+    resolved = path.resolve()
+    return resolved if resolved.is_dir() else resolved.parent
+
+
+def path_visible_in_vm(path: Path) -> bool:
+    """True when a host path is already reachable inside the scad VM.
+
+    Always True off macOS — there is no VM hop.
+    """
+    if not is_macos():
+        return True
+    inside, _ = partition_paths([path])
+    if inside:
+        return True
+    return str(mount_root(path)) in read_vm_mounts()
+
+
+def reconcile_vm_mounts(config: "ScadConfig") -> bool:
+    """Ensure every non-$HOME host path this config needs is mounted in the VM.
+
+    Restarts the VM only when the required mount set is not already covered, so
+    repeat sessions on an unchanged config never pay a restart. Non-$HOME data
+    paths are mounted writable — scad supports bidirectional data mounts.
+
+    Returns True if the VM was restarted. No-op on Linux.
+    """
+    if not is_macos():
+        return False
+
+    _, outside = partition_paths(required_host_paths(config))
+    required = {str(mount_root(p)) for p in outside}
+    current = set(read_vm_mounts())
+    missing = sorted(required - current)
+    if not missing:
+        return False
+
+    click.echo("[scad] VM mount set changed — restarting scad VM to expose:")
+    for path in missing:
+        click.echo(f"[scad]   {path}")
+    if vm_state() == "running":
+        vm_stop()
+    vm_start(mounts=sorted(current | required))
+    click.echo("[scad] VM restarted with updated mounts")
+    return True

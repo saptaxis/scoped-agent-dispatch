@@ -27,6 +27,7 @@ from scad.vm import (
     ensure_vm_running,
     get_docker_client,
     is_macos,
+    reconcile_vm_mounts,
     vm_delete,
     vm_info,
     vm_start,
@@ -338,6 +339,7 @@ def run_agent(
     # Capability first so an unsupported config fails before any slow work.
     ensure_gpu_supported(config)
     ensure_vm_running()
+    reconcile_vm_mounts(config)
 
     valid, hours = check_claude_auth()
     if not valid:

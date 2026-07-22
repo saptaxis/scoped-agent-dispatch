@@ -1449,8 +1449,9 @@ class TestLazyVMStart:
     @patch("scad.cli.image_exists", return_value=True)
     @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
     @patch("scad.cli.ensure_vm_running")
+    @patch("scad.cli.reconcile_vm_mounts", return_value=False)
     @patch("scad.cli.ensure_gpu_supported")
-    def test_run_agent_guards_then_ensures(self, mock_gpu, mock_ensure, *_rest):
+    def test_run_agent_guards_then_ensures(self, mock_gpu, mock_reconcile, mock_ensure, *_rest):
         from scad.cli import run_agent
         from scad.config import ScadConfig
 
@@ -1466,6 +1467,7 @@ class TestLazyVMStart:
         run_agent(config, branch="b", tag="tg")
         mock_gpu.assert_called_once_with(config)
         mock_ensure.assert_called_once_with()
+        mock_reconcile.assert_called_once_with(config)
 
         expected_order = [call.ensure_gpu_supported(config), call.ensure_vm_running()]
         assert manager.mock_calls == expected_order
