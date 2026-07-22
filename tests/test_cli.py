@@ -931,10 +931,11 @@ class TestEventLogging:
         runner.invoke(main, ["session", "stop", "test-run"])
         mock_log.assert_called_once_with("test-run", "stop")
 
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli.log_event")
     @patch("scad.cli._subprocess.run")
     @patch("scad.cli.get_docker_client")
-    def test_attach_logs_event(self, mock_docker, mock_subprocess, mock_log, runner):
+    def test_attach_logs_event(self, mock_docker, mock_subprocess, mock_log, mock_validate, runner):
         """session attach logs an attach event."""
         mock_container = MagicMock()
         mock_container.status = "running"
