@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock, Mock, call
 
 import docker
 from scad.cli import main, _complete_run_ids, _complete_config_names, _relative_time, get_all_sessions, get_project_status, get_session_usage
+from scad.vm import VMUnsupported
 
 
 @pytest.fixture
@@ -1474,10 +1475,11 @@ class TestLazyVMStart:
 
 
 class TestCodeAddVMVisibility:
+    @patch("scad.cli.workspace_name_taken", return_value=False)
     @patch("scad.cli.workspace_add")
     @patch("scad.cli.path_visible_in_vm", return_value=True)
     @patch("scad.cli.validate_run_id")
-    def test_visible_path_adds_silently(self, _v, _vis, mock_add, runner):
+    def test_visible_path_adds_silently(self, _v, _vis, mock_add, _taken, runner):
         result = runner.invoke(
             main, ["code", "add", "run-1", "--path", "/Users/t/x", "--name", "x"]
         )
@@ -1485,11 +1487,12 @@ class TestCodeAddVMVisibility:
         assert "restart" not in result.output.lower()
         mock_add.assert_called_once()
 
+    @patch("scad.cli.workspace_name_taken", return_value=False)
     @patch("scad.cli.workspace_add")
     @patch("scad.cli.path_visible_in_vm", return_value=False)
     @patch("scad.cli.validate_run_id")
     def test_invisible_path_warns_and_skips_by_default(
-        self, _v, _vis, mock_add, runner
+        self, _v, _vis, mock_add, _taken, runner
     ):
         result = runner.invoke(
             main, ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d"],
@@ -1507,9 +1510,10 @@ class TestCodeAddVMVisibility:
     @patch("scad.cli.mount_root", return_value=Path("/Volumes/d"))
     @patch("scad.cli.workspace_add")
     @patch("scad.cli.path_visible_in_vm", return_value=False)
+    @patch("scad.cli.workspace_name_taken", return_value=False)
     @patch("scad.cli.validate_run_id")
     def test_restart_vm_flag_adds_mount_then_adds_path(
-        self, _v, _vis, mock_add, _root, _read, _state,
+        self, _v, _taken, _vis, mock_add, _root, _read, _state,
         mock_stop, mock_start, mock_client, runner
     ):
         # read_vm_mounts is seeded with a pre-existing, unrelated mount so this
@@ -1526,3 +1530,74 @@ class TestCodeAddVMVisibility:
         mock_start.assert_called_once_with(mounts=sorted(["/srv/other", "/Volumes/d"]))
         mock_add.assert_called_once()
         mock_client.return_value.containers.get.assert_called_once_with("scad-run-1")
+
+
+class TestCodeAddOrderingAndErrorHandling:
+    """Regression tests for fix 5: code_add must validate the cheap,
+    non-destructive thing (name collision) before doing anything destructive
+    (VM restart, which stops every running scad session), and every VM call
+    site here must handle VMUnsupported the same way every other VM call
+    site in the CLI does."""
+
+    @patch("scad.cli.vm_start")
+    @patch("scad.cli.vm_stop")
+    @patch("scad.cli.workspace_add")
+    @patch("scad.cli.path_visible_in_vm", return_value=False)
+    @patch("scad.cli.workspace_name_taken", return_value=True)
+    @patch("scad.cli.validate_run_id")
+    def test_name_collision_checked_before_any_vm_restart(
+        self, _v, _taken, _vis, mock_add, mock_stop, mock_start, runner
+    ):
+        """A `--name` that already exists must fail before vm_stop/vm_start
+        are ever called -- the old ordering restarted the VM (killing every
+        running session) for a doomed FileExistsError."""
+        result = runner.invoke(
+            main,
+            ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d"],
+        )
+        assert result.exit_code != 0
+        assert "already exists" in result.output.lower()
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
+        mock_add.assert_not_called()
+
+    @patch("scad.cli.vm_start")
+    @patch("scad.cli.vm_stop")
+    @patch("scad.cli.workspace_add")
+    @patch("scad.cli.path_visible_in_vm", return_value=True)
+    @patch("scad.cli.workspace_name_taken", return_value=True)
+    @patch("scad.cli.validate_run_id")
+    def test_name_collision_checked_even_when_path_is_visible(
+        self, _v, _taken, _vis, mock_add, mock_stop, mock_start, runner
+    ):
+        """The collision check must run unconditionally, not just on the
+        VM-restart branch."""
+        result = runner.invoke(
+            main,
+            ["code", "add", "run-1", "--path", "/Users/t/x", "--name", "x"],
+        )
+        assert result.exit_code != 0
+        assert "already exists" in result.output.lower()
+        mock_add.assert_not_called()
+
+    @patch("scad.cli.vm_stop")
+    @patch("scad.cli.vm_start", side_effect=VMUnsupported("colima is not installed"))
+    @patch("scad.cli.workspace_add")
+    @patch("scad.cli.path_visible_in_vm", return_value=False)
+    @patch("scad.cli.workspace_name_taken", return_value=False)
+    @patch("scad.cli.validate_run_id")
+    def test_vm_unsupported_prints_scad_prefixed_error_and_exits_2(
+        self, _v, _taken, _vis, mock_add, mock_start, mock_stop, runner
+    ):
+        """A missing colima must surface the same way every other VM call
+        site does (`[scad] ...`, exit 2) -- not a bare click `Error:` with
+        exit 1."""
+        result = runner.invoke(
+            main,
+            ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d",
+             "--restart-vm"],
+        )
+        assert result.exit_code == 2
+        assert "[scad]" in result.output
+        assert "colima is not installed" in result.output
+        mock_add.assert_not_called()

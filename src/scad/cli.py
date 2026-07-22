@@ -71,6 +71,7 @@ from scad.container import (
     sync_from_host,
     validate_run_id,
     workspace_add,
+    workspace_name_taken,
     workspace_remove,
 )
 
@@ -1268,6 +1269,14 @@ def code_add(run_id: str, path: str, name: str, clone: bool, restart_vm: bool):
     """Add a directory to a session's workspace."""
     validate_run_id(run_id)
 
+    # Validate cheaply before doing anything destructive: a name collision is
+    # a plain FileExistsError from workspace_add() below, but the VM restart
+    # further down stops *every* running scad session. Checking first means a
+    # doomed `--name` that already exists never pays that cost.
+    if workspace_name_taken(run_id, name):
+        click.echo(f"[scad] Error: '{name}' already exists in workspace", err=True)
+        sys.exit(1)
+
     # A VM mount can only be added at (re)start, so a non-$HOME path on macOS
     # cannot be hot-added — without this check the container would see an empty
     # directory rather than the data.
@@ -1285,9 +1294,13 @@ def code_add(run_id: str, path: str, name: str, clone: bool, restart_vm: bool):
             click.confirm("[scad] Add the mount and restart the VM now?", abort=True)
 
         mounts = sorted(set(read_vm_mounts()) | {target})
-        if vm_state() == "running":
-            vm_stop()
-        vm_start(mounts=mounts)
+        try:
+            if vm_state() == "running":
+                vm_stop()
+            vm_start(mounts=mounts)
+        except VMUnsupported as e:
+            click.echo(f"[scad] {e.message}", err=True)
+            sys.exit(2)
         click.echo(f"[scad] VM restarted with {target} mounted")
 
         try:

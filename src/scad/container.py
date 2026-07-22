@@ -1432,6 +1432,17 @@ def refresh_credentials(run_id: str) -> float:
     return hours
 
 
+def workspace_name_taken(run_id: str, name: str) -> bool:
+    """True if `name` already exists in the session's workspace/ dir.
+
+    A cheap, non-destructive check `code_add` runs before anything else --
+    workspace_add() below raises FileExistsError for the same condition, but
+    only after the caller may have already restarted the VM (stopping every
+    running scad session) to add the mount.
+    """
+    return (RUNS_DIR / run_id / "workspace" / name).exists()
+
+
 def workspace_add(
     run_id: str, host_path: str, name: str, clone: bool = False
 ) -> Path:
