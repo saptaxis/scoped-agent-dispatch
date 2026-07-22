@@ -161,7 +161,8 @@ class TestScadConfig:
             name="test",
             repos={"code": {"path": "/tmp/fake-repo", "workdir": True}},
         )
-        assert config.repos["code"].resolved_path == Path("/tmp/fake-repo")
+        # .resolve() on the expectation too — macOS symlinks /tmp -> /private/tmp
+        assert config.repos["code"].resolved_path == Path("/tmp/fake-repo").resolve()
 
     def test_plugins_default(self, sample_config_dict):
         config = ScadConfig(**sample_config_dict)
