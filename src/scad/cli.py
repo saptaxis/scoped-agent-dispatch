@@ -643,23 +643,6 @@ def build(config_name: str, verbose: bool, no_cache: bool):
         sys.exit(3)
 
 
-def _vm_macos_only(action: str) -> None:
-    """Echo the macOS-only guidance for `action` and exit 2.
-
-    Checked at the CLI layer (via the imported ``is_macos``) rather than
-    relying solely on the VMUnsupported raised inside scad.vm, so that the
-    "Linux" behaviour of these commands is exercised the same way `status`
-    and `info` are — by patching `scad.cli.is_macos` — instead of depending
-    on the real host platform or on colima being installed.
-    """
-    click.echo(
-        f"[scad] '{action}' is macOS-only. On Linux scad uses the native "
-        "Docker daemon directly — there is no scad VM to manage.",
-        err=True,
-    )
-    sys.exit(2)
-
-
 @main.group()
 def vm():
     """Manage the scad Docker VM (macOS only)."""
@@ -669,8 +652,6 @@ def vm():
 @vm.command("start")
 def vm_start_cmd():
     """Start the scad VM, creating it on first run."""
-    if not is_macos():
-        _vm_macos_only("scad vm start")
     try:
         vm_start()
     except VMUnsupported as e:
@@ -682,8 +663,6 @@ def vm_start_cmd():
 @vm.command("stop")
 def vm_stop_cmd():
     """Stop the scad VM. Containers are preserved but not running."""
-    if not is_macos():
-        _vm_macos_only("scad vm stop")
     try:
         vm_stop()
     except VMUnsupported as e:
@@ -741,8 +720,6 @@ def vm_info_cmd():
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 def vm_delete_cmd(yes: bool):
     """Delete the scad VM, including every image and container inside it."""
-    if not is_macos():
-        _vm_macos_only("scad vm delete")
     if not yes:
         click.confirm(
             f"[scad] Delete VM '{SCAD_PROFILE}'? All scad images and containers "

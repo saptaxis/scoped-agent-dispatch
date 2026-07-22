@@ -1394,7 +1394,7 @@ class TestVMGroup:
         assert result.exit_code == 0
         assert "native Docker" in result.output
 
-    @patch("scad.cli.is_macos", return_value=False)
+    @patch("scad.vm.is_macos", return_value=False)
     def test_start_on_linux_errors(self, _mac, runner):
         result = runner.invoke(main, ["vm", "start"])
         assert result.exit_code == 2
