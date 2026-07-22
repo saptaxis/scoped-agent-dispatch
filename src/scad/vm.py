@@ -28,6 +28,13 @@ if TYPE_CHECKING:
 
 SCAD_PROFILE = "scad"
 
+# macOS Keychain service name Claude Code stores its OAuth credentials under.
+CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
+
+# Keychain access can pop a GUI prompt on a locked/unconfigured keychain --
+# bound it so a hung prompt can never hang scad indefinitely.
+KEYCHAIN_TIMEOUT = 10
+
 
 class DockerUnavailable(DockerException):
     """No usable Docker daemon could be reached.
@@ -112,6 +119,65 @@ def docker_cli_env() -> dict[str, str]:
     if is_macos():
         env["DOCKER_HOST"] = f"unix://{colima_socket_path()}"
     return env
+
+
+def read_claude_credentials() -> str | None:
+    """Raw Claude credentials JSON from this platform's credential store.
+
+    Linux keeps them in ~/.claude/.credentials.json; macOS keeps them in the
+    login Keychain. Returns None when no credentials are available.
+    """
+    if is_macos():
+        try:
+            result = subprocess.run(
+                ["security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w"],
+                capture_output=True,
+                text=True,
+                timeout=KEYCHAIN_TIMEOUT,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        if result.returncode != 0:
+            return None
+        output = result.stdout.strip()
+        return output or None
+
+    creds_path = Path.home() / ".claude" / ".credentials.json"
+    if not creds_path.exists():
+        return None
+    try:
+        return creds_path.read_text()
+    except OSError:
+        return None
+
+
+def stage_claude_credentials(run_id: str) -> Path | None:
+    """Materialise this platform's Claude credentials into a run-scoped file.
+
+    Docker cannot bind-mount a Keychain entry, so on macOS the credentials are
+    written out to disk first at a run-scoped path and that file is mounted
+    instead. Created with mode 0600 (before the contents are written, where
+    possible) since it holds a live OAuth token. Returns the staged path, or
+    None when no credentials are available on the host.
+
+    Used by both `claude_config.get_volume_mounts()` (initial mount) and
+    `container.refresh_credentials()` (re-materialising a refreshed token) so
+    the two never drift on the path, the mode, or the write.
+    """
+    raw = read_claude_credentials()
+    if raw is None:
+        return None
+
+    from scad.config import get_scad_home
+
+    path = get_scad_home() / "runs" / run_id / "claude-credentials.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    os.chmod(path, 0o600)  # guarantee 0600 even if the file pre-existed
+    with os.fdopen(fd, "w") as f:
+        f.write(raw)
+    return path
 
 
 # Creating a Colima VM pulls an image and formats a disk — allow generous time.

@@ -188,7 +188,8 @@ class TestGetVolumeMounts:
             repos={"code": {"path": "/tmp/fake", "workdir": True}},
         )
 
-    def test_mounts_claude_dir(self, sample_config, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_mounts_claude_dir(self, _mac, sample_config, tmp_path):
         from scad.claude_config import get_volume_mounts
         run_dir = tmp_path / "runs" / "test-run"
         claude_dir = run_dir / "claude"
@@ -201,7 +202,8 @@ class TestGetVolumeMounts:
         assert mounts[str(claude_dir)]["bind"] == "/home/scad/.claude"
         assert mounts[str(claude_dir)]["mode"] == "rw"
 
-    def test_mounts_claude_json(self, sample_config, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_mounts_claude_json(self, _mac, sample_config, tmp_path):
         from scad.claude_config import get_volume_mounts
         run_dir = tmp_path / "runs" / "test-run"
         run_dir.mkdir(parents=True)
@@ -215,7 +217,9 @@ class TestGetVolumeMounts:
         assert str(claude_json) in mounts
         assert mounts[str(claude_json)]["bind"] == "/home/scad/.claude.json"
 
-    def test_mounts_credentials(self, sample_config, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_mounts_credentials(self, _mac, sample_config, tmp_path):
+        """Linux mounts the host ~/.claude/.credentials.json file directly."""
         from scad.claude_config import get_volume_mounts
         run_dir = tmp_path / "runs" / "test-run"
         (run_dir / "claude").mkdir(parents=True)
@@ -230,7 +234,8 @@ class TestGetVolumeMounts:
         assert mounts[str(creds)]["bind"] == "/mnt/host-claude-credentials.json"
         assert mounts[str(creds)]["mode"] == "ro"
 
-    def test_auto_mounts_claude_md(self, sample_config, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_auto_mounts_claude_md(self, _mac, sample_config, tmp_path):
         from scad.claude_config import get_volume_mounts
         run_dir = tmp_path / "runs" / "test-run"
         (run_dir / "claude").mkdir(parents=True)
@@ -244,7 +249,8 @@ class TestGetVolumeMounts:
         assert mounts[str(claude_md)]["bind"] == "/home/scad/CLAUDE.md"
         assert mounts[str(claude_md)]["mode"] == "ro"
 
-    def test_skips_claude_md_if_missing(self, sample_config, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_skips_claude_md_if_missing(self, _mac, sample_config, tmp_path):
         from scad.claude_config import get_volume_mounts
         run_dir = tmp_path / "runs" / "test-run"
         (run_dir / "claude").mkdir(parents=True)
@@ -255,7 +261,8 @@ class TestGetVolumeMounts:
         for path in mounts:
             assert "CLAUDE.md" not in path
 
-    def test_claude_md_disabled(self, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_claude_md_disabled(self, _mac, tmp_path):
         from scad.claude_config import get_volume_mounts
         config = ScadConfig(
             name="test",
@@ -300,6 +307,51 @@ class TestGetVolumeMounts:
         assert localtime_mount["bind"] == "/etc/localtime"
 
 
+class TestGetVolumeMountsMacOSCredentials:
+    """macOS has no host credentials file to bind-mount -- it stages the
+    Keychain contents to a run-scoped file and mounts that instead."""
+
+    @pytest.fixture
+    def sample_config(self):
+        return ScadConfig(
+            name="test",
+            repos={"code": {"path": "/tmp/fake", "workdir": True}},
+        )
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_stages_and_mounts_credentials(self, mock_security, _mac, sample_config, tmp_path, monkeypatch):
+        from scad.claude_config import get_volume_mounts
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scad-home"))
+        mock_security.return_value = MagicMock(
+            returncode=0, stdout='{"claudeAiOauth": {"expiresAt": 0}}\n'
+        )
+
+        mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        staged = tmp_path / "scad-home" / "runs" / "test-run" / "claude-credentials.json"
+        assert str(staged) in mounts
+        assert mounts[str(staged)]["bind"] == "/mnt/host-claude-credentials.json"
+        assert mounts[str(staged)]["mode"] == "ro"
+        assert staged.read_text() == '{"claudeAiOauth": {"expiresAt": 0}}'
+        assert oct(staged.stat().st_mode)[-3:] == "600"
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_skips_mount_when_credentials_unavailable(self, mock_security, _mac, sample_config, tmp_path, monkeypatch):
+        from scad.claude_config import get_volume_mounts
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scad-home"))
+        mock_security.return_value = MagicMock(returncode=1, stdout="")
+
+        mounts = get_volume_mounts(sample_config, "test-run", home_dir=tmp_path)
+
+        for bind_info in mounts.values():
+            assert bind_info["bind"] != "/mnt/host-claude-credentials.json"
+        assert not (tmp_path / "scad-home" / "runs" / "test-run" / "claude-credentials.json").exists()
+
+
 class TestLocaltimeMountPlatformBranch:
     @patch("scad.vm.is_macos", return_value=False)
     def test_localtime_mounted_on_linux(self, _mac, tmp_path):
@@ -313,7 +365,8 @@ class TestLocaltimeMountPlatformBranch:
         assert "/etc/localtime" in binds
 
     @patch("scad.vm.is_macos", return_value=True)
-    def test_localtime_skipped_on_macos(self, _mac, tmp_path):
+    @patch("scad.vm.read_claude_credentials", return_value=None)
+    def test_localtime_skipped_on_macos(self, _creds, _mac, tmp_path):
         from scad.claude_config import get_volume_mounts
         from scad.config import ScadConfig
         config = ScadConfig(

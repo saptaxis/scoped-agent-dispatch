@@ -427,8 +427,14 @@ class TestStopContainer:
 
 
 class TestRunContainerWorkspaceMounts:
+    """is_macos forced False -- these don't test macOS credential staging, and
+    real Darwin here would otherwise hit the live Keychain (see
+    TestSSHMountPlatformBranch / TestGetVolumeMounts for platform-specific
+    coverage)."""
+
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_single_workspace_mount(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    def test_single_workspace_mount(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         """run_container mounts a single workspace dir at /workspace."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
@@ -450,8 +456,9 @@ class TestRunContainerWorkspaceMounts:
         assert ws_mount["bind"] == "/workspace"
         assert ws_mount["mode"] == "rw"
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_no_per_repo_mounts(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    def test_no_per_repo_mounts(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         """run_container does NOT create per-repo volume mounts."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
@@ -472,8 +479,9 @@ class TestRunContainerWorkspaceMounts:
             if bind_info["bind"].startswith("/workspace"):
                 assert bind_info["bind"] == "/workspace"
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_data_mounts_are_bind_mounts(self, mock_docker, tmp_path, monkeypatch):
+    def test_data_mounts_are_bind_mounts(self, mock_docker, _mac, tmp_path, monkeypatch):
         """Data mounts from config get their own Docker bind mounts."""
         from scad.config import MountConfig
         data_dir = tmp_path / "data"
@@ -501,8 +509,9 @@ class TestRunContainerWorkspaceMounts:
         assert volumes[str(data_dir)]["bind"] == "/data/experiments"
         assert volumes[str(data_dir)]["mode"] == "rw"
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_no_branch_name_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    def test_no_branch_name_env(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
         mock_container = MagicMock()
@@ -520,8 +529,9 @@ class TestRunContainerWorkspaceMounts:
         assert "BRANCH_NAME" not in env
         assert "RUN_ID" in env
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_no_prompt_or_headless_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    def test_no_prompt_or_headless_env(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         """run_container does not set AGENT_PROMPT or HEADLESS — inject handles prompts."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
@@ -542,13 +552,19 @@ class TestRunContainerWorkspaceMounts:
 
 
 class TestCheckClaudeAuth:
-    def test_missing_credentials(self, tmp_path, monkeypatch):
+    """These exercise the Linux (file-based) credential store; is_macos is
+    forced False so the suite never shells out to the real Keychain -- see
+    TestCheckClaudeAuthMacOS for the Keychain-backed behaviour."""
+
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_missing_credentials(self, _mac, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         valid, hours = check_claude_auth()
         assert valid is False
         assert hours == 0.0
 
-    def test_expired_credentials(self, tmp_path, monkeypatch):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_expired_credentials(self, _mac, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         creds_dir = tmp_path / ".claude"
         creds_dir.mkdir()
@@ -560,7 +576,8 @@ class TestCheckClaudeAuth:
         assert valid is False
         assert hours == 0.0
 
-    def test_valid_credentials(self, tmp_path, monkeypatch):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_valid_credentials(self, _mac, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         creds_dir = tmp_path / ".claude"
         creds_dir.mkdir()
@@ -572,7 +589,8 @@ class TestCheckClaudeAuth:
         assert valid is True
         assert 3.9 < hours < 4.1
 
-    def test_warns_under_one_hour(self, tmp_path, monkeypatch):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_warns_under_one_hour(self, _mac, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         creds_dir = tmp_path / ".claude"
         creds_dir.mkdir()
@@ -584,11 +602,56 @@ class TestCheckClaudeAuth:
         assert valid is True
         assert hours < 1.0
 
-    def test_malformed_json(self, tmp_path, monkeypatch):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_malformed_json(self, _mac, tmp_path, monkeypatch):
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
         creds_dir = tmp_path / ".claude"
         creds_dir.mkdir()
         (creds_dir / ".credentials.json").write_text("not json")
+        valid, hours = check_claude_auth()
+        assert valid is False
+        assert hours == 0.0
+
+
+class TestCheckClaudeAuthMacOS:
+    """check_claude_auth() sourced from the Keychain via read_claude_credentials()."""
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_valid_credentials(self, mock_run, _mac):
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"claudeAiOauth": {"expiresAt": future_ms}}),
+        )
+        valid, hours = check_claude_auth()
+        assert valid is True
+        assert 3.9 < hours < 4.1
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_expired_credentials(self, mock_run, _mac):
+        expired_ms = (_time.time() - 3600) * 1000
+        mock_run.return_value = MagicMock(
+            returncode=0,
+            stdout=json.dumps({"claudeAiOauth": {"expiresAt": expired_ms}}),
+        )
+        valid, hours = check_claude_auth()
+        assert valid is False
+        assert hours == 0.0
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_missing_credentials_nonzero_exit(self, mock_run, _mac):
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        valid, hours = check_claude_auth()
+        assert valid is False
+        assert hours == 0.0
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_malformed_json(self, mock_run, _mac):
+        mock_run.return_value = MagicMock(returncode=0, stdout="not json")
         valid, hours = check_claude_auth()
         assert valid is False
         assert hours == 0.0
@@ -616,8 +679,9 @@ class TestRunDirectory:
         run_dir = tmp_path / ".scad" / "runs" / "test-run-1234" / "claude"
         assert run_dir.exists()
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_run_container_mounts_run_dir(self, mock_client, tmp_path, monkeypatch):
+    def test_run_container_mounts_run_dir(self, mock_client, _mac, tmp_path, monkeypatch):
         """run_container mounts ~/.scad/runs/<run-id>/claude/ as /home/scad/.claude/."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
         monkeypatch.setattr("scad.claude_config.RUNS_DIR", tmp_path / ".scad" / "runs")
@@ -1297,8 +1361,12 @@ class TestSessionInfoSubagents:
 
 
 class TestRefreshCredentials:
+    """is_macos forced False throughout -- these exercise the Linux (file-based)
+    path; see TestRefreshCredentialsMacOS for the Keychain re-staging behaviour."""
+
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_copies_credentials_to_container(self, mock_docker, tmp_path, monkeypatch):
+    def test_copies_credentials_to_container(self, mock_docker, _mac, tmp_path, monkeypatch):
         """refresh_credentials copies host creds into container."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1320,8 +1388,9 @@ class TestRefreshCredentials:
         )
         assert hours > 3.0
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_logs_refresh_event(self, mock_docker, tmp_path, monkeypatch):
+    def test_logs_refresh_event(self, mock_docker, _mac, tmp_path, monkeypatch):
         """refresh_credentials logs to events.log."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1342,8 +1411,9 @@ class TestRefreshCredentials:
         assert "refresh" in events_log.read_text()
         assert "credentials" in events_log.read_text()
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_raises_if_credentials_expired(self, mock_docker, tmp_path, monkeypatch):
+    def test_raises_if_credentials_expired(self, mock_docker, _mac, tmp_path, monkeypatch):
         """refresh_credentials raises if host credentials expired."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1356,8 +1426,9 @@ class TestRefreshCredentials:
         with pytest.raises(click.ClickException, match="expired"):
             refresh_credentials("test-run")
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_raises_if_container_not_running(self, mock_docker, tmp_path, monkeypatch):
+    def test_raises_if_container_not_running(self, mock_docker, _mac, tmp_path, monkeypatch):
         """refresh_credentials raises if container is not running."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1374,8 +1445,9 @@ class TestRefreshCredentials:
         with pytest.raises(click.ClickException, match="not running"):
             refresh_credentials("test-run")
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_raises_if_container_not_found(self, mock_docker, tmp_path, monkeypatch):
+    def test_raises_if_container_not_found(self, mock_docker, _mac, tmp_path, monkeypatch):
         """refresh_credentials raises if container doesn't exist."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
@@ -1391,9 +1463,44 @@ class TestRefreshCredentials:
             refresh_credentials("test-run")
 
 
-class TestRunContainerTelemetry:
+class TestRefreshCredentialsMacOS:
+    """On macOS, refresh_credentials re-materialises the staged file from the
+    Keychain before exec'ing the copy, so a host-side token refresh reaches
+    the container rather than re-copying a stale snapshot."""
+
     @patch("scad.container.get_docker_client")
-    def test_disables_telemetry(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_restages_from_keychain_before_exec(
+        self, mock_security, _mac, mock_docker, tmp_path, monkeypatch
+    ):
+        scad_home = tmp_path / "scad-home"
+        monkeypatch.setenv("SCAD_HOME", str(scad_home))
+        monkeypatch.setattr("scad.container.RUNS_DIR", scad_home / "runs")
+
+        future_ms = (_time.time() + 4 * 3600) * 1000
+        creds_json = json.dumps({"claudeAiOauth": {"expiresAt": future_ms}})
+        mock_security.return_value = MagicMock(returncode=0, stdout=creds_json)
+
+        mock_container = MagicMock()
+        mock_container.status = "running"
+        mock_docker.return_value.containers.get.return_value = mock_container
+
+        refresh_credentials("test-run")
+
+        staged = scad_home / "runs" / "test-run" / "claude-credentials.json"
+        assert staged.exists()
+        assert staged.read_text() == creds_json
+        assert oct(staged.stat().st_mode)[-3:] == "600"
+        mock_container.exec_run.assert_called_once_with(
+            "cp /mnt/host-claude-credentials.json /home/scad/.claude/.credentials.json"
+        )
+
+
+class TestRunContainerTelemetry:
+    @patch("scad.vm.is_macos", return_value=False)
+    @patch("scad.container.get_docker_client")
+    def test_disables_telemetry(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         """run_container sets telemetry disable env vars."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -1422,8 +1529,9 @@ class TestRunContainerTelemetry:
 class TestGpuPassthrough:
     """Test GPU device_requests in run_container."""
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_gpu_enabled_passes_device_requests(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    def test_gpu_enabled_passes_device_requests(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         """gpu: true sets device_requests and NVIDIA_VISIBLE_DEVICES=all."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -1444,8 +1552,9 @@ class TestGpuPassthrough:
         assert len(kwargs["device_requests"]) == 1
         assert kwargs["environment"]["NVIDIA_VISIBLE_DEVICES"] == "all"
 
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.get_docker_client")
-    def test_gpu_disabled_no_device_requests(self, mock_docker, sample_config, tmp_path, monkeypatch):
+    def test_gpu_disabled_no_device_requests(self, mock_docker, _mac, sample_config, tmp_path, monkeypatch):
         """gpu default (False) leaves device_requests unset and no NVIDIA env."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -2268,8 +2377,9 @@ class TestSubmoduleSupport:
 
 class TestSSHMountPlatformBranch:
     @patch("scad.container.get_docker_client")
+    @patch("scad.vm.is_macos", return_value=False)
     @patch("scad.container.is_macos", return_value=False)
-    def test_linux_mounts_ssh_directly(self, _mac, mock_client, sample_config,
+    def test_linux_mounts_ssh_directly(self, _mac, _vm_mac, mock_client, sample_config,
                                        tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr("scad.container.Path.home", lambda: tmp_path)
@@ -2281,11 +2391,15 @@ class TestSSHMountPlatformBranch:
         assert volumes[str(tmp_path / ".ssh")]["bind"] == "/home/scad/.ssh"
 
     @patch("scad.container.get_docker_client")
+    @patch("scad.vm.subprocess.run")
+    @patch("scad.vm.is_macos", return_value=True)
     @patch("scad.container.is_macos", return_value=True)
-    def test_macos_stages_ssh(self, _mac, mock_client, sample_config,
+    def test_macos_stages_ssh(self, _mac, _vm_mac, mock_security, mock_client, sample_config,
                               tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         monkeypatch.setattr("scad.container.Path.home", lambda: tmp_path)
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scad-home"))
+        mock_security.return_value = MagicMock(returncode=1, stdout="")  # no creds -> mount skipped
         (tmp_path / ".ssh").mkdir()
         (tmp_path / "runs" / "test-run" / "claude").mkdir(parents=True)
         mock_client.return_value.containers.run.return_value = MagicMock(id="abc")

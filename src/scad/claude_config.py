@@ -131,13 +131,29 @@ def get_volume_mounts(
     if claude_json.exists():
         volumes[str(claude_json)] = {"bind": "/home/scad/.claude.json", "mode": "rw"}
 
-    # Credentials -- staging path (entrypoint copies to final location)
-    claude_creds = home_dir / ".claude" / ".credentials.json"
-    if claude_creds.exists():
-        volumes[str(claude_creds)] = {
-            "bind": "/mnt/host-claude-credentials.json",
-            "mode": "ro",
-        }
+    # Credentials -- staging path (entrypoint copies to final location).
+    # Linux keeps the OAuth token in ~/.claude/.credentials.json, so that file
+    # is bind-mounted directly. macOS keeps it in the login Keychain instead,
+    # which Docker cannot bind-mount, so it is first materialised into a
+    # run-scoped file on disk and that staged file is mounted.
+    from scad.vm import is_macos
+
+    if is_macos():
+        from scad.vm import stage_claude_credentials
+
+        staged_creds = stage_claude_credentials(run_id)
+        if staged_creds is not None:
+            volumes[str(staged_creds)] = {
+                "bind": "/mnt/host-claude-credentials.json",
+                "mode": "ro",
+            }
+    else:
+        claude_creds = home_dir / ".claude" / ".credentials.json"
+        if claude_creds.exists():
+            volumes[str(claude_creds)] = {
+                "bind": "/mnt/host-claude-credentials.json",
+                "mode": "ro",
+            }
 
     # CLAUDE.md -- global instructions
     if config.claude.claude_md is False:
@@ -156,8 +172,6 @@ def get_volume_mounts(
     # and therefore invisible inside the scad VM, so Docker would silently create
     # an empty directory at /etc/localtime. The TZ env var run_container() sets
     # already gives the container the host's timezone.
-    from scad.vm import is_macos
-
     if not is_macos():
         localtime = Path("/etc/localtime")
         if localtime.exists():

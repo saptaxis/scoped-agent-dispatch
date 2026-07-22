@@ -15,7 +15,7 @@ from docker.errors import DockerException, NotFound as DockerNotFound
 from jinja2 import Environment, PackageLoader
 
 from scad.config import ScadConfig, get_scad_home
-from scad.vm import get_docker_client, is_macos
+from scad.vm import get_docker_client, is_macos, read_claude_credentials
 
 SCAD_DIR = get_scad_home()
 RUNS_DIR = SCAD_DIR / "runs"
@@ -330,13 +330,15 @@ def check_claude_auth() -> tuple[bool, float]:
     """Check if Claude credentials exist and are valid.
 
     Returns (valid, hours_remaining). valid is False if credentials
-    are missing or expired. hours_remaining is 0 if invalid.
+    are missing or expired. hours_remaining is 0 if invalid. Reads from
+    whichever store this platform keeps credentials in -- see
+    scad.vm.read_claude_credentials().
     """
-    creds_path = Path.home() / ".claude" / ".credentials.json"
-    if not creds_path.exists():
+    raw = read_claude_credentials()
+    if raw is None:
         return False, 0.0
     try:
-        data = json.loads(creds_path.read_text())
+        data = json.loads(raw)
         expires_at = data["claudeAiOauth"]["expiresAt"] / 1000  # ms → sec
         remaining = (expires_at - time.time()) / 3600  # seconds → hours
         return remaining > 0, max(remaining, 0.0)
@@ -1413,6 +1415,14 @@ def refresh_credentials(run_id: str) -> float:
 
     if container.status != "running":
         raise click.ClickException(f"Container scad-{run_id} is not running")
+
+    if is_macos():
+        # The bind-mounted file is a snapshot staged at session-start time, not
+        # a live view of the Keychain -- re-stage it so a token refreshed on
+        # the host since then actually reaches the container.
+        from scad.vm import stage_claude_credentials
+
+        stage_claude_credentials(run_id)
 
     container.exec_run(
         "cp /mnt/host-claude-credentials.json /home/scad/.claude/.credentials.json"

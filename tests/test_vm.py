@@ -2,12 +2,14 @@
 
 import os
 from pathlib import Path
-from unittest.mock import patch
+import subprocess
+from unittest.mock import MagicMock, patch
 
 import docker
 import pytest
 
 from scad.vm import (
+    CLAUDE_KEYCHAIN_SERVICE,
     SCAD_PROFILE,
     DockerUnavailable,
     colima_socket_path,
@@ -15,6 +17,8 @@ from scad.vm import (
     docker_cli_env,
     get_docker_client,
     is_macos,
+    read_claude_credentials,
+    stage_claude_credentials,
 )
 
 
@@ -94,6 +98,81 @@ class TestDockerCliEnv:
     def test_linux_leaves_env_untouched(self, _mac):
         env = docker_cli_env()
         assert env == dict(os.environ)
+
+
+class TestReadClaudeCredentials:
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_linux_reads_the_file(self, _mac, tmp_path):
+        home = tmp_path
+        creds_dir = home / ".claude"
+        creds_dir.mkdir()
+        (creds_dir / ".credentials.json").write_text('{"claudeAiOauth": {}}')
+        with patch("scad.vm.Path.home", return_value=home):
+            assert read_claude_credentials() == '{"claudeAiOauth": {}}'
+
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_linux_missing_file_returns_none(self, _mac, tmp_path):
+        with patch("scad.vm.Path.home", return_value=tmp_path):
+            assert read_claude_credentials() is None
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_macos_shells_out_to_security(self, mock_run, _mac):
+        mock_run.return_value = MagicMock(returncode=0, stdout='{"claudeAiOauth": {}}\n')
+        result = read_claude_credentials()
+        assert result == '{"claudeAiOauth": {}}'
+        args, kwargs = mock_run.call_args
+        assert args[0] == [
+            "security", "find-generic-password", "-s", CLAUDE_KEYCHAIN_SERVICE, "-w",
+        ]
+        assert kwargs["timeout"] > 0
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_macos_nonzero_exit_returns_none(self, mock_run, _mac):
+        mock_run.return_value = MagicMock(returncode=1, stdout="")
+        assert read_claude_credentials() is None
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run")
+    def test_macos_empty_stdout_returns_none(self, mock_run, _mac):
+        mock_run.return_value = MagicMock(returncode=0, stdout="   \n")
+        assert read_claude_credentials() is None
+
+    @patch("scad.vm.is_macos", return_value=True)
+    @patch("scad.vm.subprocess.run", side_effect=subprocess.TimeoutExpired(cmd="security", timeout=10))
+    def test_macos_timeout_returns_none(self, _run, _mac):
+        assert read_claude_credentials() is None
+
+
+class TestStageClaudeCredentials:
+    @patch("scad.vm.read_claude_credentials", return_value=None)
+    def test_returns_none_when_no_credentials(self, _creds, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        assert stage_claude_credentials("run-1") is None
+
+    @patch("scad.vm.read_claude_credentials", return_value='{"claudeAiOauth": {}}')
+    def test_writes_run_scoped_file_mode_0600(self, _creds, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        staged = stage_claude_credentials("run-1")
+        assert staged == tmp_path / "runs" / "run-1" / "claude-credentials.json"
+        assert staged.read_text() == '{"claudeAiOauth": {}}'
+        assert oct(staged.stat().st_mode)[-3:] == "600"
+
+    @patch("scad.vm.read_claude_credentials", return_value='{"fresh": true}')
+    def test_overwrites_existing_staged_file(self, _creds, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        staged_dir = tmp_path / "runs" / "run-1"
+        staged_dir.mkdir(parents=True)
+        staged_path = staged_dir / "claude-credentials.json"
+        staged_path.write_text('{"stale": true}')
+        staged_path.chmod(0o644)
+
+        result = stage_claude_credentials("run-1")
+
+        assert result == staged_path
+        assert staged_path.read_text() == '{"fresh": true}'
+        assert oct(staged_path.stat().st_mode)[-3:] == "600"
 
 
 class TestNoBareFromEnv:
