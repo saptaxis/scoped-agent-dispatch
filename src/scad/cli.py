@@ -23,6 +23,7 @@ from scad.vm import (
     VMUnsupported,
     colima_socket_path,
     docker_cli_env,
+    ensure_gpu_supported,
     ensure_vm_running,
     get_docker_client,
     is_macos,
@@ -333,7 +334,11 @@ def run_agent(
     config, branch: str, tag: str, prompt: str = None, headless: bool = False, rebuild: bool = False
 ) -> str:
     """Orchestrate the full agent lifecycle: resolve branch, build, create clones, run."""
-    # Pre-flight: check Claude auth
+    # Pre-flight: platform capability, then the VM, then Claude auth.
+    # Capability first so an unsupported config fails before any slow work.
+    ensure_gpu_supported(config)
+    ensure_vm_running()
+
     valid, hours = check_claude_auth()
     if not valid:
         raise click.ClickException(
@@ -619,6 +624,12 @@ def build(config_name: str, verbose: bool, no_cache: bool):
         sys.exit(2)
     except Exception as e:
         click.echo(f"[scad] Config validation error: {e}", err=True)
+        sys.exit(2)
+
+    try:
+        ensure_vm_running()
+    except VMUnsupported as e:
+        click.echo(f"[scad] {e.message}", err=True)
         sys.exit(2)
 
     tag = f"scad-{config.name}"

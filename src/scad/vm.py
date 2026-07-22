@@ -16,11 +16,15 @@ import platform
 import shutil
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import click
 import docker
 import yaml
 from docker.errors import DockerException
+
+if TYPE_CHECKING:
+    from scad.config import ScadConfig
 
 SCAD_PROFILE = "scad"
 
@@ -269,3 +273,18 @@ def ensure_vm_running() -> None:
     click.echo(f"[scad] Starting scad VM (colima profile '{SCAD_PROFILE}')...")
     vm_start()
     click.echo("[scad] VM ready")
+
+
+def ensure_gpu_supported(config: "ScadConfig") -> None:
+    """Raise if the config asks for GPU passthrough on a platform without it.
+
+    There is no NVIDIA runtime inside a Lima VM on Apple Silicon, so GPU
+    passthrough stays Linux + nvidia-container-toolkit only.
+    """
+    if config.gpu and is_macos():
+        raise VMUnsupported(
+            "gpu: true is not supported on macOS — there is no GPU passthrough "
+            "into the scad Linux VM.\n"
+            f"  Remove 'gpu: true' from the '{config.name}' config, or run this "
+            "config on a Linux host with nvidia-container-toolkit."
+        )

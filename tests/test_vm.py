@@ -251,3 +251,34 @@ class TestEnsureVMRunning:
         from scad.vm import ensure_vm_running
         ensure_vm_running()
         mock_start.assert_called_once_with()
+
+
+class TestGpuGuard:
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_gpu_true_errors_on_macos(self, _mac):
+        from scad.config import ScadConfig
+        from scad.vm import VMUnsupported, ensure_gpu_supported
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}, gpu=True
+        )
+        with pytest.raises(VMUnsupported) as exc:
+            ensure_gpu_supported(config)
+        assert "gpu" in str(exc.value).lower()
+
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_gpu_false_ok_on_macos(self, _mac):
+        from scad.config import ScadConfig
+        from scad.vm import ensure_gpu_supported
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
+        )
+        ensure_gpu_supported(config)  # must not raise
+
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_gpu_true_ok_on_linux(self, _mac):
+        from scad.config import ScadConfig
+        from scad.vm import ensure_gpu_supported
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}, gpu=True
+        )
+        ensure_gpu_supported(config)  # must not raise

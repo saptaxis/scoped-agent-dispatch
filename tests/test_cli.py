@@ -310,9 +310,10 @@ class TestSessionStatus:
 
 
 class TestScadBuild:
+    @patch("scad.cli.ensure_vm_running")
     @patch("scad.cli.build_image")
     @patch("scad.cli.load_config")
-    def test_build_shows_step_progress(self, mock_load, mock_build, runner):
+    def test_build_shows_step_progress(self, mock_load, mock_build, _ensure_vm, runner):
         """Quiet build shows Step N/M lines."""
         mock_config = MagicMock()
         mock_config.name = "test"
@@ -330,9 +331,10 @@ class TestScadBuild:
         assert "Step 2/5" in result.output
         assert "abc123" not in result.output  # non-Step lines hidden
 
+    @patch("scad.cli.ensure_vm_running")
     @patch("scad.cli.build_image")
     @patch("scad.cli.load_config")
-    def test_build_verbose_shows_everything(self, mock_load, mock_build, runner):
+    def test_build_verbose_shows_everything(self, mock_load, mock_build, _ensure_vm, runner):
         mock_config = MagicMock()
         mock_config.name = "test"
         mock_load.return_value = mock_config
@@ -436,6 +438,8 @@ class TestSessionStart:
 class TestRunAgentInjectIntegration:
     """Test that run_agent() uses inject_job() when prompt is given."""
 
+    @patch("scad.cli.ensure_vm_running")
+    @patch("scad.cli.ensure_gpu_supported")
     @patch("scad.cli.inject_job")
     @patch("scad.cli.run_container")
     @patch("scad.cli.create_clones")
@@ -444,7 +448,8 @@ class TestRunAgentInjectIntegration:
     @patch("scad.cli.generate_run_id")
     @patch("time.sleep")
     def test_prompt_triggers_inject(self, mock_sleep, mock_gen_id, mock_auth, mock_img,
-                                     mock_clones, mock_run_container, mock_inject):
+                                     mock_clones, mock_run_container, mock_inject,
+                                     _ensure_gpu, _ensure_vm):
         """run_agent with prompt calls inject_job after container start."""
         from scad.cli import run_agent
         mock_auth.return_value = (True, 10.0)
@@ -478,6 +483,8 @@ class TestRunAgentInjectIntegration:
         assert ij_kwargs["dangerously_skip_permissions"] is True
         assert ij_kwargs["additional_flags"] == "--verbose"
 
+    @patch("scad.cli.ensure_vm_running")
+    @patch("scad.cli.ensure_gpu_supported")
     @patch("scad.cli.inject_job")
     @patch("scad.cli.run_container")
     @patch("scad.cli.create_clones")
@@ -485,7 +492,8 @@ class TestRunAgentInjectIntegration:
     @patch("scad.cli.check_claude_auth")
     @patch("scad.cli.generate_run_id")
     def test_no_prompt_skips_inject(self, mock_gen_id, mock_auth, mock_img,
-                                     mock_clones, mock_run_container, mock_inject):
+                                     mock_clones, mock_run_container, mock_inject,
+                                     _ensure_gpu, _ensure_vm):
         """run_agent without prompt does not call inject_job."""
         from scad.cli import run_agent
         mock_auth.return_value = (True, 10.0)
@@ -503,6 +511,8 @@ class TestRunAgentInjectIntegration:
 
         mock_inject.assert_not_called()
 
+    @patch("scad.cli.ensure_vm_running")
+    @patch("scad.cli.ensure_gpu_supported")
     @patch("scad.cli.inject_job")
     @patch("scad.cli.run_container")
     @patch("scad.cli.create_clones")
@@ -511,7 +521,8 @@ class TestRunAgentInjectIntegration:
     @patch("scad.cli.generate_run_id")
     @patch("time.sleep")
     def test_prompt_builds_add_dirs(self, mock_sleep, mock_gen_id, mock_auth, mock_img,
-                                     mock_clones, mock_run_container, mock_inject):
+                                     mock_clones, mock_run_container, mock_inject,
+                                     _ensure_gpu, _ensure_vm):
         """run_agent passes add_dirs from repos with add_dir=True."""
         from scad.cli import run_agent
         mock_auth.return_value = (True, 10.0)
@@ -536,6 +547,8 @@ class TestRunAgentInjectIntegration:
         _, ij_kwargs = mock_inject.call_args
         assert ij_kwargs["add_dirs"] == ["docs"]
 
+    @patch("scad.cli.ensure_vm_running")
+    @patch("scad.cli.ensure_gpu_supported")
     @patch("scad.cli.inject_job")
     @patch("scad.cli.run_container")
     @patch("scad.cli.create_clones")
@@ -544,7 +557,8 @@ class TestRunAgentInjectIntegration:
     @patch("scad.cli.generate_run_id")
     @patch("time.sleep")
     def test_prompt_sleeps_before_inject(self, mock_sleep, mock_gen_id, mock_auth, mock_img,
-                                          mock_clones, mock_run_container, mock_inject):
+                                          mock_clones, mock_run_container, mock_inject,
+                                          _ensure_gpu, _ensure_vm):
         """run_agent sleeps briefly before injecting to let entrypoint set up."""
         from scad.cli import run_agent
         mock_auth.return_value = (True, 10.0)
@@ -1414,3 +1428,34 @@ class TestVMGroup:
         assert result.exit_code == 0
         assert "/Volumes/data" in result.output
         assert "virtiofs" in result.output
+
+
+class TestLazyVMStart:
+    @patch("scad.cli.prune_old_images")
+    @patch("scad.cli.get_docker_client")
+    @patch("scad.cli.build_image", return_value=iter([]))
+    @patch("scad.cli.load_config")
+    @patch("scad.cli.ensure_vm_running")
+    def test_build_ensures_vm(self, mock_ensure, mock_load, _b, _c, _p, runner):
+        from scad.config import ScadConfig
+        mock_load.return_value = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
+        )
+        runner.invoke(main, ["build", "t"])
+        mock_ensure.assert_called_once_with()
+
+    @patch("scad.cli.run_container", return_value="cid123456789")
+    @patch("scad.cli.create_clones", return_value={})
+    @patch("scad.cli.image_exists", return_value=True)
+    @patch("scad.cli.check_claude_auth", return_value=(True, 10.0))
+    @patch("scad.cli.ensure_vm_running")
+    @patch("scad.cli.ensure_gpu_supported")
+    def test_run_agent_guards_then_ensures(self, mock_gpu, mock_ensure, *_rest):
+        from scad.cli import run_agent
+        from scad.config import ScadConfig
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
+        )
+        run_agent(config, branch="b", tag="tg")
+        mock_gpu.assert_called_once_with(config)
+        mock_ensure.assert_called_once_with()
