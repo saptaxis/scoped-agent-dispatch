@@ -2226,3 +2226,31 @@ class TestSubmoduleSupport:
         )
         paths = create_clones(config, "scad-test-branch", "test-run")
         assert "code" in paths
+
+
+class TestSSHMountPlatformBranch:
+    @patch("scad.container.get_docker_client")
+    @patch("scad.container.is_macos", return_value=False)
+    def test_linux_mounts_ssh_directly(self, _mac, mock_client, sample_config,
+                                       tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.Path.home", lambda: tmp_path)
+        (tmp_path / ".ssh").mkdir()
+        (tmp_path / "runs" / "test-run" / "claude").mkdir(parents=True)
+        mock_client.return_value.containers.run.return_value = MagicMock(id="abc")
+        run_container(sample_config, "b", "test-run", {})
+        volumes = mock_client.return_value.containers.run.call_args[1]["volumes"]
+        assert volumes[str(tmp_path / ".ssh")]["bind"] == "/home/scad/.ssh"
+
+    @patch("scad.container.get_docker_client")
+    @patch("scad.container.is_macos", return_value=True)
+    def test_macos_stages_ssh(self, _mac, mock_client, sample_config,
+                              tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        monkeypatch.setattr("scad.container.Path.home", lambda: tmp_path)
+        (tmp_path / ".ssh").mkdir()
+        (tmp_path / "runs" / "test-run" / "claude").mkdir(parents=True)
+        mock_client.return_value.containers.run.return_value = MagicMock(id="abc")
+        run_container(sample_config, "b", "test-run", {})
+        volumes = mock_client.return_value.containers.run.call_args[1]["volumes"]
+        assert volumes[str(tmp_path / ".ssh")]["bind"] == "/mnt/host-ssh"

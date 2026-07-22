@@ -151,9 +151,16 @@ def get_volume_mounts(
         if claude_md_path.exists():
             volumes[str(claude_md_path)] = {"bind": "/home/scad/CLAUDE.md", "mode": "ro"}
 
-    # /etc/localtime -- container inherits host timezone
-    localtime = Path("/etc/localtime")
-    if localtime.exists():
-        volumes[str(localtime.resolve())] = {"bind": "/etc/localtime", "mode": "ro"}
+    # /etc/localtime -- container inherits host timezone.
+    # Skipped on macOS: it resolves under /private/var/db/timezone, outside $HOME
+    # and therefore invisible inside the scad VM, so Docker would silently create
+    # an empty directory at /etc/localtime. The TZ env var run_container() sets
+    # already gives the container the host's timezone.
+    from scad.vm import is_macos
+
+    if not is_macos():
+        localtime = Path("/etc/localtime")
+        if localtime.exists():
+            volumes[str(localtime.resolve())] = {"bind": "/etc/localtime", "mode": "ro"}
 
     return volumes

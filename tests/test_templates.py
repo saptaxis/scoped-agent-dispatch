@@ -89,3 +89,15 @@ class TestDockerfileTemplate:
             requirements_content=False,
         )
         assert "ENTRYPOINT" in result
+
+
+class TestEntrypointSSHStaging:
+    def test_entrypoint_copies_staged_ssh(self):
+        from pathlib import Path
+        tpl = (
+            Path(__file__).parent.parent
+            / "src" / "scad" / "templates" / "entrypoint.sh.j2"
+        ).read_text()
+        assert "/mnt/host-ssh" in tpl
+        assert "chmod 700" in tpl
+        assert "chmod 600" in tpl

@@ -15,7 +15,7 @@ from docker.errors import DockerException, NotFound as DockerNotFound
 from jinja2 import Environment, PackageLoader
 
 from scad.config import ScadConfig, get_scad_home
-from scad.vm import get_docker_client
+from scad.vm import get_docker_client, is_macos
 
 SCAD_DIR = get_scad_home()
 RUNS_DIR = SCAD_DIR / "runs"
@@ -754,10 +754,14 @@ def run_container(
     if gitconfig.exists():
         volumes[str(gitconfig)] = {"bind": "/mnt/host-gitconfig", "mode": "ro"}
 
-    # SSH keys — mount read-only for git clone/fetch over SSH (submodules, private repos)
+    # SSH keys — mount read-only for git clone/fetch over SSH (submodules, private repos).
+    # On macOS the VM's virtiofs/sshfs layer does not preserve the 0600 key modes
+    # OpenSSH insists on, so stage the keys and let the entrypoint copy + chmod
+    # them (the same pattern already used for gitconfig and Claude credentials).
     ssh_dir = Path.home() / ".ssh"
     if ssh_dir.exists():
-        volumes[str(ssh_dir)] = {"bind": "/home/scad/.ssh", "mode": "ro"}
+        ssh_bind = "/mnt/host-ssh" if is_macos() else "/home/scad/.ssh"
+        volumes[str(ssh_dir)] = {"bind": ssh_bind, "mode": "ro"}
 
     # Data mounts — direct bind mounts (not managed by scad)
     for mount in config.mounts:

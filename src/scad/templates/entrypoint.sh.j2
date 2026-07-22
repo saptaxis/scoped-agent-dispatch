@@ -52,6 +52,14 @@ if [ -f /mnt/host-gitconfig ]; then
 fi
 git config --global --add safe.directory '*'
 
+# Copy staged SSH keys if mounted (macOS: VM mount layer loses 0600 key modes)
+if [ -d /mnt/host-ssh ]; then
+    mkdir -p "$HOME/.ssh"
+    cp -r /mnt/host-ssh/. "$HOME/.ssh/"
+    chmod 700 "$HOME/.ssh"
+    find "$HOME/.ssh" -type f -exec chmod 600 {} +
+fi
+
 # Configure git-delta for better diffs
 git config --global core.pager delta
 git config --global interactive.diffFilter 'delta --color-only'

@@ -272,7 +272,8 @@ class TestGetVolumeMounts:
         for path in mounts:
             assert "CLAUDE.md" not in path
 
-    def test_mounts_localtime(self, sample_config, tmp_path):
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_mounts_localtime(self, _mac, sample_config, tmp_path):
         from scad.claude_config import get_volume_mounts
         run_dir = tmp_path / "runs" / "test-run"
         (run_dir / "claude").mkdir(parents=True)
@@ -297,3 +298,27 @@ class TestGetVolumeMounts:
         localtime_mount = mounts.get(str(Path("/usr/share/zoneinfo/Asia/Kolkata")))
         assert localtime_mount is not None
         assert localtime_mount["bind"] == "/etc/localtime"
+
+
+class TestLocaltimeMountPlatformBranch:
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_localtime_mounted_on_linux(self, _mac, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        from scad.config import ScadConfig
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
+        )
+        volumes = get_volume_mounts(config, "run-1", home_dir=tmp_path)
+        binds = [v["bind"] for v in volumes.values()]
+        assert "/etc/localtime" in binds
+
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_localtime_skipped_on_macos(self, _mac, tmp_path):
+        from scad.claude_config import get_volume_mounts
+        from scad.config import ScadConfig
+        config = ScadConfig(
+            name="t", repos={"code": {"path": "/tmp/x", "workdir": True}}
+        )
+        volumes = get_volume_mounts(config, "run-1", home_dir=tmp_path)
+        binds = [v["bind"] for v in volumes.values()]
+        assert "/etc/localtime" not in binds
