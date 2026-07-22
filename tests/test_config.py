@@ -310,3 +310,45 @@ class TestScadHome:
         custom = tmp_path / "custom-scad"
         with patch.dict(os.environ, {"SCAD_HOME": str(custom)}):
             assert get_config_dir() == custom / "configs"
+
+
+class TestScadSettings:
+    def test_defaults_when_no_file(self, tmp_path, monkeypatch):
+        from scad.config import load_settings
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        s = load_settings()
+        assert s.colima.cpu == 2
+        assert s.colima.memory == 4
+        assert s.colima.disk == 60
+        assert s.colima.vm_type == "vz"
+        assert s.colima.mount_type == "virtiofs"
+
+    def test_reads_colima_block(self, tmp_path, monkeypatch):
+        from scad.config import load_settings
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        (tmp_path / "settings.yml").write_text(
+            "colima:\n  cpu: 6\n  memory: 12\n  disk: 100\n"
+        )
+        s = load_settings()
+        assert (s.colima.cpu, s.colima.memory, s.colima.disk) == (6, 12, 100)
+        # unspecified keys keep their defaults
+        assert s.colima.mount_type == "virtiofs"
+
+    def test_empty_file_is_defaults(self, tmp_path, monkeypatch):
+        from scad.config import load_settings
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        (tmp_path / "settings.yml").write_text("")
+        assert load_settings().colima.cpu == 2
+
+    def test_settings_path_follows_scad_home(self, tmp_path, monkeypatch):
+        from scad.config import get_settings_path
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        assert get_settings_path() == tmp_path / "settings.yml"
+
+    def test_unknown_key_rejected(self, tmp_path, monkeypatch):
+        from scad.config import load_settings
+        import pydantic
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path))
+        (tmp_path / "settings.yml").write_text("colima:\n  cpus: 6\n")
+        with pytest.raises(pydantic.ValidationError):
+            load_settings()

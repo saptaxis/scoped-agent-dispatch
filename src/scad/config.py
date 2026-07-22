@@ -124,6 +124,44 @@ class ScadConfig(BaseModel):
         return self
 
 
+class ColimaSettings(BaseModel):
+    """Sizing and backend for the scad-owned Colima VM (macOS only).
+
+    Applied when the `scad` profile is created. To resize an existing VM,
+    edit these values then run: scad vm delete && scad vm start
+    """
+
+    model_config = {"extra": "forbid"}
+
+    cpu: int = 2
+    memory: int = 4   # GiB
+    disk: int = 60    # GiB
+    vm_type: str = "vz"           # "vz" (macOS 13+, fast) or "qemu"
+    mount_type: str = "virtiofs"  # "virtiofs" (needs vz) or "sshfs"
+
+
+class ScadSettings(BaseModel):
+    """User-level settings from ~/.scad/settings.yml."""
+
+    model_config = {"extra": "forbid"}
+
+    colima: ColimaSettings = ColimaSettings()
+
+
+def get_settings_path() -> Path:
+    """Path to the user-level settings file inside SCAD_HOME."""
+    return get_scad_home() / "settings.yml"
+
+
+def load_settings() -> ScadSettings:
+    """Load ~/.scad/settings.yml, falling back to defaults when absent."""
+    path = get_settings_path()
+    if not path.exists():
+        return ScadSettings()
+    raw = yaml.safe_load(path.read_text()) or {}
+    return ScadSettings(**raw)
+
+
 def _ensure_config_dir() -> None:
     """Migrate ~/.scad/templates/ to ~/.scad/configs/ if needed."""
     templates_dir = SCAD_DIR / "templates"
