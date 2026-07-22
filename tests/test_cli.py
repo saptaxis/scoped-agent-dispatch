@@ -1486,11 +1486,10 @@ class TestCodeAddVMVisibility:
         mock_add.assert_called_once()
 
     @patch("scad.cli.workspace_add")
-    @patch("scad.cli.is_macos", return_value=True)
     @patch("scad.cli.path_visible_in_vm", return_value=False)
     @patch("scad.cli.validate_run_id")
     def test_invisible_path_warns_and_skips_by_default(
-        self, _v, _vis, _mac, mock_add, runner
+        self, _v, _vis, mock_add, runner
     ):
         result = runner.invoke(
             main, ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d"],
@@ -1504,16 +1503,19 @@ class TestCodeAddVMVisibility:
     @patch("scad.cli.vm_start")
     @patch("scad.cli.vm_stop")
     @patch("scad.cli.vm_state", return_value="running")
-    @patch("scad.cli.read_vm_mounts", return_value=[])
+    @patch("scad.cli.read_vm_mounts", return_value=["/srv/other"])
     @patch("scad.cli.mount_root", return_value=Path("/Volumes/d"))
     @patch("scad.cli.workspace_add")
-    @patch("scad.cli.is_macos", return_value=True)
     @patch("scad.cli.path_visible_in_vm", return_value=False)
     @patch("scad.cli.validate_run_id")
     def test_restart_vm_flag_adds_mount_then_adds_path(
-        self, _v, _vis, _mac, mock_add, _root, _read, _state,
+        self, _v, _vis, mock_add, _root, _read, _state,
         mock_stop, mock_start, mock_client, runner
     ):
+        # read_vm_mounts is seeded with a pre-existing, unrelated mount so this
+        # test can tell a preserved union from a regressed "just the new path"
+        # set — Colima replaces its mount list wholesale on start, so dropping
+        # the union would silently unmount every other session's paths.
         result = runner.invoke(
             main,
             ["code", "add", "run-1", "--path", "/Volumes/d", "--name", "d",
@@ -1521,6 +1523,6 @@ class TestCodeAddVMVisibility:
         )
         assert result.exit_code == 0
         mock_stop.assert_called_once_with()
-        mock_start.assert_called_once_with(mounts=["/Volumes/d"])
+        mock_start.assert_called_once_with(mounts=sorted(["/srv/other", "/Volumes/d"]))
         mock_add.assert_called_once()
         mock_client.return_value.containers.get.assert_called_once_with("scad-run-1")

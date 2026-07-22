@@ -348,6 +348,62 @@ class TestMountRoot:
         assert mount_root(f) == (tmp_path / "d").resolve()
 
 
+class TestPathVisibleInVM:
+    @patch("scad.vm.is_macos", return_value=False)
+    def test_linux_always_visible_even_outside_home(self, _mac, tmp_path):
+        from scad.vm import path_visible_in_vm
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        assert path_visible_in_vm(outside) is True
+
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_macos_home_path_visible_without_consulting_mounts(
+        self, _mac, tmp_path, monkeypatch
+    ):
+        from scad.vm import path_visible_in_vm
+        home = tmp_path / "home"
+        home.mkdir()
+        inside = home / "code"
+        inside.mkdir()
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+
+        def _boom():
+            raise AssertionError(
+                "read_vm_mounts should not be consulted for a $HOME path"
+            )
+
+        monkeypatch.setattr("scad.vm.read_vm_mounts", _boom)
+        assert path_visible_in_vm(inside) is True
+
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_macos_outside_home_path_in_mount_list_visible(
+        self, _mac, tmp_path, monkeypatch
+    ):
+        from scad.vm import path_visible_in_vm
+        home = tmp_path / "home"
+        home.mkdir()
+        outside = tmp_path / "volumes" / "data"
+        outside.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr(
+            "scad.vm.read_vm_mounts", lambda: [str(outside.resolve())]
+        )
+        assert path_visible_in_vm(outside) is True
+
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_macos_outside_home_path_not_in_mount_list_not_visible(
+        self, _mac, tmp_path, monkeypatch
+    ):
+        from scad.vm import path_visible_in_vm
+        home = tmp_path / "home"
+        home.mkdir()
+        outside = tmp_path / "volumes" / "data"
+        outside.mkdir(parents=True)
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+        monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: ["/srv/other"])
+        assert path_visible_in_vm(outside) is False
+
+
 class TestReconcileVMMounts:
     @patch("scad.vm.is_macos", return_value=False)
     def test_noop_on_linux(self, _mac):
