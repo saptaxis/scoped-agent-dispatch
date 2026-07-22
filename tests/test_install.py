@@ -325,6 +325,31 @@ class TestUninstall:
         assert scad_home.exists()
         assert (scad_home / "configs" / "myconfig.yml").exists()
 
+    def test_uninstall_preserves_zshrc_permissions(self, tmp_path):
+        """--uninstall preserves the permission bits of ~/.zshrc (regression:
+        the awk rewrite used to `mv` a new inode over the original, which
+        drops any non-default mode such as `chmod 600`)."""
+        zshrc = tmp_path / ".zshrc"
+        zshrc.write_text(
+            'export FOO=bar\n'
+            '\n'
+            '# scad — managed by install.sh\n'
+            'export SCAD_HOME="$HOME/.scad"\n'
+            'eval "$(_SCAD_COMPLETE=zsh_source scad)"\n'
+            'export BAZ=qux\n'
+        )
+        zshrc.chmod(0o600)
+
+        script = Path(__file__).parent.parent / "install.sh"
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path)
+        env["SCAD_INSTALL_VENV"] = str(tmp_path / "venv")
+        subprocess.run(
+            [str(script), "--uninstall"],
+            capture_output=True, text=True, env=env, timeout=30
+        )
+        assert oct(zshrc.stat().st_mode & 0o777) == oct(0o600)
+
     def test_uninstall_deregisters_plugin(self, tmp_path):
         """--uninstall removes scad from Claude's installed_plugins.json."""
         from scad.install import deregister_claude_plugin

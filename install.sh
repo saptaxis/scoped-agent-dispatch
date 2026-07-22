@@ -101,6 +101,9 @@ if $UNINSTALL; then
 
     # Remove shell config lines (marker-based). awk, not sed: BSD sed (macOS)
     # rejects `-i` without an argument and the GNU `,+N` address form.
+    # Copy contents back over the original file (rather than `mv`ing the temp
+    # file into place) so the original inode — and its permission bits — are
+    # preserved instead of replaced.
     MARKER="# scad — managed by install.sh"
     for RC in "$HOME/.zshrc" "$HOME/.bashrc"; do
         if [[ -f "$RC" ]] && grep -qF "$MARKER" "$RC"; then
@@ -109,7 +112,9 @@ if $UNINSTALL; then
                 index($0, marker)==1 { skip = 2; blank = 0; next }
                 /^[[:space:]]*$/    { blank++; next }
                                     { while (blank > 0) { print ""; blank-- }; print }
-            ' "$RC" > "$RC.scad-tmp" && mv "$RC.scad-tmp" "$RC"
+            ' "$RC" > "$RC.scad-tmp"
+            cat "$RC.scad-tmp" > "$RC"
+            rm "$RC.scad-tmp"
             echo "[scad] Removed scad lines from $RC"
         fi
     done
@@ -173,6 +178,8 @@ if $DRY_RUN; then
     elif [[ "$OS" == "Darwin" ]]; then
         echo "[scad] Would set up Docker provider: colima (brew install if missing)"
         echo "[scad] Would create Colima profile: $COLIMA_PROFILE"
+    else
+        echo "[scad] Unrecognised platform '$OS' — would skip Docker provider setup"
     fi
     if $SKIP_COMPLETIONS; then
         echo "[scad] Skipping shell completions (--no-completions)"
@@ -209,13 +216,14 @@ if $SKIP_VM; then
     echo "[scad] Skipping Docker provider setup (--no-vm)"
 elif [[ "$OS" == "Linux" ]]; then
     echo "[scad] Verifying Docker daemon..."
-    if "$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>/dev/null; then
+    if DOCKER_CHECK_ERR="$("$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>&1)"; then
         echo "[scad] Docker daemon reachable"
     else
         echo "[scad] ERROR: no reachable Docker daemon."
         echo "[scad]   Install Docker Engine, then:  sudo systemctl enable --now docker"
         echo "[scad]   Add yourself to the docker group:  sudo usermod -aG docker \$USER"
         echo "[scad]   Then re-run: ./install.sh"
+        echo "[scad]   Detail: $DOCKER_CHECK_ERR"
         exit 1
     fi
 elif [[ "$OS" == "Darwin" ]]; then
@@ -239,13 +247,20 @@ elif [[ "$OS" == "Darwin" ]]; then
     else
         # Sizing comes from ~/.scad/settings.yml (defaults 2 CPU / 4 GiB / 60 GiB)
         # so bash and Python never disagree about the defaults.
-        read -r VM_CPU VM_MEM VM_DISK VM_TYPE VM_MOUNT <<<"$(
-            "$VENV_DIR/bin/python" -c "
+        # Capture output explicitly (not inside `read <<<`) so a failing
+        # Python call is caught even under `set -e`: a command substitution
+        # feeding `read` directly does not propagate a non-zero exit.
+        SIZING_OUTPUT="$("$VENV_DIR/bin/python" -c "
 from scad.config import load_settings
 c = load_settings().colima
 print(c.cpu, c.memory, c.disk, c.vm_type, c.mount_type)
-"
-        )"
+" 2>&1)" && SIZING_STATUS=0 || SIZING_STATUS=$?
+        if [[ "$SIZING_STATUS" -ne 0 ]] || [[ -z "$SIZING_OUTPUT" ]]; then
+            echo "[scad] ERROR: failed to read VM sizing from ~/.scad/settings.yml"
+            echo "[scad]   $SIZING_OUTPUT"
+            exit 1
+        fi
+        read -r VM_CPU VM_MEM VM_DISK VM_TYPE VM_MOUNT <<<"$SIZING_OUTPUT"
         echo "[scad] Creating Colima profile '$COLIMA_PROFILE' (${VM_CPU} CPU, ${VM_MEM} GiB RAM, ${VM_DISK} GiB disk)..."
         colima start "$COLIMA_PROFILE" \
             --cpu "$VM_CPU" --memory "$VM_MEM" --disk "$VM_DISK" \
@@ -253,7 +268,7 @@ print(c.cpu, c.memory, c.disk, c.vm_type, c.mount_type)
     fi
 
     echo "[scad] Verifying scad Docker daemon..."
-    if "$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>/dev/null; then
+    if DOCKER_CHECK_ERR="$("$VENV_DIR/bin/python" -c "from scad.vm import get_docker_client; get_docker_client()" 2>&1)"; then
         echo "[scad] scad Docker daemon reachable: $HOME/.colima/$COLIMA_PROFILE/docker.sock"
     else
         echo "[scad] ERROR: the scad VM is not serving Docker."
@@ -262,6 +277,7 @@ print(c.cpu, c.memory, c.disk, c.vm_type, c.mount_type)
         echo "[scad]     colima:"
         echo "[scad]       vm_type: qemu"
         echo "[scad]       mount_type: sshfs"
+        echo "[scad]   Detail: $DOCKER_CHECK_ERR"
         exit 1
     fi
 else
