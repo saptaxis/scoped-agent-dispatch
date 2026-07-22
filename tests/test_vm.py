@@ -94,3 +94,17 @@ class TestDockerCliEnv:
     def test_linux_leaves_env_untouched(self, _mac):
         env = docker_cli_env()
         assert env == dict(os.environ)
+
+
+class TestNoBareFromEnv:
+    """The provider resolver is the only way scad reaches a Docker daemon."""
+
+    def test_no_bare_from_env_in_source(self):
+        src = Path(__file__).parent.parent / "src" / "scad"
+        offenders = [
+            f"{p.name}:{i}"
+            for p in sorted(src.glob("*.py"))
+            for i, line in enumerate(p.read_text().splitlines(), 1)
+            if "docker.from_env()" in line and p.name != "vm.py"
+        ]
+        assert offenders == [], f"bare docker.from_env() outside vm.py: {offenders}"

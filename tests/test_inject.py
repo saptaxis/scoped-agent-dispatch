@@ -11,7 +11,7 @@ from scad.container import inject_job, list_jobs, send_to_job, create_branch, RU
 class TestInjectJob:
     """Tests for inject_job() — docker exec into running container."""
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_headless_injection_runs_docker_exec(self, mock_docker, tmp_path):
         """Headless inject runs claude -p via docker exec."""
         mock_container = MagicMock()
@@ -34,7 +34,7 @@ class TestInjectJob:
         exec_cmd = mock_container.exec_run.call_args_list[1][0][0]
         assert "claude -p" in str(exec_cmd)
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_interactive_injection_runs_tmux(self, mock_docker, tmp_path):
         """Interactive inject creates tmux session via docker exec."""
         mock_container = MagicMock()
@@ -54,7 +54,7 @@ class TestInjectJob:
         exec_cmd = mock_container.exec_run.call_args[0][0]
         assert "tmux" in str(exec_cmd)
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_writes_job_metadata(self, mock_docker, tmp_path):
         """Inject creates job metadata JSON file."""
         mock_container = MagicMock()
@@ -79,7 +79,7 @@ class TestInjectJob:
         assert meta["mode"] == "headless"
         assert "started" in meta
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_logs_inject_event(self, mock_docker, tmp_path):
         """Inject logs to events.log."""
         mock_container = MagicMock()
@@ -102,7 +102,7 @@ class TestInjectJob:
         assert "inject" in content
         assert job_id in content
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_container_not_running_raises(self, mock_docker, tmp_path):
         """Inject raises if container is not running."""
         mock_container = MagicMock()
@@ -119,7 +119,7 @@ class TestInjectJob:
                     workdir_key="code",
                 )
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_job_id_increments(self, mock_docker, tmp_path):
         """Sequential injects get incrementing job IDs."""
         mock_container = MagicMock()
@@ -135,7 +135,7 @@ class TestInjectJob:
         assert job1 == "test-run-job-001"
         assert job2 == "test-run-job-002"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_headless_uses_add_dir_flags(self, mock_docker, tmp_path):
         """Headless inject includes --add-dir for repos with add_dir=True."""
         mock_container = MagicMock()
@@ -156,7 +156,7 @@ class TestInjectJob:
         exec_cmd = mock_container.exec_run.call_args[0][0]
         assert "--add-dir /workspace/docs" in str(exec_cmd)
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_interactive_uses_add_dir_flags(self, mock_docker, tmp_path):
         """Interactive inject includes --add-dir for repos with add_dir=True."""
         mock_container = MagicMock()
@@ -178,7 +178,7 @@ class TestInjectJob:
         all_calls = [str(c) for c in mock_container.exec_run.call_args_list]
         assert any("--add-dir /workspace/docs" in c for c in all_calls)
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_interactive_inject_checks_tmux_exit_code(self, mock_docker, tmp_path):
         """Interactive inject runs tmux new-window synchronously and checks exit code."""
         mock_container = MagicMock()
@@ -205,7 +205,7 @@ class TestInjectJob:
         _, kwargs = tmux_calls[0]
         assert kwargs.get("detach") is not True
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_interactive_inject_raises_on_tmux_failure(self, mock_docker, tmp_path):
         """Interactive inject raises if tmux new-window fails."""
         mock_container = MagicMock()
@@ -229,7 +229,7 @@ class TestInjectJob:
                     workdir_key="code",
                 )
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_headless_uses_skip_permissions(self, mock_docker, tmp_path):
         """Headless inject includes --dangerously-skip-permissions if configured."""
         mock_container = MagicMock()
@@ -373,7 +373,7 @@ class TestSessionJobsCLI:
 
 class TestBranchPerJob:
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_inject_with_branch_includes_checkout(self, mock_docker, tmp_path):
         """Inject with --branch includes git checkout in exec command."""
         mock_container = MagicMock()
@@ -397,7 +397,7 @@ class TestBranchPerJob:
         assert "git checkout" in bash_cmd
         assert "feature-x" in bash_cmd
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_inject_branch_stored_in_metadata(self, mock_docker, tmp_path):
         """Branch is recorded in job metadata."""
         mock_container = MagicMock()
@@ -526,7 +526,7 @@ class TestCodeDiff:
 class TestInjectWait:
     """Tests for --wait blocking behavior."""
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_wait_does_not_detach(self, mock_docker, tmp_path):
         """When wait=True, docker exec is NOT detached."""
         mock_container = MagicMock()
@@ -549,7 +549,7 @@ class TestInjectWait:
         claude_call = mock_container.exec_run.call_args_list[1]
         assert claude_call[1].get("detach") is not True
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_wait_returns_exit_code(self, mock_docker, tmp_path):
         """Wait mode returns the exit code from docker exec."""
         mock_container = MagicMock()
@@ -571,7 +571,7 @@ class TestInjectWait:
         assert isinstance(result, tuple)
         assert result[1] == 0
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_no_wait_still_detaches(self, mock_docker, tmp_path):
         """Without wait, inject still detaches (existing behavior)."""
         mock_container = MagicMock()
@@ -594,7 +594,7 @@ class TestInjectWait:
         claude_call = mock_container.exec_run.call_args_list[1]
         assert claude_call[1].get("detach") is True
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_wait_with_interactive_raises(self, mock_docker, tmp_path):
         """wait=True with headless=False raises ValueError."""
         mock_container = MagicMock()
@@ -734,7 +734,7 @@ class TestInjectTail:
 class TestSendToJob:
     """Tests for send_to_job() — send input to running interactive Claude."""
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_send_keys_to_tmux(self, mock_docker, tmp_path):
         """send_to_job sends text via tmux send-keys."""
         mock_container = MagicMock()
@@ -756,7 +756,7 @@ class TestSendToJob:
         calls = [str(c) for c in mock_container.exec_run.call_args_list]
         assert any("send-keys" in c for c in calls)
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_send_errors_if_no_interactive_jobs(self, mock_docker, tmp_path):
         """send_to_job raises if no interactive jobs exist."""
         mock_container = MagicMock()
@@ -774,7 +774,7 @@ class TestSendToJob:
             with pytest.raises(RuntimeError, match="No interactive"):
                 send_to_job("test-run", "hello")
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_send_errors_if_multiple_interactive_no_job_id(self, mock_docker, tmp_path):
         """send_to_job raises if multiple interactive jobs and no job_id specified."""
         mock_container = MagicMock()
@@ -793,7 +793,7 @@ class TestSendToJob:
             with pytest.raises(RuntimeError, match="Multiple interactive"):
                 send_to_job("test-run", "hello")
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_send_with_explicit_job_id(self, mock_docker, tmp_path):
         """send_to_job with explicit job_id targets that job."""
         mock_container = MagicMock()
@@ -815,7 +815,7 @@ class TestSendToJob:
         calls = [str(c) for c in mock_container.exec_run.call_args_list]
         assert any("send-keys" in c and "job-002" in c for c in calls)
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_send_container_not_running_raises(self, mock_docker, tmp_path):
         """send_to_job raises if container is not running."""
         mock_container = MagicMock()

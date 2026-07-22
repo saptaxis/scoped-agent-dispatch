@@ -567,9 +567,10 @@ class TestRunAgentInjectIntegration:
 
 
 class TestSessionAttach:
+    @patch("scad.cli.validate_run_id")
     @patch("scad.cli._subprocess.run")
-    @patch("scad.cli.docker.from_env")
-    def test_attach_runs_docker_exec(self, mock_docker, mock_subprocess, runner):
+    @patch("scad.cli.get_docker_client")
+    def test_attach_runs_docker_exec(self, mock_docker, mock_subprocess, mock_validate, runner):
         mock_container = MagicMock()
         mock_container.status = "running"
         mock_container.exec_run.return_value = MagicMock(exit_code=0)
@@ -586,7 +587,7 @@ class TestSessionAttach:
         assert "tmux" in call_args
 
     @patch("scad.cli.validate_run_id")
-    @patch("scad.cli.docker.from_env")
+    @patch("scad.cli.get_docker_client")
     def test_attach_not_found(self, mock_docker, mock_validate, runner):
         mock_client = MagicMock()
         mock_client.containers.get.side_effect = docker.errors.NotFound("nope")
@@ -596,8 +597,9 @@ class TestSessionAttach:
         assert result.exit_code != 0
         assert "No container" in result.output
 
-    @patch("scad.cli.docker.from_env")
-    def test_attach_not_running(self, mock_docker, runner):
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.get_docker_client")
+    def test_attach_not_running(self, mock_docker, mock_validate, runner):
         mock_container = MagicMock()
         mock_container.status = "exited"
         mock_client = MagicMock()
@@ -608,8 +610,9 @@ class TestSessionAttach:
         assert result.exit_code != 0
         assert "not running" in result.output.lower()
 
-    @patch("scad.cli.docker.from_env")
-    def test_attach_headless_no_tmux(self, mock_docker, runner):
+    @patch("scad.cli.validate_run_id")
+    @patch("scad.cli.get_docker_client")
+    def test_attach_headless_no_tmux(self, mock_docker, mock_validate, runner):
         mock_container = MagicMock()
         mock_container.status = "running"
         mock_container.exec_run.return_value = MagicMock(exit_code=1)  # no tmux session
@@ -930,7 +933,7 @@ class TestEventLogging:
 
     @patch("scad.cli.log_event")
     @patch("scad.cli._subprocess.run")
-    @patch("scad.cli.docker.from_env")
+    @patch("scad.cli.get_docker_client")
     def test_attach_logs_event(self, mock_docker, mock_subprocess, mock_log, runner):
         """session attach logs an attach event."""
         mock_container = MagicMock()

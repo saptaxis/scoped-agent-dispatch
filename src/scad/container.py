@@ -15,6 +15,7 @@ from docker.errors import DockerException, NotFound as DockerNotFound
 from jinja2 import Environment, PackageLoader
 
 from scad.config import ScadConfig, get_scad_home
+from scad.vm import get_docker_client
 
 SCAD_DIR = get_scad_home()
 RUNS_DIR = SCAD_DIR / "runs"
@@ -59,7 +60,7 @@ def _migrate_worktrees() -> None:
 def _container_exists(run_id: str) -> bool:
     """Check if a scad container exists for this run-id."""
     try:
-        client = docker.from_env()
+        client = get_docker_client()
         client.containers.get(f"scad-{run_id}")
         return True
     except (DockerNotFound, DockerException):
@@ -119,7 +120,7 @@ def inject_job(
     if wait and not headless:
         raise ValueError("wait=True requires headless=True")
     container_name = f"scad-{run_id}"
-    client = docker.from_env()
+    client = get_docker_client()
     container = client.containers.get(container_name)
 
     if container.status != "running":
@@ -273,7 +274,7 @@ def send_to_job(
     or multiple interactive jobs without explicit job_id.
     """
     container_name = f"scad-{run_id}"
-    client = docker.from_env()
+    client = get_docker_client()
     container = client.containers.get(container_name)
 
     if container.status != "running":
@@ -498,7 +499,7 @@ def clean_run(run_id: str) -> None:
     """Remove container, clones, and run directory for a run. Point of no return."""
     # Stop + remove container if it exists
     try:
-        client = docker.from_env()
+        client = get_docker_client()
         container_name = f"scad-{run_id}"
         container = client.containers.get(container_name)
         container.stop(timeout=10)
@@ -585,7 +586,7 @@ def render_build_context(config: ScadConfig, build_dir: Path) -> None:
 def list_scad_containers() -> list[dict]:
     """List running scad containers from Docker."""
     try:
-        client = docker.from_env()
+        client = get_docker_client()
     except docker.errors.DockerException:
         return []
     containers = client.containers.list(filters={"label": "scad.managed=true"})
@@ -609,7 +610,7 @@ def get_recently_crashed(max_age_minutes: int = 30) -> list[dict]:
     """
     crashed = []
     try:
-        client = docker.from_env()
+        client = get_docker_client()
         containers = client.containers.list(
             all=True,
             filters={"label": "scad.managed=true", "status": "exited"},
@@ -653,7 +654,7 @@ def list_completed_runs(logs_dir: Optional[Path] = None) -> list[dict]:
 def stop_container(run_id: str) -> bool:
     """Stop a scad container by run ID. Does NOT remove — use clean for that."""
     try:
-        client = docker.from_env()
+        client = get_docker_client()
     except docker.errors.DockerException:
         return False
     container_name = f"scad-{run_id}"
@@ -669,7 +670,7 @@ def get_image_info(config_name: str) -> Optional[dict]:
     """Get Docker image info for a config. Returns None if not built."""
     tag = f"scad-{config_name}"
     try:
-        client = docker.from_env()
+        client = get_docker_client()
     except docker.errors.DockerException:
         return None
     try:
@@ -702,7 +703,7 @@ def build_image(config: ScadConfig, build_dir: Path, no_cache: bool = False):
     tag = f"scad-{config.name}"
     render_build_context(config, build_dir)
 
-    client = docker.from_env()
+    client = get_docker_client()
     for chunk in client.api.build(path=str(build_dir), tag=tag, rm=True, decode=True, nocache=no_cache):
         if "stream" in chunk:
             line = chunk["stream"].rstrip()
@@ -715,7 +716,7 @@ def build_image(config: ScadConfig, build_dir: Path, no_cache: bool = False):
 def image_exists(config: ScadConfig) -> bool:
     """Check if the Docker image for this config already exists."""
     tag = f"scad-{config.name}"
-    client = docker.from_env()
+    client = get_docker_client()
     try:
         client.images.get(tag)
         return True
@@ -734,7 +735,7 @@ def run_container(
     if image_tag is None:
         image_tag = f"scad-{config.name}"
 
-    client = docker.from_env()
+    client = get_docker_client()
     logs_dir = SCAD_DIR / "logs"
     logs_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1181,7 +1182,7 @@ def get_all_sessions() -> list[dict]:
 
             # Determine container state
             try:
-                client = docker.from_env()
+                client = get_docker_client()
                 container = client.containers.get(f"scad-{run_id}")
                 container_state = "stopped" if container.status != "running" else "running"
             except (DockerNotFound, DockerException):
@@ -1232,7 +1233,7 @@ def get_session_info(run_id: str) -> dict:
 
     # Container state
     try:
-        client = docker.from_env()
+        client = get_docker_client()
         container = client.containers.get(f"scad-{run_id}")
         info["container"] = container.status
     except (DockerNotFound, DockerException):
@@ -1388,7 +1389,7 @@ def refresh_credentials(run_id: str) -> float:
 
     container_name = f"scad-{run_id}"
     try:
-        client = docker.from_env()
+        client = get_docker_client()
         container = client.containers.get(container_name)
     except DockerNotFound:
         raise click.ClickException(f"Container scad-{run_id} not found")
@@ -1477,7 +1478,7 @@ def gc(force: bool = False) -> dict:
 
     Returns dict with orphaned_containers, dead_run_dirs, unused_images.
     """
-    client = docker.from_env()
+    client = get_docker_client()
     findings = {
         "orphaned_containers": [],
         "dead_run_dirs": [],

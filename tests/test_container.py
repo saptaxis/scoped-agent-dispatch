@@ -269,7 +269,7 @@ class TestCloneLifecycle:
 
 
 class TestBuildImage:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_build_streams_output(self, mock_docker, sample_config, tmp_path):
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
@@ -284,7 +284,7 @@ class TestBuildImage:
         assert "Step 1/5" in lines[0]
         mock_client.api.build.assert_called_once()
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_build_raises_on_error(self, mock_docker, sample_config, tmp_path):
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
@@ -297,7 +297,7 @@ class TestBuildImage:
         with pytest.raises(docker.errors.BuildError):
             list(build_image(sample_config, tmp_path))
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_build_skips_empty_lines(self, mock_docker, sample_config, tmp_path):
         mock_client = MagicMock()
         mock_docker.return_value = mock_client
@@ -313,7 +313,7 @@ class TestBuildImage:
 
 
 class TestListScadContainers:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_lists_running_containers(self, mock_docker):
         mock_container = MagicMock()
         mock_container.labels = {
@@ -332,7 +332,7 @@ class TestListScadContainers:
         assert result[0]["run_id"] == "test-Feb26-1430"
         assert result[0]["status"] == "running"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_empty_when_none_running(self, mock_docker):
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
@@ -370,7 +370,7 @@ class TestListCompletedRuns:
 
 
 class TestStopContainer:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_stops_running_container(self, mock_from_env):
         mock_container = MagicMock()
         mock_from_env.return_value.containers.get.return_value = mock_container
@@ -379,7 +379,7 @@ class TestStopContainer:
         mock_container.stop.assert_called_once_with(timeout=10)
         mock_container.remove.assert_not_called()  # Changed: no remove on stop
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_false_for_missing_container(self, mock_from_env):
         mock_from_env.return_value.containers.get.side_effect = (
             docker.errors.NotFound("not found")
@@ -389,7 +389,7 @@ class TestStopContainer:
 
 
 class TestRunContainerWorkspaceMounts:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_single_workspace_mount(self, mock_docker, sample_config, tmp_path, monkeypatch):
         """run_container mounts a single workspace dir at /workspace."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -412,7 +412,7 @@ class TestRunContainerWorkspaceMounts:
         assert ws_mount["bind"] == "/workspace"
         assert ws_mount["mode"] == "rw"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_no_per_repo_mounts(self, mock_docker, sample_config, tmp_path, monkeypatch):
         """run_container does NOT create per-repo volume mounts."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -434,7 +434,7 @@ class TestRunContainerWorkspaceMounts:
             if bind_info["bind"].startswith("/workspace"):
                 assert bind_info["bind"] == "/workspace"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_data_mounts_are_bind_mounts(self, mock_docker, tmp_path, monkeypatch):
         """Data mounts from config get their own Docker bind mounts."""
         from scad.config import MountConfig
@@ -463,7 +463,7 @@ class TestRunContainerWorkspaceMounts:
         assert volumes[str(data_dir)]["bind"] == "/data/experiments"
         assert volumes[str(data_dir)]["mode"] == "rw"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_no_branch_name_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_client = MagicMock()
@@ -482,7 +482,7 @@ class TestRunContainerWorkspaceMounts:
         assert "BRANCH_NAME" not in env
         assert "RUN_ID" in env
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_no_prompt_or_headless_env(self, mock_docker, sample_config, tmp_path, monkeypatch):
         """run_container does not set AGENT_PROMPT or HEADLESS — inject handles prompts."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -578,8 +578,8 @@ class TestRunDirectory:
         run_dir = tmp_path / ".scad" / "runs" / "test-run-1234" / "claude"
         assert run_dir.exists()
 
-    @patch("scad.container.docker")
-    def test_run_container_mounts_run_dir(self, mock_docker, tmp_path, monkeypatch):
+    @patch("scad.container.get_docker_client")
+    def test_run_container_mounts_run_dir(self, mock_client, tmp_path, monkeypatch):
         """run_container mounts ~/.scad/runs/<run-id>/claude/ as /home/scad/.claude/."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
         monkeypatch.setattr("scad.claude_config.RUNS_DIR", tmp_path / ".scad" / "runs")
@@ -598,11 +598,11 @@ class TestRunDirectory:
 
         mock_container = MagicMock()
         mock_container.id = "abc123"
-        mock_docker.from_env.return_value.containers.run.return_value = mock_container
+        mock_client.return_value.containers.run.return_value = mock_container
 
         run_container(config, "test-branch", "test-run", worktree_paths)
 
-        call_kwargs = mock_docker.from_env.return_value.containers.run.call_args
+        call_kwargs = mock_client.return_value.containers.run.call_args
         volumes = call_kwargs[1]["volumes"]
         claude_mount = volumes[str(runs_dir)]
         assert claude_mount["bind"] == "/home/scad/.claude"
@@ -610,41 +610,41 @@ class TestRunDirectory:
 
 
 class TestCleanRun:
-    @patch("scad.container.docker")
-    def test_removes_container(self, mock_docker, tmp_path, monkeypatch):
+    @patch("scad.container.get_docker_client")
+    def test_removes_container(self, mock_client, tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
         mock_container = MagicMock()
-        mock_docker.from_env.return_value.containers.get.return_value = mock_container
+        mock_client.return_value.containers.get.return_value = mock_container
         clean_run("test-run")
         mock_container.stop.assert_called_once()
         mock_container.remove.assert_called_once()
 
-    @patch("scad.container.docker")
-    def test_removes_clones(self, mock_docker, tmp_path, monkeypatch):
+    @patch("scad.container.get_docker_client")
+    def test_removes_clones(self, mock_client, tmp_path, monkeypatch):
         run_dir = tmp_path / "runs" / "test-run"
         clone_dir = run_dir / "workspace"
         clone_dir.mkdir(parents=True)
         (clone_dir / "somefile").touch()
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
-        mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+        mock_client.return_value.containers.get.side_effect = docker.errors.NotFound("x")
         clean_run("test-run")
         assert not clone_dir.exists()
 
-    @patch("scad.container.docker")
-    def test_removes_run_dir(self, mock_docker, tmp_path, monkeypatch):
+    @patch("scad.container.get_docker_client")
+    def test_removes_run_dir(self, mock_client, tmp_path, monkeypatch):
         run_dir = tmp_path / "runs" / "test-run"
         run_dir.mkdir(parents=True)
         (run_dir / "claude").mkdir()
         (run_dir / "fetches.log").touch()
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
-        mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+        mock_client.return_value.containers.get.side_effect = docker.errors.NotFound("x")
         clean_run("test-run")
         assert not run_dir.exists()
 
-    @patch("scad.container.docker")
-    def test_succeeds_even_if_nothing_exists(self, mock_docker, tmp_path, monkeypatch):
+    @patch("scad.container.get_docker_client")
+    def test_succeeds_even_if_nothing_exists(self, mock_client, tmp_path, monkeypatch):
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
-        mock_docker.from_env.return_value.containers.get.side_effect = docker.errors.NotFound("x")
+        mock_client.return_value.containers.get.side_effect = docker.errors.NotFound("x")
         clean_run("nonexistent")  # Should not raise
 
 
@@ -1042,7 +1042,7 @@ class TestLogEvent:
 
 
 class TestGetAllSessions:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_running_containers(self, mock_docker, tmp_path, monkeypatch):
         """get_all_sessions includes running containers."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1065,7 +1065,7 @@ class TestGetAllSessions:
         running = [r for r in results if r["run_id"] == "demo-Feb28-1400"]
         assert running[0]["container"] == "running"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_includes_stopped_sessions(self, mock_docker, tmp_path, monkeypatch):
         """get_all_sessions includes sessions with stopped containers."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1093,7 +1093,7 @@ class TestGetAllSessions:
         assert len(results) == 1
         assert results[0]["container"] == "stopped"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_includes_removed_sessions(self, mock_docker, tmp_path, monkeypatch):
         """get_all_sessions shows removed when container gone but clones exist."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1114,7 +1114,7 @@ class TestGetAllSessions:
         assert results[0]["container"] == "removed"
         assert results[0]["clones"] == "yes"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_includes_cleaned_sessions(self, mock_docker, tmp_path, monkeypatch):
         """get_all_sessions shows cleaned when only events.log remains."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1147,7 +1147,7 @@ class TestGetSessionInfo:
             "2026-02-28T14:30 fetch code scad-Feb28-1400 → /src\n"
         )
 
-        with patch("scad.container.docker.from_env") as mock_docker:
+        with patch("scad.container.get_docker_client") as mock_docker:
             mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("x")
             info = get_session_info("demo-Feb28-1400")
 
@@ -1163,7 +1163,7 @@ class TestGetSessionInfo:
         run_dir.mkdir(parents=True)
         (run_dir / "events.log").write_text("2026-02-28T14:00 start config=demo branch=feat\n")
 
-        with patch("scad.container.docker.from_env") as mock_docker:
+        with patch("scad.container.get_docker_client") as mock_docker:
             mock_container = MagicMock()
             mock_container.status = "running"
             mock_docker.return_value.containers.get.return_value = mock_container
@@ -1181,7 +1181,7 @@ class TestGetSessionInfo:
         (clone_dir / "demo-code").mkdir(parents=True)
         (clone_dir / "demo-docs").mkdir(parents=True)
 
-        with patch("scad.container.docker.from_env") as mock_docker:
+        with patch("scad.container.get_docker_client") as mock_docker:
             mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("x")
             info = get_session_info("demo-Feb28-1400")
 
@@ -1198,7 +1198,7 @@ class TestGetSessionInfo:
         projects_dir.mkdir(parents=True)
         (projects_dir / "abc12345.jsonl").write_text("{}\n")
 
-        with patch("scad.container.docker.from_env") as mock_docker:
+        with patch("scad.container.get_docker_client") as mock_docker:
             mock_docker.return_value.containers.get.side_effect = docker.errors.NotFound("x")
             info = get_session_info("demo-Feb28-1400")
 
@@ -1233,7 +1233,7 @@ class TestSessionInfoSubagents:
         (subagents / "agent-1.jsonl").write_text("{}\n")
         (subagents / "agent-2.jsonl").write_text("{}\n")
 
-        with patch("scad.container.docker.from_env"):
+        with patch("scad.container.get_docker_client"):
             info = get_session_info("test-run")
 
         assert len(info["claude_sessions"]) == 1
@@ -1251,7 +1251,7 @@ class TestSessionInfoSubagents:
         project_dir.mkdir(parents=True)
         (project_dir / "abc123.jsonl").write_text("{}\n")
 
-        with patch("scad.container.docker.from_env"):
+        with patch("scad.container.get_docker_client"):
             info = get_session_info("test-run")
 
         assert len(info["claude_sessions"]) == 1
@@ -1259,7 +1259,7 @@ class TestSessionInfoSubagents:
 
 
 class TestRefreshCredentials:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_copies_credentials_to_container(self, mock_docker, tmp_path, monkeypatch):
         """refresh_credentials copies host creds into container."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1282,7 +1282,7 @@ class TestRefreshCredentials:
         )
         assert hours > 3.0
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_logs_refresh_event(self, mock_docker, tmp_path, monkeypatch):
         """refresh_credentials logs to events.log."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1304,7 +1304,7 @@ class TestRefreshCredentials:
         assert "refresh" in events_log.read_text()
         assert "credentials" in events_log.read_text()
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_raises_if_credentials_expired(self, mock_docker, tmp_path, monkeypatch):
         """refresh_credentials raises if host credentials expired."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1318,7 +1318,7 @@ class TestRefreshCredentials:
         with pytest.raises(click.ClickException, match="expired"):
             refresh_credentials("test-run")
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_raises_if_container_not_running(self, mock_docker, tmp_path, monkeypatch):
         """refresh_credentials raises if container is not running."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1336,7 +1336,7 @@ class TestRefreshCredentials:
         with pytest.raises(click.ClickException, match="not running"):
             refresh_credentials("test-run")
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_raises_if_container_not_found(self, mock_docker, tmp_path, monkeypatch):
         """refresh_credentials raises if container doesn't exist."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1354,7 +1354,7 @@ class TestRefreshCredentials:
 
 
 class TestRunContainerTelemetry:
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_disables_telemetry(self, mock_docker, sample_config, tmp_path, monkeypatch):
         """run_container sets telemetry disable env vars."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1384,7 +1384,7 @@ class TestRunContainerTelemetry:
 class TestGpuPassthrough:
     """Test GPU device_requests in run_container."""
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_gpu_enabled_passes_device_requests(self, mock_docker, sample_config, tmp_path, monkeypatch):
         """gpu: true sets device_requests and NVIDIA_VISIBLE_DEVICES=all."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1406,7 +1406,7 @@ class TestGpuPassthrough:
         assert len(kwargs["device_requests"]) == 1
         assert kwargs["environment"]["NVIDIA_VISIBLE_DEVICES"] == "all"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_gpu_disabled_no_device_requests(self, mock_docker, sample_config, tmp_path, monkeypatch):
         """gpu default (False) leaves device_requests unset and no NVIDIA env."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1695,7 +1695,7 @@ class TestConsolidatedPaths:
         (run_dir / "claude").mkdir(parents=True)
         (run_dir / "events.log").write_text("test")
 
-        monkeypatch.setattr("scad.container.docker.from_env", lambda: MagicMock(
+        monkeypatch.setattr("scad.container.get_docker_client", lambda: MagicMock(
             containers=MagicMock(get=MagicMock(side_effect=docker.errors.NotFound("not found")))
         ))
 
@@ -1816,7 +1816,7 @@ class TestGarbageCollection:
         mock_client = MagicMock()
         mock_client.containers.list.return_value = [mock_container]
         mock_client.images.list.return_value = []
-        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container.get_docker_client", lambda: mock_client)
 
         findings = gc(force=False)
         assert len(findings["orphaned_containers"]) == 1
@@ -1833,7 +1833,7 @@ class TestGarbageCollection:
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
         mock_client.images.list.return_value = []
-        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container.get_docker_client", lambda: mock_client)
         monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
 
         findings = gc(force=False)
@@ -1853,7 +1853,7 @@ class TestGarbageCollection:
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
         mock_client.images.list.return_value = [mock_image]
-        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container.get_docker_client", lambda: mock_client)
 
         findings = gc(force=False)
         assert len(findings["unused_images"]) == 1
@@ -1868,7 +1868,7 @@ class TestGarbageCollection:
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
         mock_client.images.list.return_value = []
-        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container.get_docker_client", lambda: mock_client)
         monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
 
         gc(force=False)
@@ -1884,7 +1884,7 @@ class TestGarbageCollection:
         mock_client = MagicMock()
         mock_client.containers.list.return_value = []
         mock_client.images.list.return_value = []
-        monkeypatch.setattr("scad.container.docker.from_env", lambda: mock_client)
+        monkeypatch.setattr("scad.container.get_docker_client", lambda: mock_client)
         monkeypatch.setattr("scad.container._container_exists", lambda rid: False)
 
         gc(force=True)
@@ -2058,7 +2058,7 @@ class TestUnifiedWorkspace:
 class TestGetImageInfo:
     """Tests for get_image_info() — Docker image lookup."""
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_info_when_image_exists(self, mock_docker):
         """get_image_info returns tag and created date when image exists."""
         mock_image = MagicMock()
@@ -2070,7 +2070,7 @@ class TestGetImageInfo:
         assert result["tag"] == "scad-demo"
         assert result["created"] == "2026-03-03T12:00:00"
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_none_when_not_found(self, mock_docker):
         """get_image_info returns None when image doesn't exist."""
         mock_docker.return_value.images.get.side_effect = docker.errors.ImageNotFound("nope")
@@ -2078,7 +2078,7 @@ class TestGetImageInfo:
         result = get_image_info("nonexistent")
         assert result is None
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_none_on_docker_error(self, mock_docker):
         """get_image_info returns None on Docker connection error."""
         mock_docker.side_effect = docker.errors.DockerException("not running")
@@ -2090,7 +2090,7 @@ class TestGetImageInfo:
 class TestGetRecentlyCrashed:
     """Tests for get_recently_crashed() — find crashed containers."""
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_crashed_containers(self, mock_docker):
         """get_recently_crashed returns containers with non-zero exit code."""
         mock_container = MagicMock()
@@ -2103,7 +2103,7 @@ class TestGetRecentlyCrashed:
         assert result[0]["run_id"] == "demo-test"
         assert result[0]["exit_code"] == 1
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_ignores_clean_exits(self, mock_docker):
         """get_recently_crashed ignores containers that exited cleanly (code 0)."""
         mock_container = MagicMock()
@@ -2114,7 +2114,7 @@ class TestGetRecentlyCrashed:
         result = get_recently_crashed()
         assert len(result) == 0
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_returns_empty_on_docker_error(self, mock_docker):
         """get_recently_crashed returns empty list on Docker error."""
         mock_docker.return_value.containers.list.side_effect = docker.errors.DockerException("err")
@@ -2122,7 +2122,7 @@ class TestGetRecentlyCrashed:
         result = get_recently_crashed()
         assert result == []
 
-    @patch("scad.container.docker.from_env")
+    @patch("scad.container.get_docker_client")
     def test_empty_when_no_exited_containers(self, mock_docker):
         """get_recently_crashed returns empty when no containers match."""
         mock_docker.return_value.containers.list.return_value = []

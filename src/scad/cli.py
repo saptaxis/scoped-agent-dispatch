@@ -18,6 +18,7 @@ import yaml
 
 from scad.config import load_config, list_configs, CONFIG_DIR, SCAD_DIR, ScadConfig
 from scad.prompts import parse_prompt_file
+from scad.vm import docker_cli_env, get_docker_client
 from scad.container import (
     build_image,
     check_claude_auth,
@@ -619,7 +620,7 @@ def build(config_name: str, verbose: bool, no_cache: bool):
         click.echo(f"[scad] Built: {tag}")
         # After successful build, prune old images
         try:
-            client = docker.from_env()
+            client = get_docker_client()
             new_image = client.images.get(tag)
             prune_old_images(client, config.name, new_image.id)
         except Exception:
@@ -805,7 +806,7 @@ def session_attach(run_id: str):
     validate_run_id(run_id)
     container_name = f"scad-{run_id}"
     try:
-        client = docker.from_env()
+        client = get_docker_client()
         container = client.containers.get(container_name)
     except docker.errors.NotFound:
         click.echo(f"[scad] No container found for {run_id}", err=True)
@@ -829,7 +830,8 @@ def session_attach(run_id: str):
 
     log_event(run_id, "attach")
     result = _subprocess.run(
-        ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
+        ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"],
+        env=docker_cli_env(),
     )
     sys.exit(result.returncode)
 
@@ -1468,7 +1470,8 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
         click.echo(f"[scad] Attaching to session {run_id}...")
         container_name = f"scad-{run_id}"
         attach_result = _subprocess.run(
-            ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"]
+            ["docker", "exec", "-it", container_name, "tmux", "attach", "-t", "scad"],
+            env=docker_cli_env(),
         )
         sys.exit(attach_result.returncode)
     else:
