@@ -301,11 +301,11 @@ class TestVMStart:
     @patch("scad.vm.colima_installed", return_value=True)
     @patch("scad.vm.is_macos", return_value=True)
     def test_mounts_passed_writable(self, _m, _i, _s, mock_colima):
-        from scad.vm import COLIMA_DEFAULT_MOUNTS, vm_start
+        from scad.vm import colima_default_mounts, vm_start
         vm_start(mounts=["/Volumes/data", "/srv/models"])
         args = mock_colima.call_args[0]
         expected_mounts = sorted(
-            {"/Volumes/data", "/srv/models", *COLIMA_DEFAULT_MOUNTS}
+            {"/Volumes/data", "/srv/models", *colima_default_mounts()}
         )
         expected_args = ["start", "scad"]
         for mount in expected_mounts:
@@ -335,8 +335,8 @@ class TestVMStart:
         mount_flags = [
             args[i + 1] for i in range(len(args)) if args[i] == "--mount"
         ]
-        assert f"{Path.home()}:w" in mount_flags
-        assert "/tmp/colima:w" in mount_flags
+        assert f"{Path.home().resolve()}:w" in mount_flags
+        assert f"{Path('/tmp/colima').resolve()}:w" in mount_flags
         assert "/ext:w" in mount_flags
 
     @patch("scad.vm._colima")
@@ -569,7 +569,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
@@ -601,7 +602,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setattr(
             "scad.vm.read_vm_mounts",
@@ -632,7 +634,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: ["/srv/old"])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
@@ -671,7 +674,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
@@ -690,6 +694,57 @@ class TestReconcileVMMounts:
         mock_stop.assert_not_called()
         mock_start.assert_not_called()
 
+    @patch("scad.vm.vm_start")
+    @patch("scad.vm.vm_stop")
+    @patch("scad.vm.colima_profile_dir")
+    @patch("scad.vm.is_macos", return_value=True)
+    def test_converges_on_real_colima_yaml_with_both_tmp_colima_spellings(
+        self, _mac, mock_profile_dir, mock_stop, mock_start, tmp_path, monkeypatch
+    ):
+        """Regression test for the live macOS restart loop confirmed
+        2026-07-22: `/tmp` is a symlink to `/private/tmp` on macOS, and
+        colima.yaml can legitimately hold BOTH spellings at once -- scad's
+        own `/tmp/colima` default resolves and gets written back by colima
+        as `/private/tmp/colima`, while colima also appends its own
+        unresolved `/tmp/colima` entry (with no `writable` key) alongside
+        it. This drives the real `read_vm_mounts()` over an actual
+        colima.yaml fixture shaped exactly like the one pulled live off a
+        VM stuck in the restart loop, rather than mocking its return value,
+        so a regression in either `read_vm_mounts()`'s resolution or
+        `colima_default_mounts()`'s resolution would be caught here.
+        """
+        from scad.config import ScadConfig
+        from scad.vm import reconcile_vm_mounts
+
+        home = tmp_path / "home"
+        home.mkdir()
+        profile_dir = tmp_path / "colima-profile"
+        profile_dir.mkdir()
+        mock_profile_dir.return_value = profile_dir
+        monkeypatch.setattr("scad.vm.Path.home", lambda: home)
+
+        shared_external = tmp_path / "Shared" / "scad-external"
+        shared_external.mkdir(parents=True)
+
+        (profile_dir / "colima.yaml").write_text(
+            "mounts:\n"
+            f"  - location: {shared_external}\n    writable: true\n"
+            f"  - location: {home}\n    writable: true\n"
+            "  - location: /private/tmp/colima\n    writable: true\n"
+            "  - location: /tmp/colima\n"
+        )
+
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        (home / "repo").mkdir()
+        config = ScadConfig(
+            name="t",
+            repos={"code": {"path": str(home / "repo"), "workdir": True}},
+            mounts=[{"host": str(shared_external), "container": "/data"}],
+        )
+
+        assert reconcile_vm_mounts(config) is False
+        mock_stop.assert_not_called()
+        mock_start.assert_not_called()
 
     # -- Self-healing: once a VM has (or is about to get) an explicit mount
     # list, Colima's implicit defaults no longer apply, so reconcile must
@@ -742,7 +797,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
         (home / "repo").mkdir()
@@ -774,7 +830,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setattr(
             "scad.vm.read_vm_mounts",
@@ -811,7 +868,8 @@ class TestReconcileVMMounts:
         data.mkdir(parents=True)
         monkeypatch.setattr("scad.vm.Path.home", lambda: home)
         monkeypatch.setattr(
-            "scad.vm.COLIMA_DEFAULT_MOUNTS", (str(home.resolve()), "/tmp/colima")
+            "scad.vm.colima_default_mounts",
+            lambda: {str(home.resolve()), "/tmp/colima"},
         )
         monkeypatch.setattr("scad.vm.read_vm_mounts", lambda: [str(data.resolve())])
         monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))

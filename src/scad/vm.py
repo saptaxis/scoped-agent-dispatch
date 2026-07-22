@@ -28,14 +28,26 @@ if TYPE_CHECKING:
 
 SCAD_PROFILE = "scad"
 
-# Paths Colima mounts into the VM by default when `--mount` is NOT passed at
-# all. Passing any `--mount` flag REPLACES this default set rather than
-# extending it -- confirmed live on 2026-07-22: adding one non-$HOME mount via
-# `--mount` dropped $HOME from the VM entirely, so `~/.claude.json` etc. were
-# invisible and Docker silently bind-mounted empty stub directories in their
-# place. Whenever vm_start() passes explicit mounts, these must be unioned in
-# so Colima's defaults survive.
-COLIMA_DEFAULT_MOUNTS = (str(Path.home()), "/tmp/colima")
+def colima_default_mounts() -> set[str]:
+    """Paths Colima mounts into the VM by default when `--mount` is NOT passed
+    at all. Passing any `--mount` flag REPLACES this default set rather than
+    extending it -- confirmed live on 2026-07-22: adding one non-$HOME mount
+    via `--mount` dropped $HOME from the VM entirely, so `~/.claude.json` etc.
+    were invisible and Docker silently bind-mounted empty stub directories in
+    their place. Whenever vm_start() passes explicit mounts, these must be
+    unioned in so Colima's defaults survive.
+
+    A function rather than a module-level constant so `Path.home()` is
+    resolved on every call instead of being frozen at import time -- that
+    would break both `SCAD_HOME`/home overrides and tests that monkeypatch
+    `scad.vm.Path.home`. Both entries are resolved to match `read_vm_mounts()`
+    exactly: on macOS `/tmp` is a symlink to `/private/tmp`, so the literal
+    string `/tmp/colima` never appears in the resolved mounts colima.yaml
+    reports back, and comparing an unresolved default against resolved
+    `current` mounts left `missing` permanently non-empty -- the VM restarted
+    on every single session and never converged.
+    """
+    return {str(Path.home().resolve()), str(Path("/tmp/colima").resolve())}
 
 # macOS Keychain service name Claude Code stores its OAuth credentials under.
 CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
@@ -292,10 +304,10 @@ def vm_start(mounts: list[str] | None = None) -> None:
     reuses its persisted config. When `mounts` is given it must be the COMPLETE
     desired set: colima replaces the configured mount list rather than merging.
     Passing --mount at all also replaces Colima's own default mount set (see
-    COLIMA_DEFAULT_MOUNTS), so whenever `mounts` is non-empty those defaults
-    are unioned in here to keep them alive. When `mounts` is empty/None, no
-    --mount flags are emitted at all, so colima's defaults (or the profile's
-    persisted config) apply untouched.
+    colima_default_mounts()), so whenever `mounts` is non-empty those
+    defaults are unioned in here to keep them alive. When `mounts` is
+    empty/None, no --mount flags are emitted at all, so colima's defaults
+    (or the profile's persisted config) apply untouched.
     """
     _require_macos("scad vm start")
     _require_colima()
@@ -313,7 +325,7 @@ def vm_start(mounts: list[str] | None = None) -> None:
             "--mount-type", colima.mount_type,
         ]
     if mounts:
-        for mount in sorted(set(mounts) | set(COLIMA_DEFAULT_MOUNTS)):
+        for mount in sorted(set(mounts) | colima_default_mounts()):
             args += ["--mount", f"{mount}:w"]
 
     _colima(*args)
@@ -473,12 +485,12 @@ def reconcile_vm_mounts(config: "ScadConfig") -> bool:
     # Once the VM has (or is about to get) an explicit mount list, Colima's
     # implicit defaults ($HOME and /tmp/colima) no longer apply -- passing
     # any --mount flag replaces them rather than extending them (see
-    # COLIMA_DEFAULT_MOUNTS above). So whenever `current` or `required` is
+    # colima_default_mounts() above). So whenever `current` or `required` is
     # non-empty, the defaults must be carried explicitly in `required` too,
     # or a VM left with only non-default mounts (e.g. by the pre-fix code
     # path, or by any other explicit-mount source) will never be repaired.
     if current or required:
-        required |= set(COLIMA_DEFAULT_MOUNTS)
+        required |= colima_default_mounts()
 
     missing = sorted(required - current)
     if not missing:
