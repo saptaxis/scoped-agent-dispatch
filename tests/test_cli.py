@@ -1671,3 +1671,48 @@ class TestResolveCommand:
         assert result.exit_code == 0
         for token in ("explicit", "marker:<file>", "ask", "unresolved"):
             assert token in result.output
+
+
+class TestArchiveCommand:
+    def test_reports_a_summary(self, runner, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "history.jsonl").write_bytes(b'{"a":1}\n')
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+        result = runner.invoke(main, ["archive"])
+
+        assert result.exit_code == 0
+        assert "created" in result.output
+        assert (tmp_path / "arc" / "claude" / "history.jsonl").is_file()
+
+    def test_json_output_is_parseable(self, runner, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        (home / ".claude").mkdir(parents=True)
+        (home / ".claude" / "history.jsonl").write_bytes(b'{"a":1}\n')
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+        result = runner.invoke(main, ["archive", "--json"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["counts"]["created"] == 1
+        assert payload["archive_root"].endswith("arc")
+
+    def test_run_flag_archives_only_that_run(self, runner, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        run = home / ".scad" / "runs" / "r1" / "claude"
+        run.mkdir(parents=True)
+        (run / "history.jsonl").write_bytes(b'{"a":1}\n')
+
+        result = runner.invoke(main, ["archive", "--run", "r1"])
+
+        assert result.exit_code == 0
+        assert (tmp_path / "arc" / "runs" / "r1" / "history.jsonl").is_file()

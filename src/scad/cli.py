@@ -75,6 +75,7 @@ from scad.container import (
     workspace_remove,
 )
 from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
+from scad.archive import archive_all, archive_root, archive_run, summarize
 
 
 def _relative_time(iso_str: str) -> str:
@@ -1819,3 +1820,31 @@ def finish(run_id: str, no_fetch: bool, merge: bool, keep_session: bool, force: 
         click.echo(f"[scad] Cleaned: {run_id}")
     else:
         click.echo(f"[scad] Session kept: {run_id}")
+
+
+@main.command()
+@click.option("--run", "run_id", default=None, help="Archive only this run's traces.")
+@click.option("--json", "as_json", is_flag=True, help="Emit counts as JSON on stdout.")
+def archive(run_id, as_json):
+    """Copy agent traces into the append-only archive.
+
+    Agents prune their own transcripts and `scad session clean` destroys a run's
+    traces outright. This copies them somewhere nothing deletes them. Safe to run
+    repeatedly: unchanged files are skipped and nothing is ever overwritten.
+    """
+    results = archive_run(run_id) if run_id else archive_all()
+    counts = summarize(results)
+
+    if as_json:
+        click.echo(json.dumps({"archive_root": str(archive_root()), "counts": counts}))
+        return
+
+    click.echo(f"[scad] Archive: {archive_root()}")
+    if not counts:
+        click.echo("[scad] Nothing to archive.")
+        return
+    for action in ("created", "appended", "skipped", "forked"):
+        if action in counts:
+            click.echo(f"[scad]   {action}: {counts[action]}")
+    if "forked" in counts:
+        click.echo("[scad] Forked files were rewritten at source; both copies kept.")
