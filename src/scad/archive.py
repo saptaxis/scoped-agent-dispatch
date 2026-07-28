@@ -16,6 +16,7 @@ Plain filesystem code: no Docker, no scad.container, no scad.vm.
 """
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
 from scad.config import get_scad_home
@@ -68,3 +69,96 @@ def dest_for(src: Path, src_root: Path, label: str) -> Path:
     except ValueError as exc:
         raise ValueError(f"{src} is not under {src_root}") from exc
     return archive_root() / label / rel
+
+
+PREFIX_CHECK_BYTES = 8192
+_CHUNK = 1024 * 1024
+
+
+@dataclass(frozen=True)
+class ArchiveResult:
+    action: str          # created | appended | skipped | forked
+    src: Path
+    dest: Path
+    copied: int = 0
+
+
+def _last_newline_end(path: Path, start: int, end: int) -> int:
+    """Offset just past the final b'\\n' in [start, end), else `start`.
+
+    Copying past this point is the one way to corrupt the archive permanently.
+    """
+    if end <= start:
+        return start
+    with path.open("rb") as fh:
+        pos = end
+        while pos > start:
+            step = min(_CHUNK, pos - start)
+            pos -= step
+            fh.seek(pos)
+            buf = fh.read(step)
+            idx = buf.rfind(b"\n")
+            if idx != -1:
+                return pos + idx + 1
+    return start
+
+
+def _read_at(path: Path, offset: int, size: int) -> bytes:
+    with path.open("rb") as fh:
+        fh.seek(offset)
+        return fh.read(size)
+
+
+def _copy_range(src: Path, dest: Path, start: int, end: int) -> int:
+    """Append src[start:end] to dest. Only ever extends dest."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    written = 0
+    with src.open("rb") as rfh, dest.open("ab") as wfh:
+        rfh.seek(start)
+        remaining = end - start
+        while remaining > 0:
+            buf = rfh.read(min(_CHUNK, remaining))
+            if not buf:
+                break
+            wfh.write(buf)
+            written += len(buf)
+            remaining -= len(buf)
+    return written
+
+
+def _prefix_matches(src: Path, dest: Path, have: int) -> bool:
+    """Is `dest` still a prefix of `src`?
+
+    Size alone cannot tell "appended" from "rewritten to something larger", and
+    appending onto a rewritten file produces silent garbage. Checking the window
+    immediately before the append point catches that cheaply.
+    """
+    window = min(PREFIX_CHECK_BYTES, have)
+    start = have - window
+    return _read_at(src, start, window) == _read_at(dest, start, window)
+
+
+def _fork(src: Path, dest: Path, have: int) -> ArchiveResult:
+    return ArchiveResult("forked", src, dest, 0)
+
+
+def archive_file(src: Path, dest: Path) -> ArchiveResult:
+    """Copy new complete lines of `src` into `dest`. Never shortens `dest`."""
+    src_size = src.stat().st_size
+    have = dest.stat().st_size if dest.exists() else 0
+
+    if have > src_size:
+        return _fork(src, dest, have)
+
+    if have == src_size:
+        return ArchiveResult("skipped", src, dest, 0)
+
+    if have and not _prefix_matches(src, dest, have):
+        return _fork(src, dest, have)
+
+    end = _last_newline_end(src, have, src_size)
+    if end <= have:
+        return ArchiveResult("skipped", src, dest, 0)
+
+    copied = _copy_range(src, dest, have, end)
+    return ArchiveResult("created" if have == 0 else "appended", src, dest, copied)

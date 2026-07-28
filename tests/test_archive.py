@@ -7,6 +7,8 @@ import pytest
 
 from scad.archive import (
     MARKER_NAME,
+    ArchiveResult,
+    archive_file,
     archive_root,
     dest_for,
     ensure_archive_root,
@@ -60,3 +62,100 @@ class TestDestMapping:
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
         with pytest.raises(ValueError):
             dest_for(tmp_path / "other" / "x.jsonl", tmp_path / "root", "claude")
+
+
+def write(p: Path, data: bytes) -> Path:
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(data)
+    return p
+
+
+LINES = b'{"a":1}\n{"a":2}\n{"a":3}\n'
+
+
+class TestCopyCreate:
+    def test_first_copy_creates_dest(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        res = archive_file(src, dest)
+        assert res.action == "created"
+        assert dest.read_bytes() == LINES
+        assert res.copied == len(LINES)
+
+    def test_partial_trailing_line_is_not_copied(self, tmp_path):
+        """The rule that prevents welding two records together on the next append."""
+        src = write(tmp_path / "src.jsonl", LINES + b'{"a":4')
+        dest = tmp_path / "arc" / "src.jsonl"
+        res = archive_file(src, dest)
+        assert dest.read_bytes() == LINES          # complete lines only
+        assert res.copied == len(LINES)
+
+    def test_file_with_no_newline_at_all_copies_nothing(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", b'{"a":1')
+        dest = tmp_path / "arc" / "src.jsonl"
+        res = archive_file(src, dest)
+        assert res.action == "skipped"
+        assert not dest.exists()
+
+    def test_empty_source_copies_nothing(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", b"")
+        dest = tmp_path / "arc" / "src.jsonl"
+        assert archive_file(src, dest).action == "skipped"
+
+
+class TestCopySkip:
+    def test_unchanged_file_is_skipped(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        res = archive_file(src, dest)
+        assert res.action == "skipped"
+        assert res.copied == 0
+
+    def test_incomplete_line_still_incomplete_is_skipped(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES + b'{"a":4')
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        res = archive_file(src, dest)
+        assert res.action == "skipped"
+        assert dest.read_bytes() == LINES
+
+
+class TestCopyAppend:
+    def test_growth_appends_only_the_tail(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+
+        more = b'{"a":4}\n{"a":5}\n'
+        with src.open("ab") as fh:
+            fh.write(more)
+
+        res = archive_file(src, dest)
+        assert res.action == "appended"
+        assert res.copied == len(more)
+        assert dest.read_bytes() == LINES + more
+
+    def test_partial_line_completes_on_the_next_run(self, tmp_path):
+        """A session written mid-copy: the split record arrives whole, once."""
+        src = write(tmp_path / "src.jsonl", LINES + b'{"a":4')
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        assert dest.read_bytes() == LINES
+
+        with src.open("ab") as fh:
+            fh.write(b'}\n')
+
+        archive_file(src, dest)
+        assert dest.read_bytes() == LINES + b'{"a":4}\n'
+
+    def test_append_survives_a_file_larger_than_the_prefix_window(self, tmp_path):
+        big = b"".join(b'{"n":%d}\n' % i for i in range(4000))   # > 8 KiB
+        src = write(tmp_path / "src.jsonl", big)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        with src.open("ab") as fh:
+            fh.write(b'{"n":"tail"}\n')
+        res = archive_file(src, dest)
+        assert res.action == "appended"
+        assert dest.read_bytes() == big + b'{"n":"tail"}\n'
