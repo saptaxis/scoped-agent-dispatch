@@ -198,3 +198,62 @@ class TestGitRootTier:
 
     def test_git_root_helper_returns_none_for_a_plain_directory(self, tmp_path):
         assert _git_root(tmp_path) is None
+
+
+from unittest.mock import patch
+
+
+class TestAskTier:
+    def test_ask_fires_and_returns_the_answer(self, tmp_path):
+        answer = tmp_path / "flat-3"
+        answer.mkdir()
+        cfg = ResolveConfig(markers=("design.yaml",), allow_ask=True)
+        with patch("scad.resolve.sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", return_value=str(answer)
+        ):
+            res = resolve(cfg, start=tmp_path)
+        assert res.path == answer
+        assert res.matched_by == ASK
+
+    def test_declining_the_prompt_is_unresolved(self, tmp_path):
+        cfg = ResolveConfig(allow_ask=True)
+        with patch("scad.resolve.sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", return_value=""
+        ):
+            res = resolve(cfg, start=tmp_path)
+        assert res.path is None
+        assert res.matched_by == UNRESOLVED
+
+    def test_no_tty_skips_the_tier(self, tmp_path):
+        cfg = ResolveConfig(allow_ask=True)
+        with patch("scad.resolve.sys.stdin.isatty", return_value=False), patch(
+            "builtins.input", side_effect=AssertionError("must not prompt")
+        ):
+            res = resolve(cfg, start=tmp_path)
+        assert res.matched_by == UNRESOLVED
+        assert "ask (skipped: no tty)" in res.tried
+
+    def test_interactive_false_forces_the_tier_off_even_with_a_tty(self, tmp_path):
+        """A cron or in-container reindex may still have a tty. The caller wins."""
+        cfg = ResolveConfig(allow_ask=True)
+        with patch("scad.resolve.sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", side_effect=AssertionError("must not prompt")
+        ):
+            res = resolve(cfg, start=tmp_path, interactive=False)
+        assert res.matched_by == UNRESOLVED
+
+    def test_allow_ask_false_never_prompts(self, tmp_path):
+        with patch("scad.resolve.sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", side_effect=AssertionError("must not prompt")
+        ):
+            res = resolve(ResolveConfig(), start=tmp_path)
+        assert res.matched_by == UNRESOLVED
+
+    def test_a_marker_hit_short_circuits_the_ask(self, tmp_path):
+        (tmp_path / "design.yaml").touch()
+        cfg = ResolveConfig(markers=("design.yaml",), allow_ask=True)
+        with patch("scad.resolve.sys.stdin.isatty", return_value=True), patch(
+            "builtins.input", side_effect=AssertionError("must not prompt")
+        ):
+            res = resolve(cfg, start=tmp_path)
+        assert res.path == tmp_path

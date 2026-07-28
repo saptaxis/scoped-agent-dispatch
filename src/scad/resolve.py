@@ -9,6 +9,7 @@ raises, and never exits. "Nothing resolved" is a returned value, so the engine
 can be mapped over thousands of recorded paths during a reindex.
 """
 
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -152,5 +153,24 @@ def resolve(
                 return Resolution(
                     path=root, matched_by=marker(GIT), tried=tuple(tried)
                 )
+
+    if cfg.allow_ask:
+        if not interactive or not sys.stdin.isatty():
+            tried.append("ask (skipped: no tty)" if interactive else "ask (disabled)")
+        else:
+            tried.append(ASK)
+            hint = cfg.markers[0] if cfg.markers else None
+            suffix = f" (or create {hint} at the root)" if hint else ""
+            reply = input(f"No target found. Enter the directory{suffix}: ").strip()
+            if reply:
+                answer = Path(reply).expanduser()
+                try:
+                    answer = answer.resolve()
+                except OSError:
+                    pass
+                if answer.is_dir():
+                    return Resolution(
+                        path=answer, matched_by=ASK, tried=tuple(tried)
+                    )
 
     return Resolution(path=None, matched_by=UNRESOLVED, tried=tuple(tried))
