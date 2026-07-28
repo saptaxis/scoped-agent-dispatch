@@ -15,6 +15,7 @@ Invariants, in order of importance:
 Plain filesystem code: no Docker, no scad.container, no scad.vm.
 """
 
+import collections
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -180,3 +181,48 @@ def archive_file(src: Path, dest: Path) -> ArchiveResult:
 
     copied = _copy_range(src, dest, have, end)
     return ArchiveResult("created" if have == 0 else "appended", src, dest, copied)
+
+
+def archive_tree(src_root: Path, label: str) -> list[ArchiveResult]:
+    """Archive every *.jsonl under `src_root` into archive/<label>/…
+
+    A missing root is normal, not an error — not every machine runs codex.
+    """
+    src_root = Path(src_root)
+    if not src_root.is_dir():
+        return []
+    ensure_archive_root()
+    results = []
+    for src in sorted(src_root.rglob("*.jsonl")):
+        if not src.is_file():
+            continue
+        results.append(archive_file(src, dest_for(src, src_root, label)))
+    return results
+
+
+def archive_run(run_id: str) -> list[ArchiveResult]:
+    """Archive one scad run's traces, labelled by run id.
+
+    A run directory is an ordinary ~/.claude — transcripts plus its own
+    history.jsonl — so the same tree sweep applies.
+    """
+    run_claude = get_scad_home() / "runs" / run_id / "claude"
+    return archive_tree(run_claude, f"runs/{run_id}")
+
+
+def archive_all() -> list[ArchiveResult]:
+    """Sweep every root: host Claude, host codex, and each scad run."""
+    home = Path.home()
+    results = archive_tree(home / ".claude", "claude")
+    results += archive_tree(home / ".codex" / "sessions", "codex")
+    runs = get_scad_home() / "runs"
+    if runs.is_dir():
+        for entry in sorted(runs.iterdir()):
+            if entry.is_dir():
+                results += archive_run(entry.name)
+    return results
+
+
+def summarize(results: list[ArchiveResult]) -> dict[str, int]:
+    """Count results by action, for reporting."""
+    return dict(collections.Counter(r.action for r in results))

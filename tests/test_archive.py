@@ -8,10 +8,14 @@ import pytest
 from scad.archive import (
     MARKER_NAME,
     ArchiveResult,
+    archive_all,
     archive_file,
     archive_root,
+    archive_run,
+    archive_tree,
     dest_for,
     ensure_archive_root,
+    summarize,
 )
 
 
@@ -209,3 +213,69 @@ class TestCopyFork:
         before = sorted(p.name for p in dest.parent.iterdir())
         archive_file(src, dest)
         assert sorted(p.name for p in dest.parent.iterdir()) == before
+
+
+class TestSweeps:
+    def test_tree_copies_every_jsonl_and_mirrors_layout(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        root = tmp_path / ".claude"
+        write(root / "history.jsonl", LINES)
+        write(root / "projects" / "-workspace-foo" / "abc.jsonl", LINES)
+        write(root / "notes.txt", b"not jsonl")
+
+        results = archive_tree(root, "claude")
+
+        arc = tmp_path / "arc" / "claude"
+        assert (arc / "history.jsonl").read_bytes() == LINES
+        assert (arc / "projects" / "-workspace-foo" / "abc.jsonl").read_bytes() == LINES
+        assert not (arc / "notes.txt").exists()
+        assert summarize(results)["created"] == 2
+
+    def test_second_sweep_copies_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        root = tmp_path / ".claude"
+        write(root / "history.jsonl", LINES)
+        archive_tree(root, "claude")
+        results = archive_tree(root, "claude")
+        assert summarize(results) == {"skipped": 1}
+
+    def test_missing_root_is_not_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        assert archive_tree(tmp_path / "absent", "codex") == []
+
+    def test_run_is_labelled_by_run_id(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        run = tmp_path / ".scad" / "runs" / "demo-Jul28-1200" / "claude"
+        write(run / "history.jsonl", LINES)
+        write(run / "projects" / "-workspace-foo" / "abc.jsonl", LINES)
+
+        archive_run("demo-Jul28-1200")
+
+        arc = tmp_path / "arc" / "runs" / "demo-Jul28-1200"
+        assert (arc / "history.jsonl").read_bytes() == LINES
+        assert (arc / "projects" / "-workspace-foo" / "abc.jsonl").read_bytes() == LINES
+
+    def test_run_with_no_claude_dir_is_not_an_error(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        (tmp_path / ".scad" / "runs" / "empty").mkdir(parents=True)
+        assert archive_run("empty") == []
+
+    def test_all_covers_the_three_root_kinds(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+        write(home / ".claude" / "history.jsonl", LINES)
+        write(home / ".codex" / "sessions" / "2026" / "07" / "28" / "roll.jsonl", LINES)
+        write(home / ".scad" / "runs" / "r1" / "claude" / "history.jsonl", LINES)
+
+        archive_all()
+
+        arc = tmp_path / "arc"
+        assert (arc / "claude" / "history.jsonl").is_file()
+        assert (arc / "codex" / "2026" / "07" / "28" / "roll.jsonl").is_file()
+        assert (arc / "runs" / "r1" / "history.jsonl").is_file()
