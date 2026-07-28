@@ -1716,3 +1716,92 @@ class TestArchiveCommand:
 
         assert result.exit_code == 0
         assert (tmp_path / "arc" / "runs" / "r1" / "history.jsonl").is_file()
+
+
+class TestIndexCommands:
+    def _seed(self, tmp_path, monkeypatch):
+        import json as _json
+        arc = tmp_path / "arc"
+        (arc / "claude" / "projects" / "-repo").mkdir(parents=True)
+        (arc / "claude" / "projects" / "-repo" / "S1.jsonl").write_text(_json.dumps({
+            "type": "assistant", "sessionId": "S1", "timestamp": "2026-07-28T10:00:00.000Z",
+            "cwd": "/repo", "message": {"role": "assistant",
+                                        "content": [{"type": "text", "text": "hello"}]},
+        }) + "\n")
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+
+    def test_reindex_reports_counts(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["reindex"])
+        assert result.exit_code == 0
+        assert "sessions" in result.output
+
+    def test_session_ls_lists_the_row(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "ls"])
+        assert result.exit_code == 0
+        assert "S1" in result.output
+
+    def test_session_show_includes_turn_count(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "show", "S1"])
+        assert result.exit_code == 0
+        assert "turns" in result.output.lower()
+
+    def test_session_show_unknown_id_exits_nonzero(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "show", "NOPE"])
+        assert result.exit_code != 0
+
+    def test_project_ls_groups(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["project", "ls"])
+        assert result.exit_code == 0
+
+    def test_session_ls_json_is_parseable(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "ls", "--json"])
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload[0]["id"] == "S1"
+
+    def test_since_and_until_bound_the_window(self, runner, tmp_path, monkeypatch):
+        """'What was I doing in March' is the query this exists for."""
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+
+        inside = runner.invoke(main, ["session", "ls", "--since", "2026-07-01", "--json"])
+        assert json.loads(inside.stdout)[0]["id"] == "S1"
+
+        after = runner.invoke(main, ["session", "ls", "--since", "2026-08-01", "--json"])
+        assert json.loads(after.stdout) == []
+
+        before = runner.invoke(main, ["session", "ls", "--until", "2026-07-01", "--json"])
+        assert json.loads(before.stdout) == []
+
+    def test_bad_date_is_a_clear_error(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "ls", "--since", "last-tuesday"])
+        assert result.exit_code != 0
+        assert "YYYY-MM-DD" in result.output
+
+    def test_outcome_filter_finds_sessions_awaiting_input(self, runner, tmp_path, monkeypatch):
+        """The query this whole feature exists for: what is waiting on me?"""
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "ls", "--outcome", "awaiting-user", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.stdout)[0]["id"] == "S1"
+
+    def test_grade_filter_separates_skeletons(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "ls", "--grade", "skeleton", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.stdout) == []      # this fixture has a real transcript

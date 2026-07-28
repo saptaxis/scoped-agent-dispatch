@@ -77,6 +77,7 @@ from scad.container import (
 from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
 from scad.archive import archive_all, archive_root, archive_run, summarize
 from scad.project import resolve_project
+from scad.index import connect as index_connect, reindex as run_reindex, session_row
 
 
 def _relative_time(iso_str: str) -> str:
@@ -97,6 +98,14 @@ def _relative_time(iso_str: str) -> str:
             return f"{seconds // 86400}d ago"
     except (ValueError, TypeError):
         return iso_str or "?"
+
+
+def _day_ms(day: str) -> int:
+    """YYYY-MM-DD -> epoch ms at local midnight."""
+    try:
+        return int(datetime.strptime(day, "%Y-%m-%d").timestamp() * 1000)
+    except ValueError:
+        raise click.ClickException(f"Invalid date {day!r}; expected YYYY-MM-DD.")
 
 
 def _complete_run_ids(ctx, param, incomplete):
@@ -1860,3 +1869,136 @@ def archive(run_id, as_json):
             click.echo(f"[scad]   {action}: {counts[action]}")
     if "forked" in counts:
         click.echo("[scad] Forked files were rewritten at source; both copies kept.")
+
+
+@main.command()
+@click.option("--rebuild", is_flag=True, help="Drop and rebuild from the archive.")
+@click.option("--force", is_flag=True, help="Allow --rebuild when raw is missing (destructive).")
+def reindex(rebuild, force):
+    """Rebuild the session index from the archive."""
+    stats = run_reindex(rebuild=rebuild, force=force)
+    if not stats:
+        click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
+        return
+    for key in ("files", "sessions", "turns", "skipped_lines", "skipped_files"):
+        if stats.get(key):
+            click.echo(f"[scad]   {key}: {stats[key]}")
+
+
+@session.command("ls")
+@click.option("--project", default=None, help="Filter by resolved project.")
+@click.option("--agent", default=None, help="Filter by agent (claude, codex).")
+@click.option("--kind", default=None, help="Filter by kind (main, subagent, workflow-agent).")
+@click.option("--machine", default=None, help="Filter by machine.")
+@click.option("--grade", default=None, type=click.Choice(["full", "skeleton"]),
+              help="full = has turns; skeleton = known only from history.jsonl.")
+@click.option("--outcome", default=None,
+              type=click.Choice(["awaiting-question", "awaiting-user", "interrupted",
+                                 "in-flight", "user-last"]),
+              help="Terminal state — e.g. --outcome awaiting-question for sessions asking you something.")
+@click.option("--since", default=None, help="Only sessions started on/after YYYY-MM-DD.")
+@click.option("--until", default=None, help="Only sessions started before YYYY-MM-DD.")
+@click.option("--limit", default=40, help="Rows to show.")
+@click.option("--json", "as_json", is_flag=True, help="Emit rows as JSON.")
+def session_ls(project, agent, kind, machine, grade, outcome, since, until, limit, as_json):
+    """List indexed sessions, newest first."""
+    conn = index_connect()
+    where, params = [], []
+    for column, value in (("project", project), ("agent", agent), ("kind", kind),
+                          ("machine", machine), ("grade", grade), ("outcome", outcome)):
+        if value:
+            where.append(f"{column} = ?")
+            params.append(value)
+    for column, value, op in (("started", since, ">="), ("started", until, "<")):
+        if value:
+            where.append(f"{column} {op} ?")
+            params.append(_day_ms(value))
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = conn.execute(
+        f"SELECT id, kind, agent, project, title, n_turns, grade, outcome, started "
+        f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+
+    if as_json:
+        click.echo(json.dumps([dict(r) for r in rows], default=str))
+        return
+    if not rows:
+        click.echo("[scad] No sessions. Run: scad archive && scad reindex")
+        return
+    for r in rows:
+        when = datetime.fromtimestamp(r["started"] / 1000).strftime("%Y-%m-%d %H:%M") \
+            if r["started"] else "?"
+        title = (r["title"] or "")[:48]
+        click.echo(f"{r['id'][:12]:<14} {when}  {r['agent']:<7} {r['kind']:<14} "
+                   f"{(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
+
+
+@session.command("show")
+@click.argument("session_id")
+def session_show(session_id):
+    """Show one session's metadata and turn breakdown."""
+    conn = index_connect()
+    row = session_row(conn, session_id)
+    if row is None:
+        raise click.ClickException(f"No session {session_id} in the index.")
+    for field in ("id", "kind", "agent", "machine", "project", "cwd", "title",
+                  "git_branch", "grade", "source", "scad_run_id",
+                  "parent_session_id", "workflow_id", "archive_path"):
+        if row[field] is not None:
+            click.echo(f"{field:<18} {row[field]}")
+    click.echo(f"{'turns':<18} {row['n_turns']}")
+    kinds = conn.execute(
+        "SELECT kind, count(*) n FROM turns WHERE session_id = ? GROUP BY kind ORDER BY n DESC",
+        (session_id,),
+    ).fetchall()
+    for k in kinds:
+        click.echo(f"  {k['kind']:<16} {k['n']}")
+    kids = conn.execute(
+        "SELECT count(*) n FROM sessions WHERE parent_session_id = ?", (session_id,)
+    ).fetchone()["n"]
+    if kids:
+        click.echo(f"{'subagents':<18} {kids}")
+
+
+@main.group()
+def project():
+    """Query sessions by resolved project."""
+    pass
+
+
+@project.command("ls")
+def project_ls():
+    """List projects with session counts."""
+    conn = index_connect()
+    rows = conn.execute(
+        "SELECT project, count(*) n, sum(n_turns) t, max(ended) last "
+        "FROM sessions GROUP BY project ORDER BY n DESC"
+    ).fetchall()
+    if not rows:
+        click.echo("[scad] No sessions. Run: scad archive && scad reindex")
+        return
+    for r in rows:
+        when = datetime.fromtimestamp(r["last"] / 1000).strftime("%Y-%m-%d") if r["last"] else "?"
+        click.echo(f"{(r['project'] or '?'):<28} {r['n']:>5} sessions  "
+                   f"{(r['t'] or 0):>7} turns  last {when}")
+
+
+@project.command("show")
+@click.argument("name")
+@click.option("--limit", default=40, help="Rows to show.")
+def project_show(name, limit):
+    """List a project's sessions."""
+    conn = index_connect()
+    rows = conn.execute(
+        "SELECT id, kind, agent, title, n_turns, started FROM sessions "
+        "WHERE project = ? ORDER BY started DESC LIMIT ?",
+        (name, limit),
+    ).fetchall()
+    if not rows:
+        raise click.ClickException(f"No sessions for project {name}.")
+    for r in rows:
+        when = datetime.fromtimestamp(r["started"] / 1000).strftime("%Y-%m-%d %H:%M") \
+            if r["started"] else "?"
+        click.echo(f"{r['id'][:12]:<14} {when}  {r['agent']:<7} {r['kind']:<14} "
+                   f"{r['n_turns']:>5}t  {(r['title'] or '')[:52]}")
