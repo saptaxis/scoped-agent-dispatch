@@ -16,6 +16,11 @@ from scad.records import (
     KIND_MAIN,
     KIND_SUBAGENT,
     KIND_WORKFLOW,
+    OUTCOME_AWAITING_QUESTION,
+    OUTCOME_AWAITING_USER,
+    OUTCOME_IN_FLIGHT,
+    OUTCOME_INTERRUPTED,
+    OUTCOME_USER_LAST,
     TOOL_RESULT_CAP,
     SessionRecord,
     TurnRecord,
@@ -102,6 +107,30 @@ def _claude_turns(record: dict, offset: int) -> list[TurnRecord]:
     return turns
 
 
+def derive_outcome(tail: dict) -> str | None:
+    """Classify how a session ended, from structure alone.
+
+    `tail` is accumulated while scanning: the last assistant stop_reason, whether
+    the final assistant turn called AskUserQuestion, whether its tool_use ever got
+    a tool_result, whether an interrupt landed at the end, and who spoke last.
+
+    There is deliberately no rule that inspects the text. "I am done" and "I have
+    a question" look identical in a plain end_turn block, and a wrong label is
+    worse than a coarse honest one.
+    """
+    if tail.get("interrupted_at_end"):
+        return OUTCOME_INTERRUPTED
+    if tail.get("asked_question"):
+        return OUTCOME_AWAITING_QUESTION
+    if tail.get("last_role") == "user" and not tail.get("last_was_tool_result"):
+        return OUTCOME_USER_LAST
+    if tail.get("pending_tool_use"):
+        return OUTCOME_IN_FLIGHT
+    if tail.get("last_role") == "assistant":
+        return OUTCOME_AWAITING_USER
+    return None
+
+
 def read_claude_transcript(
     path: Path, start_offset: int = 0
 ) -> tuple[SessionRecord | None, list[TurnRecord], int]:
@@ -110,6 +139,9 @@ def read_claude_transcript(
     session_id = cwd = branch = title = None
     started = ended = None
     saw_any = False
+    tail: dict = {}
+    interrupts = denials = errors = 0
+    last_stop = None
 
     for offset, rec in _iter_lines(path, start_offset):
         if rec is None:
@@ -126,6 +158,36 @@ def read_claude_transcript(
             ended = ts if ended is None else max(ended, ts)
         if rec.get("type") in _CLAUDE_SKIP_TYPES:
             continue
+
+        if rec.get("interruptedMessageId"):
+            interrupts += 1
+            tail["interrupted_at_end"] = True
+        else:
+            tail.pop("interrupted_at_end", None)
+        if rec.get("toolDenialKind"):
+            denials += 1
+        if rec.get("isApiErrorMessage"):
+            errors += 1
+
+        message = rec.get("message")
+        if isinstance(message, dict):
+            role = message.get("role")
+            tail["last_role"] = role
+            if message.get("stop_reason"):
+                last_stop = message["stop_reason"]
+            blocks = message.get("content")
+            blocks = blocks if isinstance(blocks, list) else []
+            names = [b.get("name") for b in blocks
+                     if isinstance(b, dict) and b.get("type") == "tool_use"]
+            kinds = {b.get("type") for b in blocks if isinstance(b, dict)}
+            tail["last_was_tool_result"] = "tool_result" in kinds
+            if role == "assistant":
+                tail["asked_question"] = "AskUserQuestion" in names
+                if names:
+                    tail["pending_tool_use"] = True
+            elif "tool_result" in kinds:
+                tail["pending_tool_use"] = False
+
         turns.extend(_claude_turns(rec, offset))
 
     end_offset = path.stat().st_size
@@ -136,6 +198,8 @@ def read_claude_transcript(
         id=session_id, kind=KIND_MAIN, agent="claude", source="claude-transcript",
         cwd=cwd, title=title, git_branch=branch,
         started=started, ended=ended, grade=GRADE_FULL,
+        outcome=derive_outcome(tail), last_stop_reason=last_stop,
+        n_interrupts=interrupts, n_tool_denials=denials, n_errors=errors,
     )
     return session, turns, end_offset
 

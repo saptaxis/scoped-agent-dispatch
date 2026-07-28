@@ -351,3 +351,90 @@ class TestCodexRollout:
         session, turns, _ = read_codex_rollout(p)
         assert session.id == "C1"
         assert len(turns) == 1
+
+
+from scad.records import (  # noqa: E402
+    OUTCOME_AWAITING_QUESTION,
+    OUTCOME_AWAITING_USER,
+    OUTCOME_IN_FLIGHT,
+    OUTCOME_INTERRUPTED,
+    OUTCOME_USER_LAST,
+)
+
+
+def assistant(content, stop_reason="end_turn", ts="2026-07-28T10:00:00.000Z", **extra):
+    rec = {"type": "assistant", "sessionId": "S1", "timestamp": ts,
+           "message": {"role": "assistant", "content": content, "stop_reason": stop_reason}}
+    rec.update(extra)
+    return rec
+
+
+class TestSessionOutcome:
+    def test_ask_user_question_is_awaiting_question(self, tmp_path):
+        """The one case where 'it wants input' is structural, not a guess."""
+        p = write_jsonl(tmp_path / "S1.jsonl", [assistant(
+            [{"type": "tool_use", "name": "AskUserQuestion", "input": {"q": "which?"}}],
+            stop_reason="tool_use",
+        )])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_AWAITING_QUESTION
+
+    def test_model_spoke_last_is_awaiting_user(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [assistant([{"type": "text", "text": "done"}])])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_AWAITING_USER
+        assert session.last_stop_reason == "end_turn"
+
+    def test_tool_use_without_a_result_is_in_flight(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [assistant(
+            [{"type": "tool_use", "name": "Bash", "input": {"command": "ls"}}],
+            stop_reason="tool_use",
+        )])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_IN_FLIGHT
+
+    def test_tool_use_with_a_result_is_not_in_flight(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "tool_use", "name": "Bash", "input": {}}], stop_reason="tool_use"),
+            {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:01.000Z",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}},
+            assistant([{"type": "text", "text": "finished"}], ts="2026-07-28T10:00:02.000Z"),
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_AWAITING_USER
+
+    def test_user_spoke_last(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "text", "text": "done"}]),
+            {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:01:00.000Z",
+             "message": {"role": "user", "content": "another thing"}},
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_USER_LAST
+
+    def test_interrupt_is_counted_and_wins_at_the_tail(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "text", "text": "working"}], stop_reason="tool_use",
+                      interruptedMessageId="m1"),
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.n_interrupts == 1
+        assert session.outcome == OUTCOME_INTERRUPTED
+
+    def test_denials_and_errors_are_counted(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "text", "text": "a"}], toolDenialKind="user_reject"),
+            assistant([{"type": "text", "text": "b"}], isApiErrorMessage=True),
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.n_tool_denials == 1
+        assert session.n_errors == 1
+
+    def test_no_heuristic_on_question_marks(self, tmp_path):
+        """Prose ending in '?' must NOT be labelled awaiting-question — that is a
+        semantic judgement this layer refuses to make."""
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "text", "text": "Should I use the resolver here?"}]),
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_AWAITING_USER

@@ -17,6 +17,15 @@ GRADE_SKELETON = "skeleton"
 # p90 12 KB, p95 17.5 KB, p99 45 KB, max 443 KB. 64 KB stores 99% whole.
 TOOL_RESULT_CAP = 65536
 
+# Terminal state of a session, derived from structure only — never from reading
+# the words. See readers.derive_outcome for why there is no "it ended with a
+# question mark" rule.
+OUTCOME_AWAITING_QUESTION = "awaiting-question"   # model called AskUserQuestion
+OUTCOME_AWAITING_USER = "awaiting-user"           # model spoke last, nobody replied
+OUTCOME_INTERRUPTED = "interrupted"               # user stopped it
+OUTCOME_IN_FLIGHT = "in-flight"                   # tool call with no result
+OUTCOME_USER_LAST = "user-last"                   # user spoke, model never answered
+
 
 @dataclass(frozen=True)
 class SessionRecord:
@@ -41,6 +50,11 @@ class SessionRecord:
     started: int | None = None
     ended: int | None = None
     grade: str = GRADE_FULL
+    outcome: str | None = None
+    last_stop_reason: str | None = None
+    n_interrupts: int = 0
+    n_tool_denials: int = 0
+    n_errors: int = 0
 
 
 @dataclass(frozen=True)
