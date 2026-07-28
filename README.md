@@ -166,6 +166,9 @@ scad config remove <name>                          # unregister config
 scad build <config>                                # build/rebuild Docker image
 scad vm start|stop|status|info|delete              # macOS: manage scad's Docker VM
 scad gc [--force]                                  # garbage collection
+scad archive                                       # copy agent traces to the archive
+scad archive --run <run-id>                        # archive one run only
+scad archive --json                                # machine-readable counts
 ```
 
 ## Quick start
@@ -248,6 +251,33 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 7. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Job metadata lives in `~/.scad/runs/<run-id>/jobs/`. Survives stop/restart.
 8. **Fetch** — `scad code fetch` discovers all branches across clones and snapshots them back to host repos.
 9. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
+
+## Trace archive
+
+`scad archive` copies agent traces (Claude, codex, and every scad run) into an
+append-only archive at `~/.scad/archive/`, overridable with `SCAD_ARCHIVE`.
+
+Agents prune their own transcripts — Claude Code keeps 30 days by default — and
+`scad session clean` destroys a run's traces along with its container. This copies
+them somewhere nothing deletes them. Safe to run repeatedly: unchanged files are
+skipped, growing files have only their new lines appended, and nothing is ever
+overwritten or shortened.
+
+```bash
+scad archive                 # sweep every root
+scad archive --run <run-id>  # one run only
+scad archive --json          # machine-readable counts
+```
+
+A copy always stops at the last complete newline, so a transcript being written
+mid-copy contributes no partial record — the split line arrives whole on the next
+run. If a source is ever rewritten or rotated rather than appended to, the existing
+archive is kept untouched and the new content is written beside it as
+`<name>.<mtime>.jsonl`.
+
+`scad session clean` now archives a run's traces automatically before removing it —
+that is the one loss no schedule can catch, since a run that lived an hour is gone
+before any cron fires.
 
 ## Config reference
 
