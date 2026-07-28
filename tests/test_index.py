@@ -372,3 +372,128 @@ class TestSearch:
         conn = self._seed(tmp_path)
         ensure_fts(conn)
         assert search_turns(conn, 'resolver "engine"') != []
+
+
+from scad.index import apply_job_state  # noqa: E402
+from scad.records import JobStateRecord  # noqa: E402
+
+
+def job(**kw) -> JobStateRecord:
+    base = dict(session_id="S1", name="nd-5", state="blocked",
+                needs="drop the bioRxiv PDF to ~/Downloads/",
+                detail="workflow salvaged (28/29 results)")
+    base.update(kw)
+    return JobStateRecord(**base)
+
+
+class TestJobStateColumns:
+    def test_columns_exist(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        assert {"name", "harness_state", "needs", "needs_detail"} <= cols
+
+    def test_added_to_an_index_that_predates_them(self, tmp_path):
+        """CREATE TABLE IF NOT EXISTS is a no-op on an existing file, so without a
+        migration these columns would only ever appear on a fresh machine."""
+        from scad.index import _SCHEMA
+
+        added = ("name", "harness_state", "needs", "needs_detail")
+        before = "\n".join(
+            line for line in _SCHEMA.splitlines()
+            if not any(line.strip().startswith(f"{c} ") for c in added)
+        )
+        p = tmp_path / "old.sqlite"
+        old = sqlite3.connect(p)
+        old.executescript(before)
+        old.execute("INSERT INTO sessions (id, kind, agent, machine, grade, source, "
+                    "parsed_offset) VALUES ('KEEP','main','claude','mac','full',"
+                    "'claude-transcript',0)")
+        old.commit()
+        stale = {r[1] for r in old.execute("PRAGMA table_info(sessions)")}
+        old.close()
+        assert not set(added) & stale                # the fixture really is older
+
+        conn = connect(p)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sessions)")}
+        assert set(added) <= cols
+        assert session_row(conn, "KEEP") is not None      # migration never drops rows
+
+
+class TestApplyJobState:
+    def test_updates_the_matching_session(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec())
+        assert apply_job_state(conn, job()) is True
+        row = session_row(conn, "S1")
+        assert row["name"] == "nd-5"
+        assert row["harness_state"] == "blocked"
+        assert row["needs"].startswith("drop the bioRxiv")
+        assert row["needs_detail"].startswith("workflow salvaged")
+
+    def test_an_id_with_no_session_is_ignored(self, tmp_path):
+        """The harness outlives transcripts; a name with nothing to hang it on is
+        not an error and must not create a phantom row."""
+        conn = connect(tmp_path / "i.sqlite")
+        assert apply_job_state(conn, job(session_id="GHOST")) is False
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+
+    def test_a_newer_snapshot_clears_a_resolved_need(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec())
+        apply_job_state(conn, job())
+        apply_job_state(conn, job(state="done", needs=None, detail=None))
+        row = session_row(conn, "S1")
+        assert row["harness_state"] == "done"
+        assert row["needs"] is None
+
+
+class TestReindexJoinsJobState:
+    STATE = [{"name": "nd-5", "sessionId": "S1", "state": "blocked",
+              "needs": "drop the bioRxiv PDF", "detail": "workflow salvaged",
+              "updatedAt": "2026-07-28T17:56:43.450Z"}]
+
+    def test_session_gets_its_human_name(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        arc_write(arc, "claude/jobs/0829ef1a/state-history.jsonl", self.STATE)
+
+        conn = connect(tmp_path / "i.sqlite")
+        stats = reindex(conn)
+
+        row = session_row(conn, "S1")
+        assert row["name"] == "nd-5"
+        assert row["harness_state"] == "blocked"
+        assert row["needs"] == "drop the bioRxiv PDF"
+        assert stats["named"] == 1
+
+    def test_state_history_is_never_indexed_as_a_session(self, tmp_path, monkeypatch):
+        """state.json carries a sessionId and a cwd — read as a transcript it would
+        forge a turnless row over the real one."""
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/jobs/0829ef1a/state-history.jsonl", self.STATE)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+
+    def test_job_state_read_before_its_session_still_lands(self, tmp_path, monkeypatch):
+        """'jobs' sorts before 'projects', so the row does not exist yet when the
+        job file is read. This is why the join is a second pass."""
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/jobs/0829ef1a/state-history.jsonl", self.STATE)
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert session_row(conn, "S1")["name"] == "nd-5"
+
+    def test_unknown_session_id_is_skipped_quietly(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/jobs/j/state-history.jsonl",
+                  [{"sessionId": "NOSUCH", "name": "nd-9"}])
+        conn = connect(tmp_path / "i.sqlite")
+        stats = reindex(conn)
+        assert stats["named"] == 0
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0

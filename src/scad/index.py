@@ -15,13 +15,18 @@ from pathlib import Path
 
 import click
 
-from scad.archive import archive_root
+from scad.archive import STATE_HISTORY_NAME, archive_root
 from scad.config import get_scad_home
 from scad.project import resolve_project
-from scad.readers import read_claude_any, read_claude_history, read_codex_rollout
-from scad.records import GRADE_FULL, SessionRecord, TurnRecord
+from scad.readers import (
+    read_claude_any,
+    read_claude_history,
+    read_codex_rollout,
+    read_job_state,
+)
+from scad.records import GRADE_FULL, JobStateRecord, SessionRecord, TurnRecord
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 EXTRACTOR_VERSION = 1
 
 _SCHEMA = """
@@ -48,6 +53,14 @@ CREATE TABLE IF NOT EXISTS sessions (
   n_interrupts      INTEGER NOT NULL DEFAULT 0,
   n_tool_denials    INTEGER NOT NULL DEFAULT 0,
   n_errors          INTEGER NOT NULL DEFAULT 0,
+  -- From the harness's own jobs/<short>/state.json. `name` is the only human
+  -- name a session has anywhere; `harness_state` is structural, observed of a
+  -- live process. `needs` and `needs_detail` are MODEL-WRITTEN PROSE — the notes
+  -- tier, self-report, not trace evidence. Do not read them as measurements.
+  name              TEXT,
+  harness_state     TEXT,
+  needs             TEXT,
+  needs_detail      TEXT,
   archive_path      TEXT,
   source_mtime      INTEGER,
   source_size       INTEGER,
@@ -101,6 +114,27 @@ def index_path() -> Path:
     return get_scad_home() / "index.sqlite"
 
 
+# Columns added after the first schema shipped. CREATE TABLE IF NOT EXISTS is a
+# no-op on an index that already exists, so without this they would appear only
+# on machines that had never indexed anything.
+_ADDED_COLUMNS: dict[str, dict[str, str]] = {
+    "sessions": {
+        "name": "TEXT", "harness_state": "TEXT", "needs": "TEXT", "needs_detail": "TEXT",
+    },
+}
+
+
+def _migrate(conn) -> None:
+    """Add declared columns a live table is missing. Only ever adds."""
+    for table, columns in _ADDED_COLUMNS.items():
+        present = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        if not present:
+            continue                      # table does not exist yet; _SCHEMA made it
+        for column, decl in columns.items():
+            if column not in present:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {decl}")
+
+
 def connect(path: Path | None = None) -> sqlite3.Connection:
     """Open the index, creating schema if absent."""
     target = Path(path) if path else index_path()
@@ -108,6 +142,7 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row
     conn.executescript(_SCHEMA)
+    _migrate(conn)
     conn.execute(
         "INSERT INTO meta(key, value) VALUES('schema_version', ?) "
         "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -200,6 +235,26 @@ def append_turns(conn, session_id: str, turns: list[TurnRecord]) -> int:
     return len(turns)
 
 
+def apply_job_state(conn, job: JobStateRecord) -> bool:
+    """Attach one harness job state to the session it names. Did a row match?
+
+    Assignment, not COALESCE: the newest snapshot is authoritative for its
+    session, so a job that has since unblocked must be able to clear `needs`
+    rather than keep advertising a resolved one.
+
+    An id with no session is ignored rather than inserted. The harness outlives
+    transcripts, and a name with nothing to hang it on is not an error — it is a
+    job whose trace has been pruned, which no phantom row would improve.
+    """
+    cursor = conn.execute(
+        "UPDATE sessions SET name = ?, harness_state = ?, needs = ?, needs_detail = ? "
+        "WHERE id = ?",
+        (job.name, job.state, job.needs, job.detail, job.session_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def session_row(conn, session_id: str):
     return conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
 
@@ -252,10 +307,20 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[st
     if not root.is_dir():
         return stats
 
+    job_states: list[JobStateRecord] = []
+
     for path in sorted(root.rglob("*.jsonl")):
         rel = path.relative_to(root).parts
         scad_run_id = _run_id_for(rel)
         stat = path.stat()
+
+        if path.name == STATE_HISTORY_NAME:
+            # Held back for a second pass: job state is keyed on sessionId, and
+            # the row it names may not exist yet. Must also never reach the
+            # transcript reader, which would see the snapshot's own sessionId and
+            # cwd and forge a turnless row on top of the real session.
+            job_states.extend(read_job_state(path)[0])
+            continue
 
         if path.name == "history.jsonl":
             sessions, end = read_claude_history(path)
@@ -305,6 +370,11 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[st
             stats["sessions"] += 1
         stats["turns"] += append_turns(conn, session.id, turns)
         stats["files"] += 1
+
+    # Second pass, once every row the scan will create exists.
+    for job in job_states:
+        if apply_job_state(conn, job):
+            stats["named"] += 1
 
     # A Counter, not a plain dict: callers ask for counts that a quiet pass never
     # incremented ("how many sessions?" after a no-op scan), and 0 is the honest
