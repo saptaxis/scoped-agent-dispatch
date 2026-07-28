@@ -241,22 +241,29 @@ class TestCloneLifecycle:
         with patch("scad.container.Path.home", return_value=tmp_path):
             paths = create_clones(config, "plan-22", "test-run-id")
 
-        # Calls: clone, checkout, submodule update --init, submodule foreach echo,
-        # submodule foreach checkout. Host-fetch loop is skipped when foreach echo returns empty.
-        assert mock_run.call_count == 5
-        clone_args = mock_run.call_args_list[0][0][0]
-        assert "clone" in clone_args
-        assert "--local" in clone_args
-        checkout_args = mock_run.call_args_list[1][0][0]
-        assert "checkout" in checkout_args
-        assert "-b" in checkout_args
-        assert "plan-22" in checkout_args
-        submodule_args = mock_run.call_args_list[2][0][0]
-        assert "submodule" in submodule_args
-        assert "update" in submodule_args
-        foreach_args = mock_run.call_args_list[3][0][0]
-        assert "submodule" in foreach_args
-        assert "foreach" in foreach_args
+        # Calls: 2 identity reads, clone, checkout, 2 identity writes, gpgsign off,
+        # submodule update --init, submodule foreach echo, submodule foreach checkout.
+        # Host-fetch loop is skipped when foreach echo returns empty.
+        assert mock_run.call_count == 10
+        calls = [c[0][0] for c in mock_run.call_args_list]
+
+        # The identity pre-flight runs before anything is created.
+        assert calls[0][-2:] == ["--get", "user.name"]
+        assert calls[1][-2:] == ["--get", "user.email"]
+
+        assert "clone" in calls[2]
+        assert "--local" in calls[2]
+        assert "checkout" in calls[3]
+        assert "-b" in calls[3]
+        assert "plan-22" in calls[3]
+
+        # Identity written into the clone, signing forced off.
+        assert calls[6][-2:] == ["commit.gpgsign", "false"]
+
+        assert "submodule" in calls[7]
+        assert "update" in calls[7]
+        assert "submodule" in calls[8]
+        assert "foreach" in calls[8]
 
     @patch("scad.container.subprocess.run")
     def test_create_clones_returns_paths(self, mock_run, tmp_path, monkeypatch):
@@ -288,8 +295,10 @@ class TestCloneLifecycle:
         assert paths["ref"].is_symlink()
         assert paths["ref"].resolve() == (tmp_path / "ref").resolve()
         assert "workspace" in str(paths["ref"])
-        # Five subprocess calls for code (clone + checkout + submodule update + foreach echo + foreach checkout), zero for ref
-        assert mock_run.call_count == 5
+        # Ten subprocess calls for code (2 identity reads + clone + checkout +
+        # 2 identity writes + gpgsign off + submodule update + foreach echo +
+        # foreach checkout), zero for ref.
+        assert mock_run.call_count == 10
 
     @patch("scad.container.shutil.rmtree")
     def test_cleanup_clones_removes_directory(self, mock_rmtree, tmp_path, monkeypatch):
@@ -2237,13 +2246,88 @@ class TestSyncFromHostImproved:
         assert results[0].get("main_updated") is False
 
 
+class TestGitIdentityPropagation:
+    """`git clone --local` does not copy the source's .git/config.
+
+    Without propagation a container inherits only the mounted global gitconfig,
+    so a repo that sets user.email locally is silently mis-attributed — or, with
+    no global email, cannot commit at all.
+    """
+
+    @staticmethod
+    def _repo_with_identity(path: Path, email: str) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(path), "config", "user.name", "Repo Owner"],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(path), "config", "user.email", email],
+                       check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(path), "commit", "-q", "--allow-empty", "-m", "init"],
+                       check=True, capture_output=True)
+        return path
+
+    def test_local_identity_is_carried_into_the_clone(self, tmp_path, monkeypatch):
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        src = self._repo_with_identity(tmp_path / "repo", "work@example.com")
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": str(src), "workdir": True, "worktree": True}},
+        )
+
+        paths = create_clones(config, "test-branch", "run-identity")
+
+        got = subprocess.run(
+            ["git", "-C", str(paths["code"]), "config", "--local", "--get", "user.email"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert got == "work@example.com"
+
+    def test_signing_is_disabled_in_the_clone(self, tmp_path, monkeypatch):
+        """A repo with commit.gpgsign set would fail every commit in a container
+        that has no signing key."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        src = self._repo_with_identity(tmp_path / "repo", "work@example.com")
+        subprocess.run(["git", "-C", str(src), "config", "commit.gpgsign", "true"],
+                       check=True, capture_output=True)
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": str(src), "workdir": True, "worktree": True}},
+        )
+
+        paths = create_clones(config, "test-branch", "run-signing")
+
+        got = subprocess.run(
+            ["git", "-C", str(paths["code"]), "config", "--local", "--get", "commit.gpgsign"],
+            capture_output=True, text=True,
+        ).stdout.strip()
+        assert got == "false"
+
+    def test_no_resolvable_email_fails_before_cloning(self, tmp_path, monkeypatch):
+        """Fail at dispatch, not an hour into a session where every commit is rejected."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        bare = tmp_path / "repo"
+        bare.mkdir()
+        subprocess.run(["git", "init", "-q", str(bare)], check=True, capture_output=True)
+        config = ScadConfig(
+            name="test",
+            repos={"code": {"path": str(bare), "workdir": True, "worktree": True}},
+        )
+
+        with patch("scad.container._git_identity", return_value={}):
+            with pytest.raises(click.ClickException) as exc:
+                create_clones(config, "test-branch", "run-no-email")
+
+        assert "user.email" in str(exc.value)
+        assert not (tmp_path / "runs" / "run-no-email" / "workspace" / "code").exists()
+
+
 class TestUnifiedWorkspace:
     """Tests for unified workspace mount model."""
 
     @patch("scad.container.subprocess.run")
     def test_create_clones_uses_workspace_dir(self, mock_run, sample_config, tmp_path):
         """Clones go into runs/<id>/workspace/ instead of worktrees/."""
-        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        mock_run.return_value = MagicMock(returncode=0, stdout="dev@example.com\n")
         with patch("scad.container.RUNS_DIR", tmp_path):
             paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
         # Should use workspace/ subdirectory
@@ -2259,7 +2343,7 @@ class TestUnifiedWorkspace:
             path=str(tmp_path / "docs-source"), add_dir=True, worktree=False
         )
         (tmp_path / "docs-source").mkdir()
-        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        mock_run.return_value = MagicMock(returncode=0, stdout="dev@example.com\n")
         with patch("scad.container.RUNS_DIR", tmp_path):
             paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
         docs_path = tmp_path / "test-run-001" / "workspace" / "docs"
@@ -2273,7 +2357,7 @@ class TestUnifiedWorkspace:
         data_dir = tmp_path / "experiments"
         data_dir.mkdir()
         sample_config.mounts = [MountConfig(host=str(data_dir), container="/data/experiments")]
-        mock_run.return_value = MagicMock(returncode=0, stdout="")
+        mock_run.return_value = MagicMock(returncode=0, stdout="dev@example.com\n")
         with patch("scad.container.RUNS_DIR", tmp_path):
             paths = create_clones(sample_config, "scad-test-branch", "test-run-001")
         workspace = tmp_path / "test-run-001" / "workspace"

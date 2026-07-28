@@ -389,6 +389,27 @@ def resolve_branch(config: ScadConfig, branch: Optional[str], tag: str = "notag"
         return branch
 
 
+def _git_identity(repo_path: Path) -> dict[str, str]:
+    """Read a repo's effective git identity (local config, else global).
+
+    `git clone --local` copies objects and refs but never the source's
+    .git/config, so a clone inherits nothing from a repo that sets user.email
+    locally. Inside a container the global ~/.gitconfig is all that is mounted,
+    so without this the agent commits under the wrong identity — or, if no
+    global email exists, cannot commit at all.
+    """
+    identity = {}
+    for key in ("user.name", "user.email"):
+        result = subprocess.run(
+            ["git", "-C", str(repo_path), "config", "--get", key],
+            capture_output=True, text=True, check=False,
+        )
+        value = result.stdout.strip()
+        if value:
+            identity[key] = value
+    return identity
+
+
 def create_clones(
     config: ScadConfig, branch: str, run_id: str
 ) -> dict[str, Path]:
@@ -404,6 +425,23 @@ def create_clones(
     Returns dict of repo_key -> path inside workspace/.
     """
     _migrate_worktrees()
+
+    # Pre-flight: fail here rather than after the agent has been running for an
+    # hour and every commit is rejected. Only user.email is fatal — git refuses
+    # to commit without it, while a missing user.name is merely untidy.
+    identities = {
+        key: _git_identity(repo.resolved_path)
+        for key, repo in config.repos.items()
+        if repo.worktree
+    }
+    missing = [key for key, ident in identities.items() if "user.email" not in ident]
+    if missing:
+        raise click.ClickException(
+            "No git user.email for: " + ", ".join(missing) + ".\n"
+            "The container cannot commit without one. Set it per-repo or globally:\n"
+            "  git config --global user.email you@example.com"
+        )
+
     workspace = RUNS_DIR / run_id / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
 
@@ -419,6 +457,18 @@ def create_clones(
             subprocess.run(
                 ["git", "-C", str(clone_path),
                  "checkout", "-b", branch],
+                check=True,
+            )
+            # Carry the source repo's identity into the clone — see _git_identity().
+            # Signing is force-disabled: a repo with commit.gpgsign set locally would
+            # fail every commit in a container that has no signing key.
+            for cfg_key, cfg_value in identities[key].items():
+                subprocess.run(
+                    ["git", "-C", str(clone_path), "config", cfg_key, cfg_value],
+                    check=True,
+                )
+            subprocess.run(
+                ["git", "-C", str(clone_path), "config", "commit.gpgsign", "false"],
                 check=True,
             )
             # Initialize submodules if present (no-op if none)
