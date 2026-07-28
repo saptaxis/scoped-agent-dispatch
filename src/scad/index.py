@@ -12,6 +12,7 @@ import sqlite3
 from pathlib import Path
 
 from scad.config import get_scad_home
+from scad.records import GRADE_FULL, SessionRecord, TurnRecord
 
 SCHEMA_VERSION = 1
 EXTRACTOR_VERSION = 1
@@ -107,3 +108,90 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     )
     conn.commit()
     return conn
+
+
+def upsert_session(
+    conn, session: SessionRecord, *, machine: str, project: str,
+    archive_path: str, source_size: int, source_mtime: int, parsed_offset: int,
+    scad_run_id: str | None = None,
+) -> None:
+    """Insert or update a session row.
+
+    Grade only ever moves skeleton -> full. Roots are scanned in arbitrary order,
+    so a history.jsonl pass must never downgrade a row a transcript already filled.
+    """
+    conn.execute(
+        """
+        INSERT INTO sessions (
+            id, kind, parent_session_id, agent_id, workflow_id, agent, machine,
+            scad_run_id, cwd, project, title, git_branch, started, ended,
+            grade, source, outcome, last_stop_reason, n_interrupts,
+            n_tool_denials, n_errors, archive_path, source_mtime, source_size,
+            parsed_offset, raw_present, extractor_version
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+        ON CONFLICT(id) DO UPDATE SET
+            cwd              = COALESCE(excluded.cwd, sessions.cwd),
+            project          = excluded.project,
+            title            = COALESCE(excluded.title, sessions.title),
+            git_branch       = COALESCE(excluded.git_branch, sessions.git_branch),
+            started          = MIN(COALESCE(sessions.started, excluded.started), excluded.started),
+            ended            = MAX(COALESCE(sessions.ended, excluded.ended), excluded.ended),
+            grade            = CASE WHEN sessions.grade = ? THEN ? ELSE excluded.grade END,
+            source           = CASE WHEN sessions.grade = ? THEN sessions.source ELSE excluded.source END,
+            outcome          = excluded.outcome,
+            last_stop_reason = excluded.last_stop_reason,
+            n_interrupts     = excluded.n_interrupts,
+            n_tool_denials   = excluded.n_tool_denials,
+            n_errors         = excluded.n_errors,
+            archive_path     = excluded.archive_path,
+            source_mtime     = excluded.source_mtime,
+            source_size      = excluded.source_size,
+            parsed_offset    = excluded.parsed_offset,
+            raw_present      = 1
+        """,
+        (
+            session.id, session.kind, session.parent_session_id, session.agent_id,
+            session.workflow_id, session.agent, machine, scad_run_id, session.cwd,
+            project, session.title, session.git_branch, session.started, session.ended,
+            session.grade, session.source, session.outcome, session.last_stop_reason,
+            session.n_interrupts, session.n_tool_denials, session.n_errors,
+            archive_path, source_mtime, source_size,
+            parsed_offset, EXTRACTOR_VERSION,
+            GRADE_FULL, GRADE_FULL, GRADE_FULL,
+        ),
+    )
+    conn.commit()
+
+
+def append_turns(conn, session_id: str, turns: list[TurnRecord]) -> int:
+    """Append turns, continuing idx from whatever is already stored.
+
+    Never rewrites an existing row: a session whose raw has since been pruned
+    keeps the turns extracted when raw was present.
+    """
+    if not turns:
+        return 0
+    start = conn.execute(
+        "SELECT COALESCE(MAX(idx) + 1, 0) FROM turns WHERE session_id = ?", (session_id,)
+    ).fetchone()[0]
+    conn.executemany(
+        "INSERT OR IGNORE INTO turns "
+        "(session_id, idx, ts, role, kind, tool_name, text, truncated, raw_offset) "
+        "VALUES (?,?,?,?,?,?,?,?,?)",
+        [
+            (session_id, start + i, t.ts, t.role, t.kind, t.tool_name,
+             t.text, 1 if t.truncated else 0, t.raw_offset)
+            for i, t in enumerate(turns)
+        ],
+    )
+    conn.execute(
+        "UPDATE sessions SET n_turns = (SELECT count(*) FROM turns WHERE session_id = ?) "
+        "WHERE id = ?",
+        (session_id, session_id),
+    )
+    conn.commit()
+    return len(turns)
+
+
+def session_row(conn, session_id: str):
+    return conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
