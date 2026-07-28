@@ -68,6 +68,44 @@ def _ancestors(start: Path) -> list[Path]:
     return [here, *here.parents]
 
 
+GIT = ".git"
+
+
+def _git_root(d: Path) -> Path | None:
+    """Return the repository root if `d` holds a .git, else None.
+
+    A worktree's .git is a FILE containing `gitdir: <path>` pointing at
+    <repo>/.git/worktrees/<name>. We chase that pointer so a session run from a
+    worktree attributes to the repository it belongs to, not to the worktree —
+    the worktree name survives in the session's raw cwd either way, so this
+    direction loses no information while the reverse would destroy grouping.
+
+    Pure Python, no subprocess: this must work on recorded paths where shelling
+    out to git is not viable.
+    """
+    dot_git = d / GIT
+
+    if dot_git.is_dir():
+        return d
+
+    if dot_git.is_file():
+        try:
+            text = dot_git.read_text().strip()
+        except OSError:
+            return None
+        if not text.startswith("gitdir:"):
+            return None
+        pointer = Path(text.split(":", 1)[1].strip()).expanduser()
+        if not pointer.is_absolute():
+            pointer = (d / pointer).resolve()
+        # pointer == <repo>/.git/worktrees/<name>; the repo is three levels up.
+        if pointer.parent.name == "worktrees" and pointer.parent.parent.name == GIT:
+            return pointer.parent.parent.parent
+        return None
+
+    return None
+
+
 def resolve(
     cfg: ResolveConfig,
     start: Path | None = None,
@@ -105,5 +143,14 @@ def resolve(
                     return Resolution(
                         path=d, matched_by=marker(name), tried=tuple(tried)
                     )
+
+    if cfg.use_git_root:
+        tried.append(marker(GIT))
+        for d in dirs:
+            root = _git_root(d)
+            if root is not None:
+                return Resolution(
+                    path=root, matched_by=marker(GIT), tried=tuple(tried)
+                )
 
     return Resolution(path=None, matched_by=UNRESOLVED, tried=tuple(tried))

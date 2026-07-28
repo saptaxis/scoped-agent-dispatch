@@ -132,3 +132,69 @@ class TestMarkerTier:
         )
         assert res.path is None
         assert res.matched_by == UNRESOLVED
+
+
+from scad.resolve import _git_root
+
+
+class TestGitRootTier:
+    def test_git_directory_resolves_to_its_parent(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        res = resolve(ResolveConfig(use_git_root=True), start=tmp_path)
+        assert res.path == tmp_path
+        assert res.matched_by == marker(".git")
+
+    def test_walks_up_to_the_repo(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        deep = tmp_path / "src" / "scad"
+        deep.mkdir(parents=True)
+        res = resolve(ResolveConfig(use_git_root=True), start=deep)
+        assert res.path == tmp_path
+
+    def test_markers_beat_git_root_in_the_same_directory(self, tmp_path):
+        (tmp_path / ".git").mkdir()
+        (tmp_path / "design.yaml").touch()
+        cfg = ResolveConfig(markers=("design.yaml",), use_git_root=True)
+        res = resolve(cfg, start=tmp_path)
+        assert res.matched_by == marker("design.yaml")
+
+    def test_worktree_git_file_resolves_to_the_repository_not_the_worktree(self, tmp_path):
+        """In a worktree, .git is a FILE pointing into the main repo.
+
+        Layout git actually creates:
+            repo/.git/worktrees/<name>/     <- the pointer target
+            wt/.git                         <- file: "gitdir: <that path>"
+        The resolved path must be `repo`, not `wt`.
+        """
+        repo = tmp_path / "repo"
+        (repo / ".git" / "worktrees" / "feature-x").mkdir(parents=True)
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text(
+            f"gitdir: {repo / '.git' / 'worktrees' / 'feature-x'}\n"
+        )
+
+        res = resolve(ResolveConfig(use_git_root=True), start=wt)
+        assert res.path == repo
+        assert res.matched_by == marker(".git")
+
+    def test_worktree_pointer_with_relative_path(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".git" / "worktrees" / "feature-x").mkdir(parents=True)
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text("gitdir: ../repo/.git/worktrees/feature-x\n")
+
+        res = resolve(ResolveConfig(use_git_root=True), start=wt)
+        assert res.path == repo
+
+    def test_unparseable_git_file_is_skipped_not_fatal(self, tmp_path):
+        wt = tmp_path / "wt"
+        wt.mkdir()
+        (wt / ".git").write_text("this is not a gitdir pointer\n")
+        res = resolve(ResolveConfig(use_git_root=True), start=wt)
+        assert res.path is None
+        assert res.matched_by == UNRESOLVED
+
+    def test_git_root_helper_returns_none_for_a_plain_directory(self, tmp_path):
+        assert _git_root(tmp_path) is None
