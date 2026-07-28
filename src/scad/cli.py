@@ -76,6 +76,7 @@ from scad.container import (
 )
 from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
 from scad.archive import archive_all, archive_root, archive_run, summarize
+from scad.project import resolve_project
 
 
 def _relative_time(iso_str: str) -> str:
@@ -266,6 +267,17 @@ def resolve(root, markers, git_root, ask, start, label, as_json):
     path = require(res)
     announce(path, res, label)
     click.echo(str(path))
+
+
+@main.command()
+@click.option("--start", default=None, type=click.Path(), help="Resolve from this directory instead of cwd.")
+def where(start):
+    """Announce the project scad resolves for a directory."""
+    from pathlib import Path as _Path
+
+    target = _Path(start) if start else _Path.cwd()
+    project = resolve_project(target)
+    click.echo(f"[scad] project: {project}  ({target})")
 
 
 @main.group()
