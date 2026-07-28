@@ -241,3 +241,95 @@ def read_claude_history(
         for sid, e in seen.items()
     ]
     return sessions, path.stat().st_size
+
+
+def _codex_message_text(content) -> str:
+    """Codex message content is a list of blocks with a `text` field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(
+            b.get("text") or "" for b in content if isinstance(b, dict)
+        )
+    return _as_text(content)
+
+
+def read_codex_rollout(
+    path: Path, start_offset: int = 0
+) -> tuple[SessionRecord | None, list[TurnRecord], int]:
+    """Read a codex rollout.
+
+    Two things codex does that Claude does not, both verified against real files:
+
+    1. Every turn is recorded TWICE — once as `event_msg`, once as `response_item`
+       with identical content. `response_item` is canonical because it carries
+       `call_id`, which pairs a tool call to its output. Reading both would
+       duplicate the entire corpus.
+    2. Reasoning is summary-only. `response_item/reasoning` has `content: null`
+       and ~1 KB of `encrypted_content` we cannot read; the plaintext is a short
+       summary. We take that and never store the ciphertext.
+    """
+    turns: list[TurnRecord] = []
+    session_id = cwd = None
+    started = ended = None
+
+    for offset, rec in _iter_lines(path, start_offset):
+        if rec is None:
+            continue
+        rtype = rec.get("type")
+        payload = rec.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        ts = _epoch_ms(rec.get("timestamp"))
+        if ts:
+            started = ts if started is None else min(started, ts)
+            ended = ts if ended is None else max(ended, ts)
+
+        if rtype == "session_meta":
+            session_id = payload.get("id") or session_id
+            cwd = payload.get("cwd") or cwd
+            continue
+
+        if rtype == "turn_context":
+            cwd = payload.get("cwd") or cwd     # cwd can change mid-session
+            continue
+
+        if rtype != "response_item":
+            continue                            # event_msg is the duplicate stream
+
+        ptype = payload.get("type")
+        if ptype == "message":
+            turns.append(TurnRecord(
+                ts, payload.get("role"), "text",
+                _codex_message_text(payload.get("content")), raw_offset=offset,
+            ))
+        elif ptype == "reasoning":
+            summary = payload.get("summary")
+            text = ""
+            if isinstance(summary, list):
+                text = "".join(
+                    s.get("text") or "" for s in summary if isinstance(s, dict)
+                )
+            if text:
+                turns.append(TurnRecord(ts, "assistant", "thinking", text, raw_offset=offset))
+        elif ptype in ("function_call", "custom_tool_call"):
+            body, truncated = _cap(_as_text(payload.get("arguments") or payload.get("input")))
+            turns.append(TurnRecord(
+                ts, "assistant", "tool_use", body,
+                tool_name=payload.get("name"), truncated=truncated, raw_offset=offset,
+            ))
+        elif ptype in ("function_call_output", "custom_tool_call_output"):
+            body, truncated = _cap(_as_text(payload.get("output")))
+            turns.append(TurnRecord(
+                ts, "tool", "tool_result", body, truncated=truncated, raw_offset=offset,
+            ))
+
+    end_offset = path.stat().st_size
+    if not session_id:
+        return None, [], end_offset
+
+    session = SessionRecord(
+        id=session_id, kind=KIND_MAIN, agent="codex", source="codex-rollout",
+        cwd=cwd, started=started, ended=ended, grade=GRADE_FULL,
+    )
+    return session, turns, end_offset

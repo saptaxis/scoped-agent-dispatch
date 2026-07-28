@@ -262,3 +262,92 @@ class TestClaudeHistory:
         p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
         _, end = read_claude_history(p)
         assert end == p.stat().st_size
+
+
+from scad.readers import read_codex_rollout  # noqa: E402
+
+
+CODEX_LINES = [
+    {"timestamp": "2026-07-25T11:31:14.000Z", "type": "session_meta",
+     "payload": {"id": "C1", "timestamp": "2026-07-25T11:31:14.000Z", "cwd": "/repo",
+                 "originator": "cli", "cli_version": "1.2.3", "model_provider": "openai"}},
+    {"timestamp": "2026-07-25T11:31:20.000Z", "type": "turn_context",
+     "payload": {"cwd": "/repo", "model": "gpt-x", "approval_policy": "auto"}},
+    {"timestamp": "2026-07-25T11:31:25.000Z", "type": "response_item",
+     "payload": {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "the answer"}]}},
+    {"timestamp": "2026-07-25T11:31:25.000Z", "type": "event_msg",
+     "payload": {"type": "agent_message", "message": "the answer"}},
+    {"timestamp": "2026-07-25T11:31:30.000Z", "type": "response_item",
+     "payload": {"type": "reasoning", "content": None,
+                 "summary": [{"type": "summary_text", "text": "**Running shell command**"}],
+                 "encrypted_content": "gAAAAABpgLPZ" + "x" * 900}},
+    {"timestamp": "2026-07-25T11:31:31.000Z", "type": "event_msg",
+     "payload": {"type": "agent_reasoning", "text": "**Running shell command**"}},
+    {"timestamp": "2026-07-25T11:31:35.000Z", "type": "response_item",
+     "payload": {"type": "function_call", "name": "shell",
+                 "arguments": "{\"cmd\":\"ls\"}", "call_id": "c1"}},
+    {"timestamp": "2026-07-25T11:31:36.000Z", "type": "response_item",
+     "payload": {"type": "function_call_output", "call_id": "c1", "output": "a.txt"}},
+]
+
+
+class TestCodexRollout:
+    def test_session_comes_from_session_meta(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES)
+        session, _, _ = read_codex_rollout(p)
+        assert session.id == "C1"
+        assert session.agent == "codex"
+        assert session.source == "codex-rollout"
+        assert session.cwd == "/repo"
+        assert session.kind == KIND_MAIN
+
+    def test_turns_are_not_doubled(self, tmp_path):
+        """The critical one: event_msg and response_item carry identical content."""
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES)
+        _, turns, _ = read_codex_rollout(p)
+        texts = [t.text for t in turns if t.kind == "text"]
+        assert texts == ["the answer"]          # once, not twice
+
+    def test_reasoning_is_the_plaintext_summary(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES)
+        _, turns, _ = read_codex_rollout(p)
+        thinking = [t for t in turns if t.kind == "thinking"]
+        assert len(thinking) == 1
+        assert thinking[0].text == "**Running shell command**"
+
+    def test_encrypted_content_is_never_stored(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES)
+        _, turns, _ = read_codex_rollout(p)
+        for t in turns:
+            assert "gAAAAAB" not in t.text
+
+    def test_tool_calls_and_outputs(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES)
+        _, turns, _ = read_codex_rollout(p)
+        calls = [t for t in turns if t.kind == "tool_use"]
+        outputs = [t for t in turns if t.kind == "tool_result"]
+        assert calls[0].tool_name == "shell"
+        assert outputs[0].text == "a.txt"
+
+    def test_turn_context_cwd_updates_the_session(self, tmp_path):
+        """Codex cwd can change mid-session; the latest wins."""
+        lines = CODEX_LINES + [{
+            "timestamp": "2026-07-25T12:00:00.000Z", "type": "turn_context",
+            "payload": {"cwd": "/elsewhere", "model": "gpt-x"},
+        }]
+        p = write_jsonl(tmp_path / "rollout.jsonl", lines)
+        session, _, _ = read_codex_rollout(p)
+        assert session.cwd == "/elsewhere"
+
+    def test_missing_session_meta_yields_no_session(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", [CODEX_LINES[2]])
+        session, _, _ = read_codex_rollout(p)
+        assert session is None
+
+    def test_malformed_lines_are_skipped(self, tmp_path):
+        p = tmp_path / "rollout.jsonl"
+        p.write_text(json.dumps(CODEX_LINES[0]) + "\nnot json\n" + json.dumps(CODEX_LINES[2]) + "\n")
+        session, turns, _ = read_codex_rollout(p)
+        assert session.id == "C1"
+        assert len(turns) == 1
