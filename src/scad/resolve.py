@@ -94,5 +94,16 @@ def resolve(
         )
 
     start = Path.cwd() if start is None else start
+    dirs = _ancestors(start)
+
+    if cfg.markers:
+        for name in cfg.markers:
+            tried.append(marker(name))
+        for d in dirs:
+            for name in cfg.markers:
+                if (d / name).exists():
+                    return Resolution(
+                        path=d, matched_by=marker(name), tried=tuple(tried)
+                    )
 
     return Resolution(path=None, matched_by=UNRESOLVED, tried=tuple(tried))
