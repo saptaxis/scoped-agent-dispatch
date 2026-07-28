@@ -74,6 +74,7 @@ from scad.container import (
     workspace_name_taken,
     workspace_remove,
 )
+from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
 
 
 def _relative_time(iso_str: str) -> str:
@@ -214,6 +215,56 @@ def _tail_stream(stream_path: Path, stop_event: threading.Event):
 def main():
     """scad — dispatch Claude Code agents in isolated Docker containers."""
     pass
+
+
+@main.command()
+@click.argument("root", required=False, default=None, type=click.Path())
+@click.option("--marker", "markers", multiple=True,
+              help="Walk-up sentinel filename. Repeatable; order breaks ties within a directory.")
+@click.option("--git-root", is_flag=True, help="Walk up for .git (worktrees resolve to the repo).")
+@click.option("--ask", is_flag=True, help="Prompt when nothing is found (needs a tty).")
+@click.option("--start", default=None, type=click.Path(), help="Where to start the walk (default: cwd).")
+@click.option("--label", default="target", help="Name used in the stderr announce line.")
+@click.option("--json", "as_json", is_flag=True, help="Emit {path, matched_by, tried} on stdout.")
+def resolve(root, markers, git_root, ask, start, label, as_json):
+    """Resolve a target directory by fixed precedence.
+
+    Precedence: explicit ROOT -> markers (walk-up) -> git-root -> ask -> unresolved.
+
+    The resolved path goes to stdout; the announce line goes to stderr, so the
+    output stays pipeable.
+
+    \b
+    matched_by vocabulary (a stable public contract):
+      explicit       the caller passed ROOT
+      marker:<file>  walk-up found <file>
+      ask            answered interactively
+      unresolved     nothing matched
+
+    \b
+    Exit codes:
+      0  resolved
+      1  unresolved
+      2  usage error
+    """
+    cfg = ResolveConfig(markers=tuple(markers), use_git_root=git_root, allow_ask=ask)
+    res = resolve_target(
+        cfg,
+        start=Path(start) if start else None,
+        explicit=Path(root) if root else None,
+    )
+
+    if as_json:
+        click.echo(json.dumps({
+            "path": str(res.path) if res.path else None,
+            "matched_by": res.matched_by,
+            "tried": list(res.tried),
+        }))
+        raise SystemExit(0 if res.path else 1)
+
+    path = require(res)
+    announce(path, res, label)
+    click.echo(str(path))
 
 
 @main.group()

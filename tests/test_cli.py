@@ -1,5 +1,7 @@
 """CLI tests."""
 
+import json
+
 import pytest
 import click
 from click.testing import CliRunner
@@ -1601,3 +1603,71 @@ class TestCodeAddOrderingAndErrorHandling:
         assert "[scad]" in result.output
         assert "colima is not installed" in result.output
         mock_add.assert_not_called()
+
+
+class TestResolveCommand:
+    @pytest.fixture
+    def runner(self):
+        import inspect
+
+        from click.testing import CliRunner
+
+        if "mix_stderr" in inspect.signature(CliRunner.__init__).parameters:
+            return CliRunner(mix_stderr=False)
+        return CliRunner()
+
+    def test_resolves_via_marker_and_prints_the_path_on_stdout(self, runner, tmp_path):
+        (tmp_path / "design.yaml").touch()
+        result = runner.invoke(
+            main, ["resolve", "--marker", "design.yaml", "--start", str(tmp_path)]
+        )
+        assert result.exit_code == 0
+        assert result.stdout.strip() == str(tmp_path)
+
+    def test_explicit_argument_wins(self, runner, tmp_path):
+        result = runner.invoke(main, ["resolve", str(tmp_path)])
+        assert result.exit_code == 0
+        assert result.stdout.strip() == str(tmp_path)
+
+    def test_unresolved_exits_1_and_prints_what_was_tried(self, runner, tmp_path):
+        result = runner.invoke(
+            main, ["resolve", "--marker", "design.yaml", "--start", str(tmp_path)]
+        )
+        assert result.exit_code == 1
+        assert "marker:design.yaml" in result.stderr
+        assert "options:" in result.stderr
+
+    def test_bad_flag_exits_2_not_1(self, runner):
+        """Usage error and 'no target here' must be distinguishable by exit code.
+
+        2 is Click's own UsageError code; 1 is ours for unresolved.
+        """
+        result = runner.invoke(main, ["resolve", "--nonsense"])
+        assert result.exit_code == 2
+
+    def test_json_carries_path_matched_by_and_tried(self, runner, tmp_path):
+        (tmp_path / ".git").mkdir()
+        result = runner.invoke(
+            main, ["resolve", "--git-root", "--start", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["path"] == str(tmp_path)
+        assert payload["matched_by"] == "marker:.git"
+        assert "marker:.git" in payload["tried"]
+
+    def test_json_on_failure_still_emits_a_document(self, runner, tmp_path):
+        result = runner.invoke(
+            main, ["resolve", "--marker", "design.yaml", "--start", str(tmp_path), "--json"]
+        )
+        assert result.exit_code == 1
+        payload = json.loads(result.stdout)
+        assert payload["path"] is None
+        assert payload["matched_by"] == "unresolved"
+
+    def test_help_documents_the_matched_by_vocabulary(self, runner):
+        """--help is the entire agent-facing documentation surface for Phase 0."""
+        result = runner.invoke(main, ["resolve", "--help"])
+        assert result.exit_code == 0
+        for token in ("explicit", "marker:<file>", "ask", "unresolved"):
+            assert token in result.output
