@@ -13,6 +13,8 @@ from pathlib import Path
 from scad.records import (
     GRADE_FULL,
     KIND_MAIN,
+    KIND_SUBAGENT,
+    KIND_WORKFLOW,
     TOOL_RESULT_CAP,
     SessionRecord,
     TurnRecord,
@@ -135,3 +137,69 @@ def read_claude_transcript(
         started=started, ended=ended, grade=GRADE_FULL,
     )
     return session, turns, end_offset
+
+
+def identity_from_path(path: Path) -> dict:
+    """Derive row identity from where a transcript sits, not from its contents.
+
+    This exists because a subagent file's `sessionId` field is its PARENT's uuid.
+    The records cannot tell you which subagent you are reading; only the path can:
+
+        projects/<cwd>/<parent>.jsonl                                  -> main
+        projects/<cwd>/<parent>/subagents/agent-<id>.jsonl             -> subagent
+        projects/<cwd>/<parent>/subagents/workflows/wf_<w>/agent-<id>.jsonl
+                                                                       -> workflow-agent
+    """
+    parts = path.parts
+    stem = path.stem
+
+    if "subagents" not in parts:
+        return {"kind": KIND_MAIN, "id": stem, "parent_session_id": None,
+                "agent_id": None, "workflow_id": None}
+
+    sub = parts.index("subagents")
+    parent = parts[sub - 1]
+    agent_id = stem[len("agent-"):] if stem.startswith("agent-") else stem
+    workflow_id = None
+    kind = KIND_SUBAGENT
+
+    if "workflows" in parts[sub:]:
+        wf = parts.index("workflows", sub)
+        if wf + 1 < len(parts) - 1:
+            workflow_id = parts[wf + 1]
+            kind = KIND_WORKFLOW
+
+    return {"kind": kind, "id": agent_id, "parent_session_id": parent,
+            "agent_id": agent_id, "workflow_id": workflow_id}
+
+
+def read_claude_any(
+    path: Path, start_offset: int = 0
+) -> tuple[SessionRecord | None, list[TurnRecord], int]:
+    """Read any Claude transcript — main, subagent, or workflow agent.
+
+    The record format is identical; only identity differs, so this reuses the
+    transcript reader and re-keys the session from the path.
+    """
+    session, turns, end = read_claude_transcript(path, start_offset)
+    ident = identity_from_path(path)
+
+    if session is None:
+        return None, [], end
+
+    if ident["kind"] == KIND_MAIN:
+        return session, turns, end
+
+    from dataclasses import replace
+
+    session = replace(
+        session,
+        id=ident["id"],
+        kind=ident["kind"],
+        source="claude-subagent",
+        parent_session_id=ident["parent_session_id"],
+        agent_id=ident["agent_id"],
+        workflow_id=ident["workflow_id"],
+        title=None,          # only main sessions carry aiTitle
+    )
+    return session, turns, end

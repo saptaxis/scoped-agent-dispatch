@@ -133,3 +133,75 @@ class TestClaudeTranscript:
         assert turns[0].truncated is True
         assert len(turns[0].text) == 65536
         assert turns[0].raw_offset == 0     # full content still reachable
+
+
+from scad.readers import identity_from_path, read_claude_any  # noqa: E402
+from scad.records import KIND_SUBAGENT, KIND_WORKFLOW  # noqa: E402
+
+
+SUBAGENT_LINES = [
+    {"type": "assistant", "sessionId": "PARENT-UUID", "agentId": "a0778b6f68fa2fe99",
+     "isSidechain": True, "slug": "frolicking-knitting-lantern",
+     "timestamp": "2026-07-28T10:00:00.000Z", "cwd": "/repo",
+     "message": {"role": "assistant", "content": [{"type": "text", "text": "subagent work"}]}},
+]
+
+
+class TestIdentityFromPath:
+    def test_main_transcript(self, tmp_path):
+        p = tmp_path / "projects" / "-repo" / "SESSION-UUID.jsonl"
+        ident = identity_from_path(p)
+        assert ident["kind"] == KIND_MAIN
+        assert ident["id"] == "SESSION-UUID"
+        assert ident["parent_session_id"] is None
+        assert ident["agent_id"] is None
+
+    def test_subagent(self, tmp_path):
+        p = tmp_path / "projects" / "-repo" / "PARENT-UUID" / "subagents" / "agent-a0778b.jsonl"
+        ident = identity_from_path(p)
+        assert ident["kind"] == KIND_SUBAGENT
+        assert ident["id"] == "a0778b"
+        assert ident["agent_id"] == "a0778b"
+        assert ident["parent_session_id"] == "PARENT-UUID"
+        assert ident["workflow_id"] is None
+
+    def test_workflow_agent(self, tmp_path):
+        p = (tmp_path / "projects" / "-repo" / "PARENT-UUID" / "subagents"
+             / "workflows" / "wf_08b34d98" / "agent-abc.jsonl")
+        ident = identity_from_path(p)
+        assert ident["kind"] == KIND_WORKFLOW
+        assert ident["id"] == "abc"
+        assert ident["parent_session_id"] == "PARENT-UUID"
+        assert ident["workflow_id"] == "wf_08b34d98"
+
+
+class TestReadClaudeAny:
+    def test_subagent_keys_on_agent_id_not_session_id(self, tmp_path):
+        """The bug this guards: sessionId is the PARENT's, so keying on it
+        collapses every subagent of a session onto one row."""
+        p = write_jsonl(
+            tmp_path / "projects" / "-repo" / "PARENT-UUID" / "subagents" / "agent-a0778b.jsonl",
+            SUBAGENT_LINES,
+        )
+        session, turns, _ = read_claude_any(p)
+        assert session.id == "a0778b"
+        assert session.id != "PARENT-UUID"
+        assert session.parent_session_id == "PARENT-UUID"
+        assert session.kind == KIND_SUBAGENT
+        assert session.source == "claude-subagent"
+        assert session.title is None          # only main sessions get aiTitle
+        assert [t.text for t in turns] == ["subagent work"]
+
+    def test_two_subagents_of_one_parent_are_two_rows(self, tmp_path):
+        base = tmp_path / "projects" / "-repo" / "PARENT-UUID" / "subagents"
+        a = write_jsonl(base / "agent-aaa.jsonl", SUBAGENT_LINES)
+        b = write_jsonl(base / "agent-bbb.jsonl", SUBAGENT_LINES)
+        ids = {read_claude_any(a)[0].id, read_claude_any(b)[0].id}
+        assert ids == {"aaa", "bbb"}
+
+    def test_main_transcript_still_reads_as_main(self, tmp_path):
+        p = write_jsonl(tmp_path / "projects" / "-repo" / "S1.jsonl", CLAUDE_LINES)
+        session, _, _ = read_claude_any(p)
+        assert session.kind == KIND_MAIN
+        assert session.id == "S1"
+        assert session.source == "claude-transcript"
