@@ -438,3 +438,65 @@ class TestSessionOutcome:
         ])
         session, _, _ = read_claude_transcript(p)
         assert session.outcome == OUTCOME_AWAITING_USER
+
+
+from scad.readers import read_job_state  # noqa: E402
+
+
+SNAP = {"name": "nd-5", "sessionId": "S1", "state": "blocked",
+        "needs": "drop the bioRxiv PDF to ~/Downloads/",
+        "detail": "workflow salvaged (28/29 results)",
+        "updatedAt": "2026-07-28T17:56:43.450Z"}
+
+
+class TestJobState:
+    """`state-history.jsonl` — the only place a session's human name exists."""
+
+    def test_reads_the_fields_that_matter(self, tmp_path):
+        p = write_jsonl(tmp_path / "state-history.jsonl", [SNAP])
+        states, end = read_job_state(p)
+        assert len(states) == 1
+        s = states[0]
+        assert s.session_id == "S1"
+        assert s.name == "nd-5"
+        assert s.state == "blocked"
+        assert s.needs.startswith("drop the bioRxiv")
+        assert s.detail.startswith("workflow salvaged")
+        assert s.updated_at == 1785261403450
+        assert end == p.stat().st_size
+
+    def test_latest_snapshot_wins(self, tmp_path):
+        p = write_jsonl(tmp_path / "state-history.jsonl", [
+            SNAP,
+            {**SNAP, "state": "done", "needs": None,
+             "updatedAt": "2026-07-28T18:30:00.000Z"},
+        ])
+        states, _ = read_job_state(p)
+        assert len(states) == 1
+        assert states[0].state == "done"
+        assert states[0].needs is None
+
+    def test_one_row_per_session_id(self, tmp_path):
+        """A job dir can be reused across resumes; each session keeps its own name."""
+        p = write_jsonl(tmp_path / "state-history.jsonl", [
+            SNAP, {**SNAP, "sessionId": "S2", "name": "nd-6"},
+        ])
+        states, _ = read_job_state(p)
+        assert {s.session_id: s.name for s in states} == {"S1": "nd-5", "S2": "nd-6"}
+
+    def test_lines_without_a_session_id_are_ignored(self, tmp_path):
+        p = write_jsonl(tmp_path / "state-history.jsonl",
+                        [{"name": "orphan", "state": "running"}, SNAP])
+        states, _ = read_job_state(p)
+        assert [s.session_id for s in states] == ["S1"]
+
+    def test_malformed_lines_are_survived(self, tmp_path):
+        p = tmp_path / "state-history.jsonl"
+        p.write_text("{not json\n" + json.dumps(SNAP) + "\n")
+        states, _ = read_job_state(p)
+        assert [s.name for s in states] == ["nd-5"]
+
+    def test_missing_optional_fields_are_none(self, tmp_path):
+        p = write_jsonl(tmp_path / "state-history.jsonl", [{"sessionId": "S1"}])
+        states, _ = read_job_state(p)
+        assert (states[0].name, states[0].state, states[0].needs) == (None, None, None)

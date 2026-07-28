@@ -58,6 +58,32 @@ class SessionRecord:
 
 
 @dataclass(frozen=True)
+class JobStateRecord:
+    """One snapshot of the harness's own job state, keyed on the session it ran.
+
+    Two layers here, and they are not the same kind of fact:
+
+    - STRUCTURAL: `state` (blocked | failed | …). The harness owns the live
+      process — it can see a PTY idle at a prompt. An index reading JSONL after
+      the fact cannot, which is why our own `outcome` is coarser and derived.
+    - SEMANTIC: `needs` and `detail` are MODEL-WRITTEN PROSE. Nothing structural
+      produces "drop the bioRxiv PDF to ~/Downloads". They belong to the notes
+      tier — self-report — not to trace evidence, and should be read as claims
+      rather than as measurements.
+
+    `name` is the reason this source exists at all: it is the only place a
+    session's human name (nd-5) is recorded anywhere on the machine.
+    """
+
+    session_id: str
+    name: str | None = None
+    state: str | None = None
+    needs: str | None = None
+    detail: str | None = None
+    updated_at: int | None = None
+
+
+@dataclass(frozen=True)
 class TurnRecord:
     """One row of `turns`. `idx` is assigned by the index, not the reader, so a
     resumed parse can continue numbering without the reader tracking state."""

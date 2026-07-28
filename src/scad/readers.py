@@ -22,6 +22,7 @@ from scad.records import (
     OUTCOME_INTERRUPTED,
     OUTCOME_USER_LAST,
     TOOL_RESULT_CAP,
+    JobStateRecord,
     SessionRecord,
     TurnRecord,
 )
@@ -305,6 +306,37 @@ def read_claude_history(
         for sid, e in seen.items()
     ]
     return sessions, path.stat().st_size
+
+
+def read_job_state(path: Path, start_offset: int = 0) -> tuple[list[JobStateRecord], int]:
+    """Read a `state-history.jsonl` into the latest snapshot per sessionId.
+
+    The archiver turns the harness's mutable `jobs/<short>/state.json` into this
+    append-only log, one line per distinct `updatedAt`. Earlier lines are kept
+    because the sequence of transitions is worth having, but only the newest
+    line for a session describes it now, so that is what this yields.
+
+    One job directory usually holds one session, but a resume can put a second
+    id in the same log — hence a dict rather than a single record.
+    """
+    latest: dict[str, JobStateRecord] = {}
+
+    for _, rec in _iter_lines(path, start_offset):
+        if rec is None:
+            continue
+        sid = rec.get("sessionId")
+        if not sid:
+            continue
+        latest[sid] = JobStateRecord(          # append order is chronological: last wins
+            session_id=sid,
+            name=rec.get("name"),
+            state=rec.get("state"),
+            needs=rec.get("needs"),
+            detail=rec.get("detail"),
+            updated_at=_epoch_ms(rec.get("updatedAt")),
+        )
+
+    return list(latest.values()), path.stat().st_size
 
 
 def _codex_message_text(content) -> str:
