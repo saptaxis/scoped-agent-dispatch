@@ -169,6 +169,15 @@ scad gc [--force]                                  # garbage collection
 scad archive                                       # copy agent traces to the archive
 scad archive --run <run-id>                        # archive one run only
 scad archive --json                                # machine-readable counts
+
+# Session index
+scad reindex [--rebuild] [--force]                 # build the index from the archive
+scad session ls [--project X] [--kind K] ...       # list indexed sessions
+scad session show <id>                             # one session's metadata + turn breakdown
+scad session read <id> [--kind text]               # print a session's turns
+scad search <query> [--kind thinking]              # full-text search across every turn
+scad project ls | scad project show <name>         # sessions grouped by resolved project
+scad where                                         # which project scad resolves for a directory
 ```
 
 ## Quick start
@@ -278,6 +287,50 @@ archive is kept untouched and the new content is written beside it as
 `scad session clean` now archives a run's traces automatically before removing it —
 that is the one loss no schedule can catch, since a run that lived an hour is gone
 before any cron fires.
+
+## Session index
+
+`scad reindex` turns the archive into a queryable index at `~/.scad/index.sqlite`.
+
+```bash
+scad archive          # preserve traces first (nothing unarchived is ever indexed)
+scad reindex          # incremental; --rebuild to start over
+scad session ls --project scad --kind main
+scad session show <id>
+scad project ls
+scad where            # which project scad resolves for this directory
+```
+
+Sessions include Claude main sessions, their subagents and workflow agents, codex
+rollouts, and container sessions from scad runs. Sessions known only to
+`history.jsonl` — those whose transcripts were pruned — appear as `grade=skeleton`
+with no turns, which on this machine reaches five months further back than the
+oldest surviving transcript.
+
+The index reads the archive, never the live trace directories, so nothing can enter
+it that is not preserved first. `project` is a computed column, not identity:
+redefining what a project means is an edit to `project.py` plus a reindex, and no
+files move. Re-running is incremental — a file whose size already matches what was
+parsed is skipped unopened, so a second pass over 1454 files takes well under a
+second.
+
+Reading and searching the corpus:
+
+```bash
+scad session read <id> --kind text     # turns in order, minus the tool noise
+scad search "resolver engine"          # full-text across every indexed turn
+scad search retry --kind thinking      # search reasoning only
+scad session ls --outcome awaiting-question   # sessions that asked you something
+```
+
+`--outcome` is derived from structure alone — whether the model called
+`AskUserQuestion`, whether a tool call ever got its result, who spoke last — never
+from reading the prose. Sessions whose ending it cannot classify honestly are left
+unlabelled rather than guessed at.
+
+**`reindex` never deletes.** Only `--rebuild` drops rows, and it refuses outright
+when any session's raw is no longer in the archive, because those turns are then the
+only surviving copy. `--force` overrides it, and should be treated as destructive.
 
 ## Config reference
 
