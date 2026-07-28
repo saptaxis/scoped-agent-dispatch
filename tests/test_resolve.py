@@ -295,3 +295,144 @@ class TestHelpers:
         assert "marker:design.yaml" in err
         assert "ask (skipped: no tty)" in err
         assert "options:" in err
+
+
+# NOTE: subprocess is imported here — TestRealWorldSetups shells out to real git
+# rather than faking .git files.
+import subprocess
+
+
+class TestPublicSurface:
+    def test_importable_from_the_package_root(self):
+        """Consumers do `from scad import resolve, ResolveConfig` — e.g. build_book.py."""
+        import scad
+
+        assert callable(scad.resolve)
+        assert scad.ResolveConfig(markers=("design.yaml",)).markers == ("design.yaml",)
+        assert scad.Resolution is not None
+        assert callable(scad.announce)
+        assert callable(scad.require)
+
+
+class TestEngineIsolation:
+    def test_engine_imports_nothing_from_scad(self):
+        """No domain knowledge in the engine — the whole point of engine/config split."""
+        source = Path("src/scad/resolve.py").read_text()
+        assert "from scad" not in source
+        assert "import scad" not in source
+
+    def test_engine_has_no_scad_domain_vocabulary(self):
+        """'project', 'unfiled', 'session', 'container' are consumer concepts."""
+        source = Path("src/scad/resolve.py").read_text().lower()
+        for term in ("unfiled", "container", "dispatch", "run_id"):
+            assert term not in source, f"domain term leaked into the engine: {term}"
+
+    def test_engine_declares_no_heavy_dependencies(self):
+        source = Path("src/scad/resolve.py").read_text()
+        for dep in ("import docker", "import yaml", "import pydantic", "import click"):
+            assert dep not in source
+
+
+class TestRealWorldSetups:
+    """The directory shapes that actually occur, resolved end-to-end.
+
+    Built with real git where git is involved — these are the setups the engine
+    meets in the wild, not hand-rolled approximations.
+    """
+
+    @staticmethod
+    def _git(*args, cwd):
+        subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+    def _repo(self, path: Path) -> Path:
+        path.mkdir(parents=True, exist_ok=True)
+        self._git("init", "-q", cwd=path)
+        self._git("commit", "-q", "--allow-empty", "-m", "init", cwd=path)
+        return path
+
+    def test_plain_repo_from_a_deep_subdirectory(self, tmp_path):
+        repo = self._repo(tmp_path / "proj")
+        deep = repo / "src" / "scad" / "templates"
+        deep.mkdir(parents=True)
+        res = resolve(ResolveConfig(use_git_root=True), start=deep)
+        assert res.path == repo
+
+    def test_real_worktree_resolves_to_the_repo(self, tmp_path):
+        """Real git, not a hand-written .git file — this is the risky path."""
+        repo = self._repo(tmp_path / "proj")
+        wt = tmp_path / "wt"
+        self._git("worktree", "add", "-q", str(wt), "-b", "probe", cwd=repo)
+        res = resolve(ResolveConfig(use_git_root=True), start=wt)
+        assert res.path == repo
+        assert (wt / ".git").is_file()  # confirms the fixture is the real shape
+
+    def test_repo_nested_inside_another_repo(self, tmp_path):
+        outer = self._repo(tmp_path / "outer")
+        inner = self._repo(outer / "vendor" / "inner")
+        res = resolve(ResolveConfig(use_git_root=True), start=inner)
+        assert res.path == inner
+
+    def test_marker_directory_with_no_git_at_all(self, tmp_path):
+        apt = tmp_path / "flat-3"
+        (apt / "units").mkdir(parents=True)
+        (apt / "design.yaml").touch()
+        res = resolve(ResolveConfig(markers=("design.yaml",)), start=apt / "units")
+        assert res.path == apt
+
+    def test_marker_inside_a_repo_beats_the_repo(self, tmp_path):
+        repo = self._repo(tmp_path / "proj")
+        apt = repo / "apartments" / "flat-3"
+        apt.mkdir(parents=True)
+        (apt / "design.yaml").touch()
+        cfg = ResolveConfig(markers=("design.yaml",), use_git_root=True)
+        res = resolve(cfg, start=apt)
+        assert res.path == apt
+        assert res.matched_by == marker("design.yaml")
+
+    def test_symlinked_directory_resolves_to_the_real_path(self, tmp_path):
+        """scad symlinks add_dir repos into /workspace; resolution follows the link.
+
+        Documented deliberately: the engine returns the real path, not the link
+        path, so two sessions reaching one repo by different routes agree.
+        """
+        real = self._repo(tmp_path / "real-repo")
+        link = tmp_path / "workspace-link"
+        link.symlink_to(real)
+        res = resolve(ResolveConfig(use_git_root=True), start=link)
+        assert res.path == real.resolve()
+
+    def test_no_marker_and_no_repo_anywhere(self, tmp_path):
+        loose = tmp_path / "just" / "some" / "dirs"
+        loose.mkdir(parents=True)
+        cfg = ResolveConfig(markers=("design.yaml",), use_git_root=True)
+        res = resolve(cfg, start=loose)
+        assert res.path is None
+        assert res.matched_by == UNRESOLVED
+
+
+class TestPurity:
+    def test_bulk_resolve_over_dead_paths_never_prompts_or_raises(self, tmp_path):
+        """This is the v2.0 reindex path — thousands of recorded, often-gone cwds."""
+        cfg = ResolveConfig(markers=("design.yaml",), use_git_root=True, allow_ask=True)
+        dead = [tmp_path / f"gone-{i}" / "deep" for i in range(200)]
+        with patch("builtins.input", side_effect=AssertionError("must not prompt")):
+            results = [resolve(cfg, start=p, interactive=False) for p in dead]
+        assert all(r.path is None for r in results)
+        assert all(r.matched_by == UNRESOLVED for r in results)
+
+    def test_resolving_writes_nothing_to_the_filesystem(self, tmp_path):
+        """Phase 0 performs no writes at all — engine and helpers are read-only."""
+        (tmp_path / "design.yaml").touch()
+        deep = tmp_path / "a" / "b"
+        deep.mkdir(parents=True)
+        before = {p: p.stat().st_mtime for p in tmp_path.rglob("*")}
+
+        resolve(ResolveConfig(markers=("design.yaml",), use_git_root=True), start=deep)
+
+        after = {p: p.stat().st_mtime for p in tmp_path.rglob("*")}
+        assert before == after
+
+    def test_same_inputs_give_the_same_answer(self, tmp_path):
+        (tmp_path / "design.yaml").touch()
+        cfg = ResolveConfig(markers=("design.yaml",))
+        assert resolve(cfg, start=tmp_path) == resolve(cfg, start=tmp_path)

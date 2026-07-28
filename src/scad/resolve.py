@@ -1,8 +1,10 @@
 """Generic target resolution — the precedence engine.
 
 scad owns the engine; consumers own the config. This module must not import
-anything from scad.*: it has no domain knowledge, which is what lets external
-consumers (e.g. interior-viz) use it with their own markers and targets.
+anything out of the scad.* package: it has no domain knowledge, which is what
+lets external consumers (e.g. interior-viz) use it with their own markers and
+targets. (The isolation guard test string-searches this file, so the prose here
+deliberately avoids writing an import-like phrase.)
 
 The engine is read-only and total: it never writes to the filesystem, never
 raises, and never exits. "Nothing resolved" is a returned value, so the engine
