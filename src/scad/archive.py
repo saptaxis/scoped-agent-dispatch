@@ -16,6 +16,7 @@ Plain filesystem code: no Docker, no scad.container, no scad.vm.
 """
 
 import collections
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -23,6 +24,10 @@ from pathlib import Path
 from scad.config import get_scad_home
 
 MARKER_NAME = "DO-NOT-DELETE.md"
+
+# What ~/.claude/jobs/<short>/state.json becomes in the archive. See
+# archive_json_snapshot for why the name changes on the way in.
+STATE_HISTORY_NAME = "state-history.jsonl"
 
 MARKER_TEXT = """\
 # scad trace archive — do not delete
@@ -183,8 +188,74 @@ def archive_file(src: Path, dest: Path) -> ArchiveResult:
     return ArchiveResult("created" if have == 0 else "appended", src, dest, copied)
 
 
+def _snapshot_key(obj: dict) -> str:
+    """What makes two snapshots "the same version".
+
+    `updatedAt` is the harness's own answer and the cheap one. Falling back to
+    the serialized object means a build that stops writing the field degrades to
+    content comparison rather than to a new line on every single sweep.
+    """
+    stamp = obj.get("updatedAt")
+    if isinstance(stamp, str) and stamp:
+        return stamp
+    return json.dumps(obj, sort_keys=True, default=str)
+
+
+def _last_snapshot(dest: Path) -> dict | None:
+    """The newest snapshot already archived, or None if there is none."""
+    if not dest.exists():
+        return None
+    size = dest.stat().st_size
+    line_end = _last_newline_end(dest, 0, size)
+    if line_end <= 0:
+        return None
+    line_start = _last_newline_end(dest, 0, line_end - 1)
+    try:
+        obj = json.loads(_read_at(dest, line_start, line_end - line_start))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+def archive_json_snapshot(src: Path, dest: Path) -> ArchiveResult:
+    """Append `src`'s whole JSON object to `dest` when its version has moved on.
+
+    `state.json` is a single mutable object rewritten in place, not an
+    append-only log. Copying it as a file would fail the prefix check on every
+    edit, so `_fork` would spawn a `.<mtime>.json` sidecar per transition and the
+    archive would fill with near-duplicates.
+
+    Appending each distinct version as one line inverts that: the destination is
+    append-only by construction, so the ordinary copy semantics and every reader
+    downstream work unchanged — and the *sequence* of states (running → blocked →
+    done) survives, which is worth more than the latest value alone at ~3 KB per
+    transition.
+    """
+    try:
+        obj = json.loads(src.read_bytes())
+    except (OSError, ValueError, UnicodeDecodeError):
+        # A snapshot caught mid-rewrite. Never fatal: the next sweep gets it whole.
+        return ArchiveResult("skipped", src, dest, 0)
+    if not isinstance(obj, dict):
+        return ArchiveResult("skipped", src, dest, 0)
+
+    previous = _last_snapshot(dest)
+    if previous is not None and _snapshot_key(previous) == _snapshot_key(obj):
+        return ArchiveResult("skipped", src, dest, 0)
+
+    data = (json.dumps(obj, ensure_ascii=False, default=str) + "\n").encode("utf-8")
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    with dest.open("ab") as fh:            # append only, like everything else here
+        fh.write(data)
+    return ArchiveResult("created" if previous is None else "appended", src, dest, len(data))
+
+
 def archive_tree(src_root: Path, label: str) -> list[ArchiveResult]:
     """Archive every *.jsonl under `src_root` into archive/<label>/…
+
+    Job state is swept alongside, converted to a log on the way in: it is the
+    only place a session's human name exists, and a flat *.jsonl glob leaves it
+    behind.
 
     A missing root is normal, not an error — not every machine runs codex.
     """
@@ -197,6 +268,11 @@ def archive_tree(src_root: Path, label: str) -> list[ArchiveResult]:
         if not src.is_file():
             continue
         results.append(archive_file(src, dest_for(src, src_root, label)))
+    for src in sorted(src_root.glob("jobs/*/state.json")):
+        if not src.is_file():
+            continue
+        dest = dest_for(src, src_root, label).with_name(STATE_HISTORY_NAME)
+        results.append(archive_json_snapshot(src, dest))
     return results
 
 

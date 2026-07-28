@@ -1,5 +1,6 @@
 """Tests for the append-only trace archive."""
 
+import json
 import os
 from pathlib import Path
 
@@ -7,6 +8,8 @@ import pytest
 
 from scad.archive import (
     MARKER_NAME,
+    STATE_HISTORY_NAME,
+    archive_json_snapshot,
     ArchiveResult,
     archive_all,
     archive_file,
@@ -301,3 +304,90 @@ class TestNeverDeletes:
         for line in source.splitlines():
             if "rmtree" in line or "iterdir" in line:
                 assert "SCAD_DIR" not in line
+
+
+class TestJobStateSnapshot:
+    """state.json is a mutable snapshot, not an append-only log.
+
+    Copying it verbatim would trip the fork rule on every edit and leave a
+    `.<mtime>.json` sidecar per transition. Appending each distinct version as
+    one line makes it the shape the rest of this module already handles.
+    """
+
+    def state(self, path: Path, **kw) -> Path:
+        body = {"name": "nd-5", "sessionId": "S1", "state": "blocked",
+                "updatedAt": "2026-07-28T17:56:43.450Z"}
+        body.update(kw)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(body))
+        return path
+
+    def test_first_pass_creates_the_history_line(self, tmp_path):
+        src = self.state(tmp_path / "jobs" / "0829ef1a" / "state.json")
+        dest = tmp_path / "arc" / "jobs" / "0829ef1a" / STATE_HISTORY_NAME
+        result = archive_json_snapshot(src, dest)
+        assert result.action == "created"
+        assert json.loads(dest.read_text())["name"] == "nd-5"
+
+    def test_unchanged_updated_at_appends_nothing(self, tmp_path):
+        src = self.state(tmp_path / "jobs" / "j" / "state.json")
+        dest = tmp_path / "arc" / "jobs" / "j" / STATE_HISTORY_NAME
+        archive_json_snapshot(src, dest)
+        before = dest.read_bytes()
+        assert archive_json_snapshot(src, dest).action == "skipped"
+        assert dest.read_bytes() == before
+
+    def test_a_new_updated_at_appends_one_line(self, tmp_path):
+        src = self.state(tmp_path / "jobs" / "j" / "state.json")
+        dest = tmp_path / "arc" / "jobs" / "j" / STATE_HISTORY_NAME
+        archive_json_snapshot(src, dest)
+        self.state(src, state="done", updatedAt="2026-07-28T18:00:00.000Z")
+        assert archive_json_snapshot(src, dest).action == "appended"
+        lines = dest.read_text().splitlines()
+        assert len(lines) == 2
+        assert [json.loads(x)["state"] for x in lines] == ["blocked", "done"]
+
+    def test_missing_updated_at_falls_back_to_content(self, tmp_path):
+        """Dedupe must not depend on a field the harness may drop."""
+        src = tmp_path / "jobs" / "j" / "state.json"
+        dest = tmp_path / "arc" / "jobs" / "j" / STATE_HISTORY_NAME
+        src.parent.mkdir(parents=True)
+        src.write_text(json.dumps({"sessionId": "S1", "state": "running"}))
+        archive_json_snapshot(src, dest)
+        assert archive_json_snapshot(src, dest).action == "skipped"
+        src.write_text(json.dumps({"sessionId": "S1", "state": "blocked"}))
+        assert archive_json_snapshot(src, dest).action == "appended"
+
+    def test_unreadable_state_is_skipped_not_fatal(self, tmp_path):
+        src = tmp_path / "jobs" / "j" / "state.json"
+        src.parent.mkdir(parents=True)
+        src.write_text("{half written")
+        dest = tmp_path / "arc" / "jobs" / "j" / STATE_HISTORY_NAME
+        assert archive_json_snapshot(src, dest).action == "skipped"
+        assert not dest.exists()
+
+    def test_tree_sweep_picks_up_job_state(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        root = tmp_path / ".claude"
+        self.state(root / "jobs" / "0829ef1a" / "state.json")
+        write(root / "jobs" / "0829ef1a" / "timeline.jsonl", LINES)
+
+        archive_tree(root, "claude")
+
+        arc = tmp_path / "arc" / "claude" / "jobs" / "0829ef1a"
+        assert (arc / STATE_HISTORY_NAME).is_file()
+        assert not (arc / "state.json").exists()
+
+    def test_repeated_sweeps_leave_no_sidecar(self, tmp_path, monkeypatch):
+        """The regression this design exists to prevent."""
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        root = tmp_path / ".claude"
+        src = self.state(root / "jobs" / "j" / "state.json")
+        archive_tree(root, "claude")
+        self.state(src, state="done", updatedAt="2026-07-28T19:00:00.000Z")
+        archive_tree(root, "claude")
+        archive_tree(root, "claude")
+
+        arc = tmp_path / "arc" / "claude" / "jobs" / "j"
+        assert sorted(p.name for p in arc.iterdir()) == [STATE_HISTORY_NAME]
+        assert len((arc / STATE_HISTORY_NAME).read_text().splitlines()) == 2
