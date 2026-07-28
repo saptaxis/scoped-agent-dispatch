@@ -1805,3 +1805,55 @@ class TestIndexCommands:
         result = runner.invoke(main, ["session", "ls", "--grade", "skeleton", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.stdout) == []      # this fixture has a real transcript
+
+
+class TestReadAndSearch:
+    def _seed(self, tmp_path, monkeypatch):
+        import json as _json
+        arc = tmp_path / "arc"
+        (arc / "claude" / "projects" / "-repo").mkdir(parents=True)
+        (arc / "claude" / "projects" / "-repo" / "S1.jsonl").write_text("".join(
+            _json.dumps(r) + "\n" for r in [
+                {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:00.000Z",
+                 "cwd": "/repo", "message": {"role": "user", "content": "find the resolver"}},
+                {"type": "assistant", "sessionId": "S1", "timestamp": "2026-07-28T10:00:05.000Z",
+                 "message": {"role": "assistant", "content": [
+                     {"type": "thinking", "thinking": "weighing markers against git-root"},
+                     {"type": "text", "text": "the resolver returns a directory"},
+                 ]}},
+            ]))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+
+    def test_read_prints_turn_text(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "read", "S1"])
+        assert result.exit_code == 0
+        assert "the resolver returns a directory" in result.output
+
+    def test_read_can_exclude_reasoning(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "read", "S1", "--kind", "text"])
+        assert "weighing markers" not in result.output
+        assert "the resolver returns a directory" in result.output
+
+    def test_read_unknown_session_exits_nonzero(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        assert runner.invoke(main, ["session", "read", "NOPE"]).exit_code != 0
+
+    def test_search_finds_the_session(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["search", "resolver"])
+        assert result.exit_code == 0
+        assert "S1" in result.output
+
+    def test_search_with_no_hits_says_so(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["search", "zzzznomatch"])
+        assert result.exit_code == 0
+        assert "no match" in result.output.lower()

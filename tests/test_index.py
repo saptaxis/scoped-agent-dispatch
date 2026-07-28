@@ -306,3 +306,69 @@ class TestRebuildSafety:
         store(conn, rec(id="ORPHAN"))
         reindex(conn)
         assert session_row(conn, "ORPHAN") is not None
+
+
+from scad.index import ensure_fts, search_turns  # noqa: E402
+
+
+class TestSearch:
+    def _seed(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="S1"), project="alpha")
+        store(conn, rec(id="S2"), project="beta")
+        append_turns(conn, "S1", [
+            TurnRecord(ts=1, role="assistant", kind="text",
+                       text="the resolver engine returns a directory"),
+            TurnRecord(ts=2, role="assistant", kind="thinking",
+                       text="considering whether markers beat git-root"),
+        ])
+        append_turns(conn, "S2", [
+            TurnRecord(ts=3, role="assistant", kind="text",
+                       text="archive copy semantics and newline boundaries"),
+        ])
+        return conn
+
+    def test_finds_a_turn_by_word(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        hits = search_turns(conn, "resolver")
+        assert [h["session_id"] for h in hits] == ["S1"]
+        assert "resolver" in hits[0]["text"]
+
+    def test_filters_by_project(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        assert search_turns(conn, "archive", project="alpha") == []
+        assert len(search_turns(conn, "archive", project="beta")) == 1
+
+    def test_filters_by_turn_kind(self, tmp_path):
+        """Search only reasoning, or only what was said."""
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        assert len(search_turns(conn, "markers", kind="thinking")) == 1
+        assert search_turns(conn, "markers", kind="text") == []
+
+    def test_no_match_is_empty_not_an_error(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        assert search_turns(conn, "nonexistentterm") == []
+
+    def test_ensure_fts_is_idempotent(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        ensure_fts(conn)
+        assert len(search_turns(conn, "resolver")) == 1   # not duplicated
+
+    def test_fts_is_rebuilt_from_existing_rows(self, tmp_path):
+        """FTS is derived — it must be addable without re-reading the archive."""
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        conn.execute("DROP TABLE turns_fts")
+        conn.commit()
+        ensure_fts(conn)
+        assert len(search_turns(conn, "resolver")) == 1
+
+    def test_quotes_in_a_query_do_not_break_it(self, tmp_path):
+        conn = self._seed(tmp_path)
+        ensure_fts(conn)
+        assert search_turns(conn, 'resolver "engine"') != []

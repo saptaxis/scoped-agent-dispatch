@@ -310,3 +310,104 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[st
     # incremented ("how many sessions?" after a no-op scan), and 0 is the honest
     # answer there rather than a KeyError.
     return stats
+
+
+_FTS_SCHEMA = """
+CREATE VIRTUAL TABLE IF NOT EXISTS turns_fts
+USING fts5(text, content='turns', content_rowid='rowid');
+"""
+
+
+def ensure_fts(conn) -> None:
+    """Create and populate the full-text index over turns.text.
+
+    FTS is derived from rows that already exist, so it can be added, dropped, or
+    rebuilt at any time without re-reading the archive. It is an external-content
+    table: the text lives once, in `turns`.
+
+    Two traps in that arrangement, both of which silently return zero hits:
+
+    1. `SELECT count(*) FROM turns_fts` does NOT count the index — an
+       external-content table answers it from the content table, so it reports
+       `turns`'s row count whether or not a single term has been indexed. The
+       staleness probe is therefore the row count recorded in `meta` at the last
+       build, plus whether the virtual table existed at all before this call.
+    2. External content does not stay in sync on its own. `reindex` appends to
+       `turns` without touching the index, so a count mismatch means a rebuild is
+       owed. Rebuilding costs a pass over `turns`, which is why it is gated on the
+       count rather than done on every search.
+    """
+    existed = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='turns_fts'"
+    ).fetchone() is not None
+    conn.executescript(_FTS_SCHEMA)
+
+    rows = conn.execute("SELECT count(*) FROM turns").fetchone()[0]
+    stored = conn.execute("SELECT value FROM meta WHERE key='fts_rows'").fetchone()
+    indexed = int(stored[0]) if stored else -1
+
+    if not existed or indexed != rows:
+        conn.execute("INSERT INTO turns_fts(turns_fts) VALUES('rebuild')")
+        conn.execute(
+            "INSERT INTO meta(key, value) VALUES('fts_rows', ?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (str(rows),),
+        )
+    conn.commit()
+
+
+def _fts_query(raw: str) -> str:
+    """Quote user input as FTS5 phrase tokens.
+
+    FTS5 treats bare punctuation as syntax; a stray quote or hyphen in a search
+    term would otherwise raise sqlite3.OperationalError instead of finding nothing.
+    """
+    words = [w.replace('"', "") for w in raw.split()]
+    return " ".join(f'"{w}"' for w in words if w)
+
+
+def search_turns(conn, query: str, *, project=None, kind=None, limit: int = 20):
+    """Full-text search over turns, newest first, with the session joined in."""
+    ensure_fts(conn)
+    match = _fts_query(query)
+    if not match:
+        return []
+
+    where, params = ["turns_fts MATCH ?"], [match]
+    if project:
+        where.append("s.project = ?")
+        params.append(project)
+    if kind:
+        where.append("t.kind = ?")
+        params.append(kind)
+
+    return conn.execute(
+        f"""
+        SELECT t.session_id, t.idx, t.kind, t.role, t.ts, t.text,
+               s.project, s.agent, s.title
+        FROM turns_fts
+        JOIN turns t ON t.rowid = turns_fts.rowid
+        JOIN sessions s ON s.id = t.session_id
+        WHERE {' AND '.join(where)}
+        ORDER BY t.ts DESC
+        LIMIT ?
+        """,
+        (*params, limit),
+    ).fetchall()
+
+
+def session_turns(conn, session_id: str, *, kind=None, role=None, limit=None):
+    """Read a session's turns in order."""
+    where, params = ["session_id = ?"], [session_id]
+    if kind:
+        where.append("kind = ?")
+        params.append(kind)
+    if role:
+        where.append("role = ?")
+        params.append(role)
+    sql = (f"SELECT idx, ts, role, kind, tool_name, text, truncated FROM turns "
+           f"WHERE {' AND '.join(where)} ORDER BY idx")
+    if limit:
+        sql += " LIMIT ?"
+        params.append(limit)
+    return conn.execute(sql, params).fetchall()

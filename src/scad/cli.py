@@ -77,7 +77,13 @@ from scad.container import (
 from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
 from scad.archive import archive_all, archive_root, archive_run, summarize
 from scad.project import resolve_project
-from scad.index import connect as index_connect, reindex as run_reindex, session_row
+from scad.index import (
+    connect as index_connect,
+    reindex as run_reindex,
+    search_turns,
+    session_row,
+    session_turns,
+)
 
 
 def _relative_time(iso_str: str) -> str:
@@ -2002,3 +2008,57 @@ def project_show(name, limit):
             if r["started"] else "?"
         click.echo(f"{r['id'][:12]:<14} {when}  {r['agent']:<7} {r['kind']:<14} "
                    f"{r['n_turns']:>5}t  {(r['title'] or '')[:52]}")
+
+
+@session.command("read")
+@click.argument("session_id")
+@click.option("--kind", default=None,
+              type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
+              help="Only this kind of turn — e.g. --kind text to skip tool noise.")
+@click.option("--role", default=None, help="Only this role (user, assistant, tool).")
+@click.option("--limit", default=None, type=int, help="Stop after N turns.")
+def session_read(session_id, kind, role, limit):
+    """Print a session's turns in order."""
+    conn = index_connect()
+    if session_row(conn, session_id) is None:
+        raise click.ClickException(f"No session {session_id} in the index.")
+    rows = session_turns(conn, session_id, kind=kind, role=role, limit=limit)
+    if not rows:
+        click.echo("[scad] No turns — this session may be a skeleton (no transcript).")
+        return
+    for r in rows:
+        head = f"[{r['idx']:>4}] {r['role'] or '?':<9} {r['kind']}"
+        if r["tool_name"]:
+            head += f" ({r['tool_name']})"
+        if r["truncated"]:
+            head += "  …truncated"
+        click.echo(head)
+        click.echo(r["text"])
+        click.echo()
+
+
+@main.command()
+@click.argument("query")
+@click.option("--project", default=None, help="Restrict to one project.")
+@click.option("--kind", default=None,
+              type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
+              help="Search only this kind — e.g. --kind thinking for reasoning.")
+@click.option("--limit", default=20, help="Hits to show.")
+@click.option("--json", "as_json", is_flag=True, help="Emit hits as JSON.")
+def search(query, project, kind, limit, as_json):
+    """Full-text search across every indexed turn."""
+    conn = index_connect()
+    hits = search_turns(conn, query, project=project, kind=kind, limit=limit)
+
+    if as_json:
+        click.echo(json.dumps([dict(h) for h in hits], default=str))
+        return
+    if not hits:
+        click.echo(f"[scad] No match for {query!r}.")
+        return
+    for h in hits:
+        when = datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d %H:%M") \
+            if h["ts"] else "?"
+        snippet = " ".join(h["text"].split())[:140]
+        click.echo(f"{h['session_id'][:12]:<14} {when}  {h['kind']:<12} "
+                   f"{(h['project'] or '?'):<20} {snippet}")
