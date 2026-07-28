@@ -52,3 +52,47 @@ class Resolution:
     path: Path | None
     matched_by: str
     tried: tuple[str, ...] = field(default=())
+
+
+def _ancestors(start: Path) -> list[Path]:
+    """The directory itself and every parent, nearest first.
+
+    Tolerates a path that does not exist — this engine is mapped over recorded
+    cwds from old sessions, where the directory may be long gone.
+    """
+    here = Path(start).expanduser()
+    try:
+        here = here.resolve()
+    except OSError:
+        here = here.absolute()
+    return [here, *here.parents]
+
+
+def resolve(
+    cfg: ResolveConfig,
+    start: Path | None = None,
+    *,
+    explicit: Path | None = None,
+    interactive: bool = True,
+) -> Resolution:
+    """Resolve a target directory by fixed precedence.
+
+    explicit -> markers (walk-up) -> git-root -> ask -> unresolved
+
+    `start` is a parameter rather than an ambient cwd read, so the function is
+    pure with respect to its inputs and can be mapped over recorded paths. The
+    cwd default is taken once, here at the boundary.
+    """
+    tried: list[str] = []
+
+    if explicit is not None:
+        tried.append(EXPLICIT)
+        return Resolution(
+            path=Path(explicit).expanduser().resolve(),
+            matched_by=EXPLICIT,
+            tried=tuple(tried),
+        )
+
+    start = Path.cwd() if start is None else start
+
+    return Resolution(path=None, matched_by=UNRESOLVED, tried=tuple(tried))
