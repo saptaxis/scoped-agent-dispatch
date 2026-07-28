@@ -174,3 +174,33 @@ def resolve(
                     )
 
     return Resolution(path=None, matched_by=UNRESOLVED, tried=tuple(tried))
+
+
+def announce(value: object, res: Resolution, label: str) -> None:
+    """Print one line to stderr saying what was resolved and how.
+
+    Announce is the consumer's job because only the consumer knows the semantic
+    label and value ("using project: foo", not a raw path). It goes to stderr so
+    stdout stays a clean machine-readable channel.
+    """
+    print(f"using {label}: {value} (via {res.matched_by})", file=sys.stderr)
+
+
+def require(res: Resolution) -> Path:
+    """Return the resolved path, or exit 1 with what was tried.
+
+    This is the single renderer for `tried`; the CLI calls it too, so there is
+    exactly one failure message in the system. Exit code is 1 (not 2) because
+    Click reserves 2 for UsageError — unresolved and "you called it wrong" must
+    stay distinguishable by exit code.
+    """
+    if res.path is not None:
+        return res.path
+    print("scad resolve: no target.", file=sys.stderr)
+    print(f"  tried: {', '.join(res.tried) or '(nothing configured)'}", file=sys.stderr)
+    print(
+        "  options: pass an explicit path, pass --start DIR, "
+        "or create a marker file at the root.",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)

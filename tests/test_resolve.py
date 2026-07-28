@@ -257,3 +257,41 @@ class TestAskTier:
         ):
             res = resolve(cfg, start=tmp_path)
         assert res.path == tmp_path
+
+
+from scad.resolve import announce, require
+
+
+class TestHelpers:
+    def test_announce_writes_to_stderr_not_stdout(self, tmp_path, capsys):
+        res = Resolution(path=tmp_path, matched_by=marker("design.yaml"), tried=())
+        announce(tmp_path, res, "root")
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert f"using root: {tmp_path}" in captured.err
+        assert "marker:design.yaml" in captured.err
+
+    def test_announce_takes_the_semantic_value_not_the_path(self, tmp_path, capsys):
+        """The consumer knows the label and the value; the engine knows neither."""
+        res = Resolution(path=tmp_path, matched_by=marker(".git"), tried=())
+        announce("scoped-agent-dispatch", res, "project")
+        assert "using project: scoped-agent-dispatch" in capsys.readouterr().err
+
+    def test_require_returns_the_path_when_resolved(self, tmp_path):
+        res = Resolution(path=tmp_path, matched_by=EXPLICIT, tried=(EXPLICIT,))
+        assert require(res) == tmp_path
+
+    def test_require_exits_1_and_lists_what_was_tried(self, capsys):
+        """1, not 2 — Click owns 2 for usage errors (UsageError.exit_code)."""
+        res = Resolution(
+            path=None,
+            matched_by=UNRESOLVED,
+            tried=(EXPLICIT, marker("design.yaml"), "ask (skipped: no tty)"),
+        )
+        with pytest.raises(SystemExit) as exc:
+            require(res)
+        assert exc.value.code == 1
+        err = capsys.readouterr().err
+        assert "marker:design.yaml" in err
+        assert "ask (skipped: no tty)" in err
+        assert "options:" in err
