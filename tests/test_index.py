@@ -179,3 +179,130 @@ class TestAppendTurns:
         row = conn.execute("SELECT truncated, raw_offset FROM turns").fetchone()
         assert row["truncated"] == 1
         assert row["raw_offset"] == 42
+
+
+import json  # noqa: E402
+
+import click  # noqa: E402
+
+from scad.index import reindex  # noqa: E402
+
+
+def arc_write(root: Path, rel: str, records: list[dict]) -> Path:
+    p = root / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("".join(json.dumps(r) + "\n" for r in records))
+    return p
+
+
+MAIN = [{"type": "assistant", "sessionId": "S1", "timestamp": "2026-07-28T10:00:00.000Z",
+         "cwd": "/repo", "message": {"role": "assistant",
+                                     "content": [{"type": "text", "text": "hello"}]}}]
+SUB = [{"type": "assistant", "sessionId": "S1", "agentId": "sub1", "isSidechain": True,
+        "timestamp": "2026-07-28T10:01:00.000Z", "cwd": "/repo",
+        "message": {"role": "assistant", "content": [{"type": "text", "text": "sub"}]}}]
+
+
+class TestReindex:
+    def test_indexes_main_and_subagents_as_separate_rows(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        arc_write(arc, "claude/projects/-repo/S1/subagents/agent-sub1.jsonl", SUB)
+
+        conn = connect(tmp_path / "i.sqlite")
+        stats = reindex(conn)
+
+        ids = {r["id"] for r in conn.execute("SELECT id FROM sessions")}
+        assert ids == {"S1", "sub1"}
+        assert stats["sessions"] == 2
+        kid = session_row(conn, "sub1")
+        assert kid["parent_session_id"] == "S1"
+        assert kid["kind"] == "subagent"
+
+    def test_second_pass_is_a_no_op(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        stats = reindex(conn)
+        assert stats["sessions"] == 0
+        assert stats["turns"] == 0
+
+    def test_growth_appends_without_rewriting(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        p = arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        with p.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "sessionId": "S1",
+                "timestamp": "2026-07-28T11:00:00.000Z",
+                "message": {"role": "assistant", "content": [{"type": "text", "text": "more"}]},
+            }) + "\n")
+        reindex(conn)
+        rows = conn.execute("SELECT idx, text FROM turns ORDER BY idx").fetchall()
+        assert [r["text"] for r in rows] == ["hello", "more"]
+
+    def test_project_is_computed(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        conn = connect(tmp_path / "i.sqlite")
+        with patch("scad.index.resolve_project", return_value="my-proj"):
+            reindex(conn)
+        assert session_row(conn, "S1")["project"] == "my-proj"
+
+    def test_run_dir_rows_get_scad_run_id(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "runs/demo-Jul28/projects/-workspace-x/S9.jsonl", [{
+            "type": "assistant", "sessionId": "S9", "timestamp": "2026-07-28T10:00:00.000Z",
+            "cwd": "/workspace/x",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "in a box"}]},
+        }])
+        conn = connect(tmp_path / "i.sqlite")
+        with patch("scad.index.resolve_project", return_value="x"):
+            reindex(conn)
+        assert session_row(conn, "S9")["scad_run_id"] == "demo-Jul28"
+
+    def test_malformed_file_is_counted_not_fatal(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        (arc / "claude" / "projects" / "-repo").mkdir(parents=True)
+        (arc / "claude" / "projects" / "-repo" / "bad.jsonl").write_text("not json at all\n")
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        conn = connect(tmp_path / "i.sqlite")
+        stats = reindex(conn)
+        assert stats["sessions"] == 1
+        assert stats["skipped_lines"] >= 1
+
+
+class TestRebuildSafety:
+    def test_rebuild_refuses_when_raw_is_missing(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="GONE"))
+        conn.execute("UPDATE sessions SET raw_present = 0 WHERE id = 'GONE'")
+        conn.commit()
+        with pytest.raises(click.ClickException) as exc:
+            reindex(conn, rebuild=True)
+        assert "raw" in str(exc.value).lower()
+
+    def test_force_overrides_the_refusal(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="GONE"))
+        conn.execute("UPDATE sessions SET raw_present = 0 WHERE id = 'GONE'")
+        conn.commit()
+        reindex(conn, rebuild=True, force=True)
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+
+    def test_plain_reindex_never_deletes(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="ORPHAN"))
+        reindex(conn)
+        assert session_row(conn, "ORPHAN") is not None

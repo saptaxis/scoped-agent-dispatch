@@ -8,10 +8,17 @@ that content and this file joins the backup set. That is why reindex never delet
 and `--rebuild` refuses when any raw is missing.
 """
 
+import collections
+import platform
 import sqlite3
 from pathlib import Path
 
+import click
+
+from scad.archive import archive_root
 from scad.config import get_scad_home
+from scad.project import resolve_project
+from scad.readers import read_claude_any, read_claude_history, read_codex_rollout
 from scad.records import GRADE_FULL, SessionRecord, TurnRecord
 
 SCHEMA_VERSION = 1
@@ -195,3 +202,111 @@ def append_turns(conn, session_id: str, turns: list[TurnRecord]) -> int:
 
 def session_row(conn, session_id: str):
     return conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
+
+
+def _run_id_for(rel_parts: tuple) -> str | None:
+    """archive/runs/<run-id>/... -> the run id; anything else -> None."""
+    return rel_parts[1] if len(rel_parts) > 1 and rel_parts[0] == "runs" else None
+
+
+def _peek_session_id(conn, path: Path) -> str | None:
+    """The row id a file maps to, without parsing it.
+
+    Identity is path-derived for Claude (see readers.identity_from_path); codex
+    rollouts key on session_meta, so fall back to the archive path already stored.
+    """
+    from scad.readers import identity_from_path
+
+    ident = identity_from_path(path)
+    if ident["kind"] != "main":
+        return ident["id"]
+    row = conn.execute(
+        "SELECT id FROM sessions WHERE archive_path = ?", (str(path),)).fetchone()
+    return row["id"] if row else ident["id"]
+
+
+def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[str, int]:
+    """Scan the archive into the index.
+
+    Incremental by default: a file whose size already equals the session's
+    parsed_offset is skipped without being opened. Never deletes; `rebuild`
+    is the only destructive path and it refuses when any session's raw is gone,
+    because those turns cannot be re-derived from anything.
+    """
+    conn = conn or connect()
+    root = archive_root()
+    stats = collections.Counter()
+    machine = platform.node()
+
+    if rebuild:
+        missing = conn.execute(
+            "SELECT count(*) FROM sessions WHERE raw_present = 0").fetchone()[0]
+        if missing and not force:
+            raise click.ClickException(
+                f"{missing} session(s) have no raw left in the archive; --rebuild would "
+                "destroy the only copy of their turns. Re-run with --force to override."
+            )
+        conn.executescript("DELETE FROM turns; DELETE FROM sessions;")
+        conn.commit()
+
+    if not root.is_dir():
+        return stats
+
+    for path in sorted(root.rglob("*.jsonl")):
+        rel = path.relative_to(root).parts
+        scad_run_id = _run_id_for(rel)
+        stat = path.stat()
+
+        if path.name == "history.jsonl":
+            sessions, end = read_claude_history(path)
+            for s in sessions:
+                if session_row(conn, s.id) is not None:
+                    continue                     # a transcript already told us more
+                upsert_session(
+                    conn, s, machine=machine,
+                    project=resolve_project(s.cwd, scad_run_id=scad_run_id),
+                    archive_path=str(path), source_size=stat.st_size,
+                    source_mtime=int(stat.st_mtime), parsed_offset=0,
+                    scad_run_id=scad_run_id,
+                )
+                stats["sessions"] += 1
+            continue
+
+        reader = read_codex_rollout if rel[0] == "codex" else read_claude_any
+
+        # Incremental: resolve the row this file maps to without parsing it, and
+        # skip entirely when nothing has been appended since the last pass.
+        probe_id = _peek_session_id(conn, path)
+        row = session_row(conn, probe_id) if probe_id else None
+        if row is not None and row["parsed_offset"] >= stat.st_size:
+            continue
+        start = row["parsed_offset"] if row is not None else 0
+
+        try:
+            session, turns, end = reader(path, start)
+        except Exception as exc:                 # a file we cannot read must not stop the scan
+            click.echo(f"[scad] skipped {path.name}: {exc}")
+            stats["skipped_files"] += 1
+            continue
+
+        if session is None:
+            stats["skipped_lines"] += 1
+            continue
+
+        existed = session_row(conn, session.id) is not None
+        upsert_session(
+            conn, session, machine=machine,
+            project=resolve_project(session.cwd, scad_run_id=scad_run_id),
+            archive_path=str(path), source_size=stat.st_size,
+            source_mtime=int(stat.st_mtime), parsed_offset=end,
+            scad_run_id=scad_run_id,
+        )
+        if not existed:
+            stats["sessions"] += 1
+        stats["turns"] += append_turns(conn, session.id, turns)
+        stats["files"] += 1
+
+    # A Counter, not a plain dict: callers ask for counts that a quiet pass never
+    # incremented ("how many sessions?" after a no-op scan), and 0 is the honest
+    # answer there rather than a KeyError.
+    return stats
