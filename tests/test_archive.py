@@ -159,3 +159,53 @@ class TestCopyAppend:
         res = archive_file(src, dest)
         assert res.action == "appended"
         assert dest.read_bytes() == big + b'{"n":"tail"}\n'
+
+
+class TestCopyFork:
+    def test_rewritten_source_never_overwrites_the_archive(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        original = dest.read_bytes()
+
+        # Same path, entirely different (longer) content — a rewrite, not an append.
+        write(src, b'{"z":9}\n{"z":8}\n{"z":7}\n{"z":6}\n')
+        res = archive_file(src, dest)
+
+        assert res.action == "forked"
+        assert dest.read_bytes() == original          # untouched
+        siblings = [p for p in dest.parent.iterdir() if p != dest]
+        assert len(siblings) == 1
+        assert siblings[0].read_bytes() == src.read_bytes()
+
+    def test_truncated_source_never_shortens_the_archive(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        original = dest.read_bytes()
+
+        write(src, b'{"a":1}\n')                       # rotated / truncated
+        res = archive_file(src, dest)
+
+        assert res.action == "forked"
+        assert dest.read_bytes() == original
+        assert len(original) > src.stat().st_size
+
+    def test_fork_sidecar_is_named_by_source_mtime(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        write(src, b'{"z":9}\n' * 8)
+        archive_file(src, dest)
+        mtime = int(src.stat().st_mtime)
+        assert (dest.parent / f"src.{mtime}.jsonl").is_file()
+
+    def test_forking_twice_is_idempotent(self, tmp_path):
+        src = write(tmp_path / "src.jsonl", LINES)
+        dest = tmp_path / "arc" / "src.jsonl"
+        archive_file(src, dest)
+        write(src, b'{"z":9}\n' * 8)
+        archive_file(src, dest)
+        before = sorted(p.name for p in dest.parent.iterdir())
+        archive_file(src, dest)
+        assert sorted(p.name for p in dest.parent.iterdir()) == before

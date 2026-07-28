@@ -139,7 +139,25 @@ def _prefix_matches(src: Path, dest: Path, have: int) -> bool:
 
 
 def _fork(src: Path, dest: Path, have: int) -> ArchiveResult:
-    return ArchiveResult("forked", src, dest, 0)
+    """Source is no longer an extension of what we hold: rewrite or rotation.
+
+    Keep the existing archive untouched and put the new content beside it. This
+    should be rare; if it stops being rare, the append assumption is wrong and
+    the design needs revisiting rather than the data being quietly replaced.
+    """
+    mtime = int(src.stat().st_mtime)
+    sidecar = dest.with_name(f"{dest.stem}.{mtime}{dest.suffix}")
+    src_size = src.stat().st_size
+    end = _last_newline_end(src, 0, src_size)
+
+    if sidecar.exists() and sidecar.stat().st_size >= end:
+        return ArchiveResult("forked", src, sidecar, 0)
+
+    if sidecar.exists():
+        sidecar.unlink()   # partial sidecar from an interrupted run; dest is untouched
+
+    copied = _copy_range(src, sidecar, 0, end)
+    return ArchiveResult("forked", src, sidecar, copied)
 
 
 def archive_file(src: Path, dest: Path) -> ArchiveResult:
