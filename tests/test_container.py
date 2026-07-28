@@ -2570,3 +2570,36 @@ class TestSSHMountPlatformBranch:
         run_container(sample_config, "b", "test-run", {})
         volumes = mock_client.return_value.containers.run.call_args[1]["volumes"]
         assert volumes[str(tmp_path / ".ssh")]["bind"] == "/mnt/host-ssh"
+
+
+class TestCleanPreservesTraces:
+    def test_clean_archives_before_removing_the_run_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
+
+        run_claude = tmp_path / ".scad" / "runs" / "r1" / "claude"
+        (run_claude / "projects" / "-workspace-foo").mkdir(parents=True)
+        (run_claude / "projects" / "-workspace-foo" / "s.jsonl").write_bytes(b'{"a":1}\n')
+        (run_claude / "history.jsonl").write_bytes(b'{"display":"hi"}\n')
+
+        with patch("scad.container.get_docker_client", side_effect=docker.errors.DockerException("no docker")):
+            clean_run("r1")
+
+        # Run dir destroyed as before...
+        assert not (tmp_path / ".scad" / "runs" / "r1").exists()
+        # ...but the traces survive, including the run's own history.jsonl.
+        arc = tmp_path / "arc" / "runs" / "r1"
+        assert (arc / "projects" / "-workspace-foo" / "s.jsonl").read_bytes() == b'{"a":1}\n'
+        assert (arc / "history.jsonl").read_bytes() == b'{"display":"hi"}\n'
+
+    def test_clean_still_works_when_the_run_has_no_traces(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / ".scad" / "runs")
+        (tmp_path / ".scad" / "runs" / "r2").mkdir(parents=True)
+
+        with patch("scad.container.get_docker_client", side_effect=docker.errors.DockerException("no docker")):
+            clean_run("r2")
+
+        assert not (tmp_path / ".scad" / "runs" / "r2").exists()

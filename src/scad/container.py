@@ -14,6 +14,7 @@ import docker
 from docker.errors import DockerException, NotFound as DockerNotFound
 from jinja2 import Environment, PackageLoader
 
+from scad.archive import archive_run
 from scad.config import ScadConfig, get_scad_home
 from scad.vm import get_docker_client, is_macos, read_claude_credentials
 
@@ -582,6 +583,15 @@ def clean_run(run_id: str) -> None:
         container.remove()
     except (DockerNotFound, DockerException):
         pass
+
+    # Preserve traces before the point of no return. This is the one loss that
+    # no schedule can catch: `clean` is event-driven, so a run that lived an hour
+    # is gone before any cron fires. A run dir holds transcripts AND its own
+    # history.jsonl, so without this there is no record the sessions existed.
+    try:
+        archive_run(run_id)
+    except OSError as exc:
+        click.echo(f"[scad] Warning: could not archive traces for {run_id}: {exc}")
 
     # Remove entire run directory (worktrees + claude data + events.log)
     run_dir = RUNS_DIR / run_id

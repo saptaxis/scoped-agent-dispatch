@@ -279,3 +279,25 @@ class TestSweeps:
         assert (arc / "claude" / "history.jsonl").is_file()
         assert (arc / "codex" / "2026" / "07" / "28" / "roll.jsonl").is_file()
         assert (arc / "runs" / "r1" / "history.jsonl").is_file()
+
+
+class TestNeverDeletes:
+    def test_module_removes_nothing_but_partial_sidecars(self):
+        """The archive is append-only. One unlink exists, and it targets a
+        same-run partial sidecar — never dest, never a completed archive."""
+        source = Path("src/scad/archive.py").read_text()
+        assert source.count("unlink") == 1
+        assert "rmtree" not in source
+        assert "shutil" not in source
+
+    def test_engine_has_no_docker_or_container_imports(self):
+        source = Path("src/scad/archive.py").read_text()
+        for bad in ("import docker", "from scad.container", "from scad.vm"):
+            assert bad not in source
+
+    def test_gc_and_clean_never_descend_into_the_archive(self):
+        """Both are scoped to RUNS_DIR; neither walks SCAD_DIR itself."""
+        source = Path("src/scad/container.py").read_text()
+        for line in source.splitlines():
+            if "rmtree" in line or "iterdir" in line:
+                assert "SCAD_DIR" not in line
