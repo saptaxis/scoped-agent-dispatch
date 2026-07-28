@@ -1886,7 +1886,7 @@ def reindex(rebuild, force):
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
-    for key in ("files", "sessions", "turns", "skipped_lines", "skipped_files"):
+    for key in ("files", "sessions", "turns", "named", "skipped_lines", "skipped_files"):
         if stats.get(key):
             click.echo(f"[scad]   {key}: {stats[key]}")
 
@@ -1921,8 +1921,8 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
             params.append(_day_ms(value))
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
-        f"SELECT id, kind, agent, project, title, n_turns, grade, outcome, started "
-        f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
+        f"SELECT id, name, harness_state, kind, agent, project, title, n_turns, "
+        f"grade, outcome, started FROM sessions {clause} ORDER BY started DESC LIMIT ?",
         (*params, limit),
     ).fetchall()
 
@@ -1936,7 +1936,10 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
         when = datetime.fromtimestamp(r["started"] / 1000).strftime("%Y-%m-%d %H:%M") \
             if r["started"] else "?"
         title = (r["title"] or "")[:48]
-        click.echo(f"{r['id'][:12]:<14} {when}  {r['agent']:<7} {r['kind']:<14} "
+        # The human name if the harness recorded one — "nd-5" is how a person
+        # refers to the session; a uuid prefix is only how the filesystem does.
+        label = (r["name"] or r["id"][:12])[:22]
+        click.echo(f"{label:<24} {when}  {r['agent']:<7} {r['kind']:<14} "
                    f"{(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
 
 
@@ -1948,9 +1951,14 @@ def session_show(session_id):
     row = session_row(conn, session_id)
     if row is None:
         raise click.ClickException(f"No session {session_id} in the index.")
-    for field in ("id", "kind", "agent", "machine", "project", "cwd", "title",
-                  "git_branch", "grade", "source", "scad_run_id",
+    for field in ("id", "name", "kind", "agent", "machine", "project", "cwd", "title",
+                  "git_branch", "grade", "source", "harness_state", "scad_run_id",
                   "parent_session_id", "workflow_id", "archive_path"):
+        if row[field] is not None:
+            click.echo(f"{field:<18} {row[field]}")
+    # Model-written prose from the harness, not derived from the trace. Printed
+    # last and labelled so it is not mistaken for structural evidence.
+    for field in ("needs", "needs_detail"):
         if row[field] is not None:
             click.echo(f"{field:<18} {row[field]}")
     click.echo(f"{'turns':<18} {row['n_turns']}")

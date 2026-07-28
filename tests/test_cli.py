@@ -1,6 +1,7 @@
 """CLI tests."""
 
 import json
+import os
 
 import pytest
 import click
@@ -1798,6 +1799,32 @@ class TestIndexCommands:
         result = runner.invoke(main, ["session", "ls", "--outcome", "awaiting-user", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.stdout)[0]["id"] == "S1"
+
+    def test_session_ls_shows_the_human_name_over_a_uuid(self, runner, tmp_path, monkeypatch):
+        """nd-5 is how a person refers to the session; the uuid prefix is not."""
+        self._seed(tmp_path, monkeypatch)
+        (Path(os.environ["SCAD_ARCHIVE"]) / "claude" / "jobs" / "j").mkdir(parents=True)
+        (Path(os.environ["SCAD_ARCHIVE"]) / "claude" / "jobs" / "j" /
+         "state-history.jsonl").write_text(json.dumps({
+             "sessionId": "S1", "name": "nd-5", "state": "blocked",
+             "needs": "drop the bioRxiv PDF", "detail": "workflow salvaged",
+             "updatedAt": "2026-07-28T17:56:43.450Z"}) + "\n")
+        runner.invoke(main, ["reindex"])
+
+        result = runner.invoke(main, ["session", "ls"])
+        assert result.exit_code == 0
+        assert "nd-5" in result.output
+
+        shown = runner.invoke(main, ["session", "show", "S1"])
+        assert "nd-5" in shown.output
+        assert "blocked" in shown.output
+        assert "drop the bioRxiv PDF" in shown.output
+
+    def test_session_ls_falls_back_to_the_id_when_unnamed(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "ls"])
+        assert "S1" in result.output
 
     def test_grade_filter_separates_skeletons(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
