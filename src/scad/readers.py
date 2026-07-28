@@ -12,6 +12,7 @@ from pathlib import Path
 
 from scad.records import (
     GRADE_FULL,
+    GRADE_SKELETON,
     KIND_MAIN,
     KIND_SUBAGENT,
     KIND_WORKFLOW,
@@ -203,3 +204,40 @@ def read_claude_any(
         title=None,          # only main sessions carry aiTitle
     )
     return session, turns, end
+
+
+def read_claude_history(
+    path: Path, start_offset: int = 0
+) -> tuple[list[SessionRecord], int]:
+    """Read ~/.claude/history.jsonl into skeleton session rows.
+
+    This is the only source that outlives transcript pruning — on one machine it
+    knows 203 sessions where 13 transcripts survive. It has no turns, so rows are
+    grade='skeleton' until a transcript upgrades them.
+    """
+    seen: dict[str, dict] = {}
+
+    for _, rec in _iter_lines(path, start_offset):
+        if rec is None:
+            continue
+        sid = rec.get("sessionId")
+        if not sid:
+            continue
+        ts = _epoch_ms(rec.get("timestamp"))
+        entry = seen.setdefault(sid, {
+            "cwd": rec.get("project"), "title": rec.get("display"),
+            "started": ts, "ended": ts,
+        })
+        if ts is not None:
+            entry["started"] = ts if entry["started"] is None else min(entry["started"], ts)
+            entry["ended"] = ts if entry["ended"] is None else max(entry["ended"], ts)
+
+    sessions = [
+        SessionRecord(
+            id=sid, kind=KIND_MAIN, agent="claude", source="claude-history",
+            cwd=e["cwd"], title=e["title"],
+            started=e["started"], ended=e["ended"], grade=GRADE_SKELETON,
+        )
+        for sid, e in seen.items()
+    ]
+    return sessions, path.stat().st_size

@@ -205,3 +205,60 @@ class TestReadClaudeAny:
         assert session.kind == KIND_MAIN
         assert session.id == "S1"
         assert session.source == "claude-transcript"
+
+
+from scad.readers import read_claude_history  # noqa: E402
+from scad.records import GRADE_SKELETON  # noqa: E402
+
+
+HISTORY_LINES = [
+    {"display": "/plugin ", "timestamp": 1772182041158,
+     "project": "/Users/vsr/vsr-tmp", "sessionId": "S-OLD"},
+    {"display": "what next?", "timestamp": 1783860843984,
+     "project": "/Users/vsr/code/nd", "sessionId": "S-NEW"},
+    {"display": "and again", "timestamp": 1783860999999,
+     "project": "/Users/vsr/code/nd", "sessionId": "S-NEW"},
+]
+
+
+class TestClaudeHistory:
+    def test_one_row_per_distinct_session(self, tmp_path):
+        p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
+        sessions, _ = read_claude_history(p)
+        assert {s.id for s in sessions} == {"S-OLD", "S-NEW"}
+
+    def test_rows_are_skeleton_with_no_turns(self, tmp_path):
+        p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
+        sessions, _ = read_claude_history(p)
+        for s in sessions:
+            assert s.grade == GRADE_SKELETON
+            assert s.source == "claude-history"
+            assert s.kind == KIND_MAIN
+
+    def test_project_field_becomes_cwd(self, tmp_path):
+        p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
+        sessions, _ = read_claude_history(p)
+        by_id = {s.id: s for s in sessions}
+        assert by_id["S-NEW"].cwd == "/Users/vsr/code/nd"
+
+    def test_started_and_ended_span_that_session_only(self, tmp_path):
+        p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
+        by_id = {s.id: s for s in read_claude_history(p)[0]}
+        assert by_id["S-NEW"].started == 1783860843984
+        assert by_id["S-NEW"].ended == 1783860999999
+
+    def test_first_prompt_becomes_the_title(self, tmp_path):
+        """A skeleton has no aiTitle; the first prompt is the only label available."""
+        p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
+        by_id = {s.id: s for s in read_claude_history(p)[0]}
+        assert by_id["S-NEW"].title == "what next?"
+
+    def test_lines_without_a_session_id_are_ignored(self, tmp_path):
+        p = write_jsonl(tmp_path / "history.jsonl", [{"display": "x", "timestamp": 1}])
+        sessions, _ = read_claude_history(p)
+        assert sessions == []
+
+    def test_end_offset_supports_resume(self, tmp_path):
+        p = write_jsonl(tmp_path / "history.jsonl", HISTORY_LINES)
+        _, end = read_claude_history(p)
+        assert end == p.stat().st_size
