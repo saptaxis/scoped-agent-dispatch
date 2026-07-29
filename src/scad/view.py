@@ -7,6 +7,7 @@ No server: a rendered page needs no process to remember to start, no port, and
 survives being copied off a remote box.
 """
 
+import time
 from dataclasses import dataclass
 
 from scad.live import TmuxPane, is_agent_command
@@ -52,3 +53,57 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
     template = _RESUME.get(row.get("agent") or "claude", _RESUME["claude"])
     resume = template.format(id=row.get("id"))
     return Reentry("resume", f"cd {cwd} && {resume}" if cwd else resume)
+
+
+_WAITING = ("awaiting-question", "awaiting-user")
+_SNIPPET = 400
+
+_COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state, "
+            "needs, n_turns, started, ended, scad_run_id, grade")
+
+
+def _as_rows(cursor_rows, panes, running) -> list[dict]:
+    out = []
+    for r in cursor_rows:
+        row = dict(r)
+        re_ = reentry_for(row, panes, running)
+        row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note}
+        out.append(row)
+    return out
+
+
+def _last_text(conn, session_id: str) -> str:
+    row = conn.execute(
+        "SELECT text FROM turns WHERE session_id = ? ORDER BY idx DESC LIMIT 1",
+        (session_id,),
+    ).fetchone()
+    return (row["text"] or "")[:_SNIPPET] if row else ""
+
+
+def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14) -> dict:
+    """Everything the page needs: what waits, what is live, and the full list."""
+    cutoff = int((time.time() - days * 86400) * 1000)
+
+    waiting_rows = conn.execute(
+        f"SELECT {_COLUMNS} FROM sessions "
+        f"WHERE kind = 'main' AND outcome IN (?, ?) AND ended >= ? "
+        # Questions first, then oldest first inside each group so nothing rots.
+        f"ORDER BY CASE outcome WHEN 'awaiting-question' THEN 0 ELSE 1 END, ended ASC",
+        (*_WAITING, cutoff),
+    ).fetchall()
+    waiting = _as_rows(waiting_rows, panes, running)
+    for row in waiting:
+        row["last_text"] = _last_text(conn, row["id"])
+
+    all_rows = _as_rows(
+        conn.execute(f"SELECT {_COLUMNS} FROM sessions ORDER BY ended DESC").fetchall(),
+        panes, running,
+    )
+    live = [r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container")]
+
+    return {
+        "waiting": waiting,
+        "live": live,
+        "all": all_rows,
+        "generated": int(time.time() * 1000),
+    }

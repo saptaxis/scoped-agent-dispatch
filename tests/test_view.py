@@ -67,3 +67,82 @@ class TestReentry:
         r = reentry_for(row(kind="subagent"), [], set())
         assert r.kind == "none"
         assert r.command == ""
+
+
+import time
+
+from scad.index import append_turns, connect, upsert_session
+from scad.records import KIND_MAIN, SessionRecord, TurnRecord
+from scad.view import gather
+
+
+def _store(conn, sid, outcome, ended_days_ago=0, cwd="/repo", agent="claude", kind=KIND_MAIN):
+    ended = int((time.time() - ended_days_ago * 86400) * 1000)
+    rec = SessionRecord(id=sid, kind=kind, agent=agent, source="claude-transcript",
+                        cwd=cwd, started=ended - 1000, ended=ended, outcome=outcome)
+    upsert_session(conn, rec, machine="mac", project="proj", archive_path=f"/arc/{sid}.jsonl",
+                   source_size=1, source_mtime=1, parsed_offset=1)
+    return rec
+
+
+class TestGather:
+    def test_waiting_holds_only_sessions_awaiting_input(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "W1", "awaiting-user")
+        _store(conn, "Q1", "awaiting-question")
+        _store(conn, "D1", "tool-result-last")
+        data = gather(conn, [], set())
+        assert {r["id"] for r in data["waiting"]} == {"W1", "Q1"}
+
+    def test_questions_sort_before_plain_waiting(self, tmp_path):
+        """An explicit question is a stronger claim on your attention."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "W1", "awaiting-user", ended_days_ago=5)
+        _store(conn, "Q1", "awaiting-question", ended_days_ago=1)
+        assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["Q1", "W1"]
+
+    def test_oldest_first_within_a_group_so_nothing_rots(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "NEW", "awaiting-user", ended_days_ago=1)
+        _store(conn, "OLD", "awaiting-user", ended_days_ago=6)
+        assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["OLD", "NEW"]
+
+    def test_window_excludes_ancient_sessions(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD", "awaiting-user", ended_days_ago=90)
+        assert gather(conn, [], set(), days=14)["waiting"] == []
+
+    def test_subagents_never_appear_in_waiting(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "SUB", "awaiting-user", kind="subagent")
+        assert gather(conn, [], set())["waiting"] == []
+
+    def test_live_lists_sessions_with_a_matching_pane(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "L1", "tool-result-last", cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+        data = gather(conn, panes, set())
+        assert [r["id"] for r in data["live"]] == ["L1"]
+
+    def test_every_row_carries_a_reentry(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "W1", "awaiting-user")
+        r = gather(conn, [], set())["waiting"][0]
+        assert r["reentry"]["kind"] == "resume"
+        assert "claude --resume W1" in r["reentry"]["command"]
+
+    def test_waiting_rows_carry_the_last_turn_text(self, tmp_path):
+        """So you can remember where the conversation left off."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "W1", "awaiting-user")
+        append_turns(conn, "W1", [
+            TurnRecord(ts=1, role="assistant", kind="text", text="first"),
+            TurnRecord(ts=2, role="assistant", kind="text", text="the last thing said"),
+        ])
+        assert gather(conn, [], set())["waiting"][0]["last_text"] == "the last thing said"
+
+    def test_all_holds_every_session(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "A", "awaiting-user")
+        _store(conn, "B", "tool-result-last", kind="subagent")
+        assert len(gather(conn, [], set())["all"]) == 2
