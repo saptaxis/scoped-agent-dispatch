@@ -170,11 +170,23 @@ class TestGather:
         ])
         assert gather(conn, [], set())["waiting"][0]["last_text"] == "the last thing said"
 
-    def test_all_holds_every_session(self, tmp_path):
+    def test_all_lists_only_human_started_sessions(self, tmp_path):
+        """A subagent is triggered by an agent, cannot be resumed, and was never
+        started by you — 1309 of 1462 real rows. It is not a peer."""
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "A", "awaiting-user")
         _store(conn, "B", "tool-result-last", kind="subagent")
-        assert len(gather(conn, [], set())["all"]) == 2
+        rows = gather(conn, [], set())["all"]
+        assert [r["id"] for r in rows] == ["A"]
+
+    def test_a_parent_carries_its_agent_count(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "P", "awaiting-user")
+        for kid in ("K1", "K2"):
+            _store(conn, kid, "tool-result-last", kind="subagent")
+            conn.execute("UPDATE sessions SET parent_session_id='P' WHERE id=?", (kid,))
+        conn.commit()
+        assert gather(conn, [], set())["all"][0]["n_agents"] == 2
 
 
 import json as _json
@@ -191,7 +203,9 @@ class TestRender:
                              "scad_run_id": None, "last_text": "where we left off",
                              "reentry": {"kind": "resume",
                                          "command": "cd /repo && claude --resume S1", "note": ""}}],
-                "live": [], "all": [], "generated": 1785000000000}
+                "live": [], "all": [], "generated": 1785000000000,
+                "waiting_at_hand": [], "waiting_closed": [],
+                "grouped_panes": [], "grouped_closed": []}
 
     def test_is_one_self_contained_document(self):
         html = render(self._data())
@@ -209,6 +223,7 @@ class TestRender:
 
     def test_escapes_html_in_user_text(self):
         data = self._data()
+        data["waiting_at_hand"] = data["waiting"]
         data["waiting"][0]["title"] = "<script>alert(1)</script>"
         html = render(data)
         assert "<script>alert(1)</script>" not in html
@@ -217,6 +232,7 @@ class TestRender:
     def test_survives_apostrophes_and_non_ascii(self):
         """Real needs text contains both: "drop Hincapié & O'Leary … PDF"."""
         data = self._data()
+        data["waiting_at_hand"] = data["waiting"]
         data["waiting"][0]["needs"] = "drop Hincapié & O'Leary 2026 bioRxiv PDF"
         html = render(data)
         assert "Hincapi" in html
@@ -225,7 +241,9 @@ class TestRender:
         assert "O'Leary" in _json.loads(html[start:end])["waiting"][0]["needs"]
 
     def test_shows_the_reentry_command(self):
-        assert "claude --resume S1" in render(self._data())
+        data = self._data()
+        data["waiting_at_hand"] = data["waiting"]
+        assert "claude --resume S1" in render(data)
 
     def test_the_copy_handler_attribute_is_quoted(self):
         """Unquoted attributes containing parens are tolerated by browsers but wrong."""
@@ -234,7 +252,9 @@ class TestRender:
         assert "onclick=copy(this)" not in html
 
     def test_empty_data_still_renders(self):
-        html = render({"waiting": [], "live": [], "all": [], "generated": 1})
+        html = render({"waiting": [], "live": [], "all": [], "generated": 1,
+                       "waiting_at_hand": [], "waiting_closed": [],
+                       "grouped_panes": [], "grouped_closed": []})
         assert "</html>" in html
         assert "Nothing waiting" in html
 
@@ -378,3 +398,83 @@ class TestLivePanes:
         row = gather(conn, panes, set())["panes"][0]
         assert row["window"] == "orglens"
         assert row["tmux_session"] == "main2"
+
+
+class TestGrouping:
+    def test_panes_nest_session_then_window(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        panes = [TmuxPane("main:3.0", "/a", "2.1.205", window="scad"),
+                 TmuxPane("main:3.1", "/a", "codex", window="scad"),
+                 TmuxPane("main2:1.0", "/b", "2.1.219", window="other")]
+        groups = gather(conn, panes, set())["grouped_panes"]
+        assert {g["session"] for g in groups} == {"main", "main2"}
+        main = next(g for g in groups if g["session"] == "main")
+        assert len(main["windows"]) == 1
+        assert main["windows"][0]["label"] == "scad"
+        assert len(main["windows"][0]["panes"]) == 2
+
+    def test_ordered_by_last_message_not_tmux_index(self, tmp_path):
+        """What you touched last is what you are coming back to."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD", "awaiting-user", ended_days_ago=9, cwd="/old")
+        _store(conn, "NEW", "awaiting-user", ended_days_ago=1, cwd="/new")
+        panes = [TmuxPane("main:1.0", "/old", "2.1.205", window="stale"),
+                 TmuxPane("main:9.0", "/new", "2.1.205", window="fresh")]
+        windows = gather(conn, panes, set())["grouped_panes"][0]["windows"]
+        assert [w["label"] for w in windows] == ["fresh", "stale"]
+
+    def test_a_pane_with_no_known_session_sorts_last(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", ended_days_ago=3, cwd="/known")
+        panes = [TmuxPane("main:1.0", "/unknown", "2.1.205", window="new"),
+                 TmuxPane("main:2.0", "/known", "2.1.205", window="known")]
+        windows = gather(conn, panes, set())["grouped_panes"][0]["windows"]
+        assert [w["label"] for w in windows] == ["known", "new"]
+
+    def test_waiting_splits_into_at_hand_and_closed(self, tmp_path):
+        """An open pane means switch windows; nothing open means resume."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "HERE", "awaiting-user", cwd="/open")
+        _store(conn, "GONE", "awaiting-user", cwd="/closed")
+        data = gather(conn, [TmuxPane("main:1.0", "/open", "2.1.205", window="w")], set())
+        assert [r["id"] for r in data["waiting_at_hand"]] == ["HERE"]
+        assert [r["id"] for r in data["waiting_closed"]] == ["GONE"]
+
+    def test_closed_groups_ordered_by_recency_not_size(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "A1", "awaiting-user", ended_days_ago=9, cwd="/a")
+        _store(conn, "A2", "awaiting-user", ended_days_ago=9, cwd="/a")
+        _store(conn, "B1", "awaiting-user", ended_days_ago=1, cwd="/b")
+        conn.execute("UPDATE sessions SET project='big' WHERE id IN ('A1','A2')")
+        conn.execute("UPDATE sessions SET project='recent' WHERE id='B1'")
+        conn.commit()
+        groups = gather(conn, [], set())["grouped_closed"]
+        assert [g["project"] for g in groups] == ["recent", "big"]
+
+
+class TestResumeCwd:
+    def test_never_cds_into_an_agents_own_state_directory(self, tmp_path):
+        """codex records ChatGPT-project sessions under ~/.codex — cd-ing there
+        lands you inside the tool's state, not in a repo."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "C1", "awaiting-user", agent="codex",
+               cwd="/Users/vsr/.codex/.chatgpt-projects/g-p-68d7ac")
+        cmd = gather(conn, [], set())["waiting"][0]["reentry"]["command"]
+        assert cmd == "codex resume C1"
+        assert "cd " not in cmd
+
+    def test_claude_state_dir_is_also_refused(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "C2", "awaiting-user", cwd="/Users/vsr/.claude/projects/x")
+        assert gather(conn, [], set())["waiting"][0]["reentry"]["command"] == "claude --resume C2"
+
+    def test_an_ordinary_repo_still_gets_its_cd(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "C3", "awaiting-user", cwd="/Users/vsr/code/scad")
+        cmd = gather(conn, [], set())["waiting"][0]["reentry"]["command"]
+        assert cmd == "cd /Users/vsr/code/scad && claude --resume C3"
+
+    def test_a_dotdir_that_is_not_agent_state_is_untouched(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "C4", "awaiting-user", cwd="/Users/vsr/.config/nvim")
+        assert "cd /Users/vsr/.config/nvim" in gather(conn, [], set())["waiting"][0]["reentry"]["command"]

@@ -76,9 +76,91 @@ def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
             "likely_id": (guess["id"] if guess else None),
             "likely_title": (guess["title"] if guess else None),
             "likely_outcome": (guess["outcome"] if guess else None),
+            "last_activity": (guess["ended"] if guess else None),
             "goto": _goto(pane.target),
         })
     return rows
+
+
+def group_panes(rows: list[dict]) -> list[dict]:
+    """Nest live panes the way tmux holds them: session -> window -> panes.
+
+    This mirrors how the work is actually laid out — tmuxinator opens a window
+    per project — so the page reads like the screen rather than like a table dump.
+
+    Everything is ordered by **last message time**, most recent first: panes
+    within a window, windows within a session, sessions against each other. What
+    you touched last is what you are most likely coming back to; tmux's own index
+    order says nothing about that. Panes whose directory has no indexed session
+    sort last — unknown is not recent.
+    """
+    sessions: dict[str, dict[str, list[dict]]] = {}
+    for row in rows:
+        windows = sessions.setdefault(row["tmux_session"], {})
+        key = f'{row["target"].split(".")[0]}|{row.get("window") or ""}'
+        windows.setdefault(key, []).append(row)
+    def recency(rows):
+        return max((r.get("last_activity") or 0) for r in rows)
+
+    grouped = []
+    for name, windows in sessions.items():
+        win_rows = [
+            {"label": key.split("|", 1)[1], "target": key.split("|", 1)[0],
+             "panes": sorted(panes, key=lambda r: r.get("last_activity") or 0, reverse=True),
+             "last_activity": recency(panes)}
+            for key, panes in windows.items()
+        ]
+        win_rows.sort(key=lambda w: w["last_activity"], reverse=True)
+        grouped.append({"session": name, "windows": win_rows,
+                        "last_activity": max(w["last_activity"] for w in win_rows)})
+    grouped.sort(key=lambda g: g["last_activity"], reverse=True)
+    return grouped
+
+
+def split_waiting(waiting: list[dict], cwds: set[str]) -> tuple[list[dict], list[dict]]:
+    """Split the waiting list into "there is a pane open for it" and "gone".
+
+    118 undifferentiated rows is a dump, not a view. The distinction that matters
+    is whether you can walk to it — an open pane in that directory means switch
+    windows; nothing open means the conversation is closed and needs resuming.
+    """
+    at_hand = [r for r in waiting if r.get("cwd") and r["cwd"] in cwds]
+    closed = [r for r in waiting if not (r.get("cwd") and r["cwd"] in cwds)]
+    return at_hand, closed
+
+
+def group_by_project(rows: list[dict]) -> list[dict]:
+    """Group rows by project, most recently active project first.
+
+    Ordered by last message time rather than by group size: a project you touched
+    an hour ago belongs above one with more rows you last saw in March.
+    """
+    projects: dict[str, list[dict]] = {}
+    for row in rows:
+        projects.setdefault(row.get("project") or "unfiled", []).append(row)
+    groups = [
+        {"project": name,
+         "rows": sorted(rs, key=lambda r: r.get("ended") or 0, reverse=True),
+         "last_activity": max((r.get("ended") or 0) for r in rs)}
+        for name, rs in projects.items()
+    ]
+    groups.sort(key=lambda g: g["last_activity"], reverse=True)
+    return groups
+
+
+# Directories that belong to an agent's own machinery, not to your work. A
+# session can record one as its cwd — codex's ChatGPT-project sessions do — and
+# `cd`-ing there is never what you want: you would land inside the tool's state
+# rather than in a repo. Resume works fine without the cd, so drop it.
+_AGENT_STATE = (".claude", ".codex", ".scad")
+
+
+def _is_agent_state_dir(cwd: str) -> bool:
+    try:
+        parts = Path(cwd).parts
+    except (TypeError, ValueError):
+        return False
+    return any(part in _AGENT_STATE for part in parts)
 
 
 def _resume_command(row: dict) -> str:
@@ -93,7 +175,9 @@ def _resume_command(row: dict) -> str:
     template = _RESUME.get(row.get("agent") or "claude", _RESUME["claude"])
     resume = template.format(id=row["id"])
     cwd = row.get("cwd")
-    return f"cd {shlex.quote(cwd)} && {resume}" if cwd else resume
+    if not cwd or _is_agent_state_dir(cwd):
+        return resume
+    return f"cd {shlex.quote(cwd)} && {resume}"
 
 
 def _one_per_place(rows) -> list[dict]:
@@ -173,7 +257,10 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
     resume = template.format(id=row.get("id"))
     # shlex.quote leaves ordinary paths alone and quotes the 84 real cwds that
     # contain spaces ("Saptarishi Apartments"), which `cd` would otherwise split.
-    return Reentry("resume", f"cd {shlex.quote(cwd)} && {resume}" if cwd else resume)
+    # An agent-state directory gets no cd at all — see _is_agent_state_dir.
+    if not cwd or _is_agent_state_dir(cwd):
+        return Reentry("resume", resume)
+    return Reentry("resume", f"cd {shlex.quote(cwd)} && {resume}")
 
 
 _WAITING = ("awaiting-question", "awaiting-user")
@@ -224,16 +311,32 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     for row in waiting:
         row["last_text"] = _last_text(conn, row["id"])
 
+    # Only human-started sessions are listed. A subagent is triggered BY an agent,
+    # has no independent existence and cannot be resumed — listing it beside the
+    # session that spawned it makes 1309 of 1462 rows things you never started.
+    # They stay in the index (searchable, readable); they are just not peers here.
     all_rows = _as_rows(
-        conn.execute(f"SELECT {_COLUMNS} FROM sessions ORDER BY ended DESC").fetchall(),
+        conn.execute(
+            f"SELECT {_COLUMNS}, "
+            f"(SELECT count(*) FROM sessions c WHERE c.parent_session_id = sessions.id) "
+            f"AS n_agents "
+            f"FROM sessions WHERE kind = 'main' ORDER BY ended DESC"
+        ).fetchall(),
         panes, running, live_ids, cwds,
     )
     live = _one_per_place(r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container"))
 
+    pane_rows = live_pane_rows(conn, panes)
+    at_hand, closed_waiting = split_waiting(waiting, cwds)
+
     return {
         "waiting": waiting,
+        "waiting_at_hand": at_hand,
+        "waiting_closed": closed_waiting,
+        "grouped_panes": group_panes(pane_rows),
+        "grouped_closed": group_by_project(closed_waiting),
         "live": live,
-        "panes": live_pane_rows(conn, panes),
+        "panes": pane_rows,
         "all": all_rows,
         "generated": int(time.time() * 1000),
     }
@@ -258,6 +361,8 @@ _PAGE = """<!doctype html>
  .snippet {{ color: #555; font-size: .85rem; max-width: 34rem; }}
  .needs {{ color: #b45309; font-size: .85rem; }}
  .muted {{ color: #999; }}
+ h3 {{ font-size: .9rem; margin: 1.2rem 0 .3rem; font-weight: 600; }}
+ .win {{ margin: .6rem 0 .2rem; font-size: .88rem; }}
  .st {{ font-size: .72rem; padding: .1rem .4rem; border-radius: 3px; text-transform: uppercase;
         letter-spacing: .04em; }}
  .st.open {{ background: #d1fae5; color: #065f46; }}
@@ -275,14 +380,14 @@ _PAGE = """<!doctype html>
 <h1>scad sessions</h1>
 <div class="sub">generated {generated} · {n_all} sessions · click any command to copy</div>
 
-<h2>Waiting on you ({n_waiting})</h2>
+<h2>Open now — {n_panes} agent panes</h2>
+{grouped_panes}
+
+<h2>Waiting, with a pane open ({n_at_hand})</h2>
 {waiting}
 
-<h2>Open agent panes ({n_panes})</h2>
-{panes}
-
-<h2>Live now ({n_live})</h2>
-{live}
+<h2>Waiting, closed ({n_closed})</h2>
+{grouped_closed}
 
 <h2>All sessions</h2>
 <input id="f" placeholder="filter by name, project, cwd, title…" autocomplete="off">
@@ -397,14 +502,85 @@ def _panes_html(rows: list[dict]) -> str:
     return "".join(out)
 
 
+def _ago(ms) -> str:
+    if not ms:
+        return ""
+    mins = max(0, int((time.time() * 1000 - ms) / 60000))
+    if mins < 60:
+        return f"{mins}m ago"
+    if mins < 1440:
+        return f"{mins // 60}h ago"
+    return f"{mins // 1440}d ago"
+
+
+def _pane_line(r: dict) -> str:
+    e = _html.escape
+    likely = ""
+    if r.get("likely_id"):
+        likely = (f'<span class="muted">~{e(r["likely_id"][:8])}</span> '
+                  f'{e(str(r.get("likely_title") or "")[:52])}')
+    else:
+        likely = '<span class="muted">no indexed session in this cwd</span>'
+    resume = _resume_command({"id": r.get("likely_id"), "cwd": r.get("cwd"),
+                              "agent": r.get("agent"), "kind": "main"}) if r.get("likely_id") else ""
+    return (
+        f'<tr><td><code onclick="copy(this)">{e(r["goto"])}</code>'
+        f'<br><span class="muted">{e(r["target"])} · {e(r["agent"])} {e(r.get("version") or "")}</span></td>'
+        f'<td>{likely}<br><span class="muted">{_ago(r.get("last_activity"))}</span></td>'
+        f'<td>{f"<code onclick=\"copy(this)\">{e(resume)}</code>" if resume else ""}</td></tr>'
+    )
+
+
+def _grouped_panes_html(groups: list[dict]) -> str:
+    """Session -> window -> panes, newest first at every level."""
+    if not groups:
+        return '<p class="muted">No agent panes open.</p>'
+    e = _html.escape
+    out = []
+    for g in groups:
+        out.append(f'<h3>tmux <code>{e(g["session"])}</code></h3>')
+        for w in g["windows"]:
+            out.append(f'<div class="win"><b>{e(w["label"] or w["target"])}</b> '
+                       f'<span class="muted">{e(w["target"])} · {len(w["panes"])} agent'
+                       f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}</span></div>')
+            out.append('<table>' + "".join(_pane_line(r) for r in w["panes"]) + '</table>')
+    return "".join(out)
+
+
+def _grouped_closed_html(groups: list[dict]) -> str:
+    """Closed sessions still awaiting you, by project, newest project first."""
+    if not groups:
+        return '<p class="muted">Nothing closed and waiting.</p>'
+    e = _html.escape
+    out = []
+    for g in groups:
+        out.append(f'<h3>{e(g["project"])} <span class="muted">{len(g["rows"])} waiting · '
+                   f'{_ago(g["last_activity"])}</span></h3>')
+        rows = []
+        for r in g["rows"]:
+            cmd = _resume_command(r)
+            q = ' class="q"' if r.get("outcome") == "awaiting-question" else ""
+            label = e(str(r.get("name") or r.get("title") or r["id"][:12])[:64])
+            needs = f'<br><span class="needs">{e(str(r["needs"]))}</span>' if r.get("needs") else ""
+            rows.append(
+                f'<tr{q}><td>{label}{needs}<br><span class="muted">{_ago(r.get("ended"))}'
+                f' · {r.get("n_turns") or 0} turns</span></td>'
+                f'<td><code onclick="copy(this)">{e(cmd)}</code></td></tr>')
+        out.append("<table>" + "".join(rows) + "</table>")
+    return "".join(out)
+
+
 def render(data: dict) -> str:
     """One self-contained page. No network, no external assets."""
     return _PAGE.format(
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
-        n_panes=len(data.get("panes") or []), panes=_panes_html(data.get("panes") or []),
-        waiting=_rows_html(data["waiting"], waiting=True),
-        live=_rows_html(data["live"]),
+        n_panes=len(data.get("panes") or []),
+        n_at_hand=len(data.get("waiting_at_hand") or []),
+        n_closed=len(data.get("waiting_closed") or []),
+        grouped_panes=_grouped_panes_html(data.get("grouped_panes") or []),
+        grouped_closed=_grouped_closed_html(data.get("grouped_closed") or []),
+        waiting=_rows_html(data.get("waiting_at_hand") or [], waiting=True),
         data=_embed(data),
     )
 
