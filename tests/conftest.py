@@ -27,6 +27,10 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
+from scad.notes import SESSION_ID_ENV
+
 # Written into the throwaway global config. `.invalid` is reserved by RFC 2606
 # and can never resolve, so a leaked commit is traceable to the test suite.
 GIT_TEST_NAME = "Scad Test Suite"
@@ -66,6 +70,20 @@ def pytest_configure(config):
     ):
         _saved_env[key] = os.environ.get(key)
         os.environ[key] = value
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_session_ids(monkeypatch):
+    """Unset every agent's session variable for the duration of each test.
+
+    The suite is frequently run *from inside* one of the agents it models, and
+    a real `CLAUDE_CODE_SESSION_ID` in the ambient environment would silently
+    satisfy `current_session_id()` — so the transcript-scanning tests would
+    stop testing the scan without ever going red. Tests that want a variable
+    set say so with `monkeypatch.setenv`, which overrides this.
+    """
+    for var in SESSION_ID_ENV.values():
+        monkeypatch.delenv(var, raising=False)
 
 
 def pytest_unconfigure(config):

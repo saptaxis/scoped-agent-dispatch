@@ -1,39 +1,19 @@
 """Bootstrap installer helpers.
 
-The main install flow is in install.sh (bash). This module provides
-the plugin registration helper that install.sh calls via Python.
+The main install flow is in install.sh (bash). This module provides the
+Python helpers it shells out to: removing any leftover Claude Code plugin
+registration, and offering to raise transcript retention.
+
+scad no longer ships as a Claude Code plugin. Skills install through the
+shared agentskills convention instead, which reaches Claude, Codex, Kimi and
+others from one copy — so there is nothing left to register, only the old
+registration to clear away.
 """
 
 import json
 import subprocess
 import sys
 from pathlib import Path
-
-
-def _plugin_root(plugin_path: Path) -> Path:
-    """The directory Claude Code loads a plugin's components from.
-
-    `installPath` names the plugin ROOT — the directory that CONTAINS
-    `.claude-plugin/`, alongside `commands/`, `skills/` and `agents/`. Measured
-    against every working entry in a real installed_plugins.json, all of which
-    point at a root of that shape.
-
-    install.sh has always passed `$REPO_DIR/.claude-plugin`, one level too deep,
-    so Claude Code looked for `commands/` inside the manifest directory, found
-    none, and `/remember` never loaded — with the entry present and the plugin
-    enabled, which is precisely what made it read as a registration failure
-    rather than a path error. Accepting either spelling costs one line and makes
-    the caller impossible to get wrong.
-    """
-    return plugin_path.parent if plugin_path.name == ".claude-plugin" else plugin_path
-
-
-def _read_manifest(root: Path) -> dict:
-    """plugin.json, whether it sits at the root or under `.claude-plugin/`."""
-    for candidate in (root / ".claude-plugin" / "plugin.json", root / "plugin.json"):
-        if candidate.is_file():
-            return json.loads(candidate.read_text())
-    raise FileNotFoundError(f"no plugin.json under {root}")
 
 
 def _read_settings(settings_file: Path) -> dict:
@@ -147,85 +127,33 @@ def _prompt_yes(text: str) -> bool:
     return answer in ("", "y", "yes")
 
 
-def register_claude_plugin(
-    claude_home: Path, plugin_path: Path, use_cli: bool = True
-) -> bool:
-    """Register scad as a Claude Code plugin, durably.
-
-    The declaration goes in settings.json, not installed_plugins.json:
-
-    - `extraKnownMarketplaces["scad"]` points at the repo as a directory-source
-      marketplace, so `scad@scad` resolves. scad used to register as a bare
-      `scad`, which names no marketplace at all — that is the "Marketplace
-      'inline' not found" symptom, and why `/remember` never loaded even though
-      `claude --plugin-dir <repo>` loads it fine.
-    - `enabledPlugins["scad@scad"]` enables it under the qualified id every
-      working plugin uses. Any stale bare `"scad"` key is removed.
-
-    installed_plugins.json is deliberately not written. It is not durable — an
-    official-plugin update was observed rewriting it wholesale mid-session,
-    resetting all six entries and dropping scad. settings.json survived that
-    wipe, and the harness re-materialises the install from it on next start.
-    Measured against a sandbox CLAUDE_CONFIG_DIR: delete scad's entry, restart,
-    and it is rebuilt with `/remember` available.
-
-    Prefers the `claude plugin` CLI, which makes exactly these settings writes
-    and also materialises the marketplace cache; falls back to editing
-    settings.json directly when the CLI is missing or fails. Both paths are
-    idempotent and preserve every other key in the file.
-
-    Args:
-        claude_home: Path to ~/.claude directory.
-        plugin_path: The plugin root, or its `.claude-plugin/` manifest
-            directory — either is accepted, and the root is what gets declared.
-        use_cli: Try the `claude plugin` CLI first. Off in unit tests.
-
-    Returns:
-        True if registration succeeded, False if skipped (no claude home).
-    """
-    if not claude_home.exists():
-        return False
-
-    root = _plugin_root(plugin_path)
-    name = _read_manifest(root)["name"]
-    plugin_id = f"{name}@{name}"
-
-    if use_cli:
-        # `marketplace add` is idempotent; `install` is a no-op once installed.
-        if _run_plugin_cli(["marketplace", "add", str(root)], claude_home):
-            _run_plugin_cli(["install", plugin_id], claude_home)
-
-    # Always assert the durable declaration, whether or not the CLI ran. This
-    # is the part that has to be true, and re-stating it costs nothing.
-    settings_file = claude_home / "settings.json"
-    settings = _read_settings(settings_file)
-
-    marketplaces = settings.setdefault("extraKnownMarketplaces", {})
-    marketplaces[name] = {"source": {"source": "directory", "path": str(root)}}
-
-    enabled = settings.setdefault("enabledPlugins", {})
-    enabled.pop(name, None)  # stale bare key resolves to no marketplace
-    enabled[plugin_id] = True
-
-    _write_settings(settings_file, settings)
-    return True
-
-
 def deregister_claude_plugin(claude_home: Path, use_cli: bool = True) -> bool:
-    """Remove scad's Claude Code plugin registration — the exact inverse.
+    """Remove scad's Claude Code plugin registration.
 
-    Undoes everything `register_claude_plugin` writes: the marketplace
-    declaration, the enabled entry under both the qualified and the stale bare
-    key, and whatever install the harness materialised from them. Leaving the
-    marketplace behind would point it at a directory uninstall just deleted, and
-    the user would get errors from a tool they removed.
+    scad no longer registers a plugin, so this runs for two reasons, both of
+    them cleanup:
+
+    - **Migration.** Install calls it on every run. Machines installed before
+      the switch still carry the registration, and plugin skills do not
+      override `~/.claude/skills` entries — they stack, so a machine that keeps
+      both ends up with two copies of every scad skill competing for the same
+      trigger. Clearing the plugin is what makes the skills install correct.
+    - **Uninstall.** Removing scad has to take the config back to where it was.
+
+    It clears everything the old registration wrote: the marketplace
+    declaration, the enabled entry under both the qualified `scad@scad` and the
+    stale bare `scad` key, and whatever install the harness materialised from
+    them. Leaving the marketplace behind would point it at a directory that
+    uninstall just deleted, and the user would get errors from a tool they
+    removed.
 
     Only a *directory*-source `scad` marketplace is ours. A `scad` entry from
     some other source belongs to someone else and is left alone.
 
-    A container emptied by our own removal is pruned, so a register/deregister
-    round trip restores settings.json byte for byte. A container that was
-    already empty is left as it was found — it was never ours to touch.
+    A container emptied by our own removal is pruned, so a settings.json that
+    was registered comes back byte for byte identical to how it looked before.
+    A container that was already empty is left as it was found — it was never
+    ours to touch.
 
     Args:
         claude_home: Path to ~/.claude directory.

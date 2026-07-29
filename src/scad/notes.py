@@ -176,6 +176,20 @@ def append_note(
 LIVE_WINDOW_S = 120
 
 
+# The variable each harness exports naming the session it is currently running.
+# Both are verified to equal the id in that agent's own transcript path:
+# `~/.claude/projects/<encoded-cwd>/<CLAUDE_CODE_SESSION_ID>.jsonl` and
+# `~/.codex/sessions/<Y>/<M>/<D>/rollout-<ts>-<CODEX_THREAD_ID>.jsonl`.
+#
+# Kimi is deliberately absent: it exports nothing, and an entry here is a claim
+# that the variable exists. Adding an agent is one line — and MUST be the
+# agent's own variable, never a near-enough one (see `current_session_id`).
+SESSION_ID_ENV = {
+    "claude": "CLAUDE_CODE_SESSION_ID",
+    "codex": "CODEX_THREAD_ID",
+}
+
+
 class NoteTargetError(Exception):
     """`--current` could not name exactly one session."""
 
@@ -241,16 +255,52 @@ def _scan_for_cwd(projects_root: Path, cwd: str) -> list[Path]:
 
 
 def current_session_id(
-    cwd: str | None = None, *, projects_root: Path | None = None,
+    cwd: str | None = None, *, agent: str = "claude", projects_root: Path | None = None,
     window_s: float = LIVE_WINDOW_S,
 ) -> str:
-    """Resolve the session whose trace is being written in `cwd` right now.
+    """Resolve the session `agent` is running right now.
 
-    Encoded directory first, `cwd`-field scan as the fallback, newest mtime wins.
-    Where several are genuinely live this raises rather than picking one: a note
-    filed against the wrong session is worse than a note not filed, because
-    nothing downstream can detect the mistake.
+    The agent already knows its own id and exports it, so ask before searching:
+    `SESSION_ID_ENV[agent]` is authoritative and needs no filesystem at all.
+
+    It must be that agent's OWN variable, and nothing else. These are ordinary
+    environment variables, so they are inherited: a codex or a kimi launched
+    from inside a Claude session carries `CLAUDE_CODE_SESSION_ID` with it, and
+    reading it would file the note into the codex shard under a Claude
+    session's id — a wrong answer that looks exactly like a right one. So a
+    missing variable is an error, never a reason to consult a different one or
+    to go looking through another agent's transcripts.
+
+    Only claude has a fallback, and only for its own directory: encoded
+    directory first, `cwd`-field scan next, newest mtime wins. Where several
+    are genuinely live that raises rather than picking one, for the same reason
+    — a note filed against the wrong session is worse than a note not filed,
+    because nothing downstream can detect the mistake.
     """
+    env_var = SESSION_ID_ENV.get(agent)
+    if env_var:
+        exported = (os.environ.get(env_var) or "").strip()
+        if exported:
+            try:
+                return _checked_id(exported, f"${env_var}")
+            except ValueError as exc:
+                # Set but unusable. Refuse loudly instead of falling through to
+                # the scan: something is wrong with the environment, and a
+                # silently different answer would hide it.
+                raise NoSessionFound(
+                    f"{exc}. Unset {env_var} or pass --session <id> explicitly."
+                ) from exc
+
+    if agent != "claude":
+        detail = (
+            f"{env_var} is not set" if env_var
+            else f"{agent} exports no session variable"
+        )
+        raise NoSessionFound(
+            f"Cannot resolve the current {agent} session: {detail}. "
+            "Pass --session <id> explicitly."
+        )
+
     root = projects_root or claude_projects_root()
     here = os.path.realpath(cwd or os.getcwd())
 

@@ -6,7 +6,7 @@ set -euo pipefail
 # Usage:
 #   curl -fsSL https://raw.githubusercontent.com/saptaxis/scoped-agent-dispatch/main/install-remote.sh | bash
 #   curl -fsSL ... | bash -s -- --prefix ~/my-scad-src
-#   curl -fsSL ... | bash -s -- --no-plugin --no-completions
+#   curl -fsSL ... | bash -s -- --no-skills --no-completions
 #
 # Clones the repo, then runs install.sh. All flags except --prefix
 # are forwarded to install.sh.

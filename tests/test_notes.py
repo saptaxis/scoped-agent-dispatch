@@ -178,8 +178,10 @@ import os as _os  # noqa: E402
 
 from scad.notes import (  # noqa: E402
     LIVE_WINDOW_S,
+    SESSION_ID_ENV,
     AmbiguousSession,
     NoSessionFound,
+    NoteTargetError,
     current_session_id,
 )
 
@@ -267,3 +269,98 @@ class TestCurrentSession:
         _transcript(projects, str(work.resolve()), "S1")
         monkeypatch.chdir(work)
         assert current_session_id(projects_root=projects) == "S1"
+
+
+class TestCurrentSessionFromEnv:
+    """The agent tells us its own session id; ask it before searching for it.
+
+    Each harness exports the id of the session it is running, so `--current`
+    is a lookup rather than a guess. The one hazard is inheritance: those
+    variables are ordinary environment variables and a codex launched from a
+    Claude session carries `CLAUDE_CODE_SESSION_ID` with it. An agent may
+    therefore only ever read its OWN variable.
+    """
+
+    def test_claude_returns_the_exported_id_verbatim(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "env-claude-id")
+        assert current_session_id(
+            "/w/proj", projects_root=tmp_path / "nothing-here") == "env-claude-id"
+
+    def test_claude_does_not_touch_the_filesystem_when_the_var_is_set(
+            self, tmp_path, monkeypatch):
+        # Not just "the same answer" — the scan must not run at all, or a
+        # project with two live transcripts would still be ambiguous.
+        import scad.notes as notes_mod
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "on-disk-a", age_s=1)
+        _transcript(projects, "/w/proj", "on-disk-b", age_s=2)
+        monkeypatch.setattr(notes_mod, "_transcripts_in",
+                            lambda d: pytest.fail("scanned the filesystem"))
+        monkeypatch.setattr(notes_mod, "_scan_for_cwd",
+                            lambda r, c: pytest.fail("scanned the filesystem"))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "env-claude-id")
+        assert current_session_id("/w/proj", projects_root=projects) == "env-claude-id"
+
+    def test_claude_falls_back_to_the_cwd_scan_when_the_var_is_absent(self, tmp_path):
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "from-the-scan")
+        assert current_session_id("/w/proj", projects_root=projects) == "from-the-scan"
+
+    def test_a_blank_variable_counts_as_absent(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "   ")
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "from-the-scan")
+        assert current_session_id("/w/proj", projects_root=projects) == "from-the-scan"
+
+    def test_codex_reads_its_own_variable(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CODEX_THREAD_ID", "codex-thread-1")
+        assert current_session_id(
+            "/w/proj", agent="codex", projects_root=tmp_path) == "codex-thread-1"
+
+    def test_codex_never_answers_with_an_inherited_claude_id(self, tmp_path, monkeypatch):
+        # The inheritance trap. `codex` launched from a Claude session inherits
+        # CLAUDE_CODE_SESSION_ID; answering with it would file the note into
+        # the codex shard under a Claude session's id, and nothing downstream
+        # could tell.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "the-claude-one")
+        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "the-claude-one")
+        with pytest.raises(NoSessionFound) as exc:
+            current_session_id("/w/proj", agent="codex", projects_root=projects)
+        assert "the-claude-one" not in str(exc.value)
+        assert "CODEX_THREAD_ID" in str(exc.value)
+        assert "--session" in str(exc.value)
+
+    def test_a_non_claude_agent_never_scans_claudes_transcripts(self, tmp_path, monkeypatch):
+        # There is no fallback for codex, and claude's directory is not one.
+        monkeypatch.delenv("CODEX_THREAD_ID", raising=False)
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "a-claude-session")
+        with pytest.raises(NoSessionFound) as exc:
+            current_session_id("/w/proj", agent="codex", projects_root=projects)
+        assert "a-claude-session" not in str(exc.value)
+
+    def test_an_agent_with_no_known_variable_refuses_clearly(self, tmp_path, monkeypatch):
+        # kimi exports nothing. Say so and name the flag rather than guessing.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "the-claude-one")
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "a-claude-session")
+        with pytest.raises(NoSessionFound) as exc:
+            current_session_id("/w/proj", agent="kimi", projects_root=projects)
+        assert "kimi" in str(exc.value)
+        assert "the-claude-one" not in str(exc.value)
+        assert "--session" in str(exc.value)
+
+    @pytest.mark.parametrize("bogus", ["../../etc/passwd", "a/b", "..", "a\\b"])
+    def test_an_id_that_is_not_a_path_component_is_refused(self, tmp_path, monkeypatch, bogus):
+        # The value becomes a filename under ~/.scad/notes. A traversal in the
+        # environment must not become a write outside the store.
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", bogus)
+        with pytest.raises(NoteTargetError) as exc:
+            current_session_id("/w/proj", projects_root=tmp_path / "projects")
+        assert "CLAUDE_CODE_SESSION_ID" in str(exc.value)
+
+    def test_the_map_is_one_named_constant(self):
+        assert SESSION_ID_ENV["claude"] == "CLAUDE_CODE_SESSION_ID"
+        assert SESSION_ID_ENV["codex"] == "CODEX_THREAD_ID"

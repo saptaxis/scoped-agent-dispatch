@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 
 import pytest
 import click
@@ -2105,6 +2106,42 @@ class TestSessionNote:
         assert result.exit_code != 0
         assert "--session" in result.output
 
+    def test_current_takes_the_session_id_the_agent_exported(
+            self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "EXPORTED")
+        result = runner.invoke(main, ["session", "note", "--current"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code == 0, result.output
+        assert (scad_home / "notes" / "claude" / "EXPORTED.jsonl").is_file()
+
+    def test_current_resolves_against_the_agent_that_was_asked_for(
+            self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        monkeypatch.setenv("CODEX_THREAD_ID", "CX7")
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "CLAUDE-PARENT")
+        result = runner.invoke(main, ["session", "note", "--current", "--agent", "codex"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code == 0, result.output
+        assert (scad_home / "notes" / "codex" / "CX7.jsonl").is_file()
+        assert not (scad_home / "notes" / "codex" / "CLAUDE-PARENT.jsonl").exists()
+
+    def test_current_for_codex_refuses_rather_than_using_an_inherited_claude_id(
+            self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        work = tmp_path / "work"
+        work.mkdir()
+        self._projects(tmp_path, monkeypatch, work, session_id="CLAUDE-PARENT")
+        monkeypatch.chdir(work)
+        monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "CLAUDE-PARENT")
+        result = runner.invoke(main, ["session", "note", "--current", "--agent", "codex"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code != 0
+        assert "CODEX_THREAD_ID" in result.output
+        assert not (scad_home / "notes" / "codex").exists()
+
     def test_neither_target_is_refused(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         result = runner.invoke(main, ["session", "note"], input=json.dumps(self.NOTE))
@@ -2188,18 +2225,49 @@ class TestSessionNotes:
         assert "notes: 1" in result.output
 
 
-class TestRememberCommandIsAThinCaller:
+class TestRememberSkillIsAThinCaller:
     """`/remember` produces the record; `scad session note` decides where it goes.
 
     The split is the point. The old command reimplemented project resolution in
     prose — basename of the git root, fall back to the cwd — which meant every
     other agent that wanted to capture had to reimplement it again, and a change
     to what a project means would have had to be made in two languages.
+
+    It is a SKILL now, not a Claude Code command. A command reached exactly one
+    harness; the shared convention reaches every agent, which is the whole point
+    of a capture verb that codex and pi are also supposed to call.
     """
+
+    ROOT = Path(__file__).resolve().parent.parent
 
     @property
     def text(self):
-        return (Path(__file__).resolve().parent.parent / "commands" / "remember.md").read_text()
+        return (self.ROOT / "skills" / "remember" / "SKILL.md").read_text()
+
+    def test_the_claude_only_command_is_gone(self):
+        # Leaving it would re-create the duplication the migration removes: the
+        # same verb offered twice, from a plugin and from the skills directory.
+        assert not (self.ROOT / "commands" / "remember.md").exists()
+
+    def test_its_name_preserves_the_slash_verb(self):
+        # A skill's frontmatter `name` IS its invocation — `/remember` in Claude,
+        # `$remember` in codex. Renaming the directory or the field changes what
+        # the human types, so both are pinned.
+        assert (self.ROOT / "skills" / "remember" / "SKILL.md").exists()
+        assert re.search(r"^name:\s*remember\s*$", self.text, re.M)
+
+    def test_it_carries_no_command_only_syntax(self):
+        # $ARGUMENTS and argument-hint are slash-command features with no meaning
+        # in a SKILL.md; left in place they would read as literal text to every
+        # agent that is not Claude Code.
+        assert "$ARGUMENTS" not in self.text
+        assert "argument-hint" not in self.text
+
+    def test_it_has_no_path_that_breaks_once_installed(self):
+        # Skills are COPIED into ~/.agents/skills, so a relative path escaping
+        # the repo resolves to nothing there — and fails silently, as a dead
+        # markdown link rather than an error.
+        assert "../" not in self.text
 
     def test_it_pipes_to_the_cli(self):
         assert "scad session note --current" in self.text

@@ -7,7 +7,7 @@ set -euo pipefail
 #   ./install.sh                    # install from repo checkout
 #   ./install.sh --home ~/my-scad   # custom SCAD_HOME
 #   ./install.sh --dry-run          # show what would happen
-#   ./install.sh --no-plugin         # skip Claude Code plugin registration
+#   ./install.sh --no-skills         # skip installing skills into agents
 #   ./install.sh --no-retention      # never touch cleanupPeriodDays
 #   ./install.sh --yes               # accept prompts (scripted installs)
 #   ./install.sh --no-completions    # skip shell completion setup
@@ -17,9 +17,16 @@ set -euo pipefail
 # Assumes: Python 3.11+.
 # Docker provider: Linux — verifies a reachable dockerd. macOS — installs Colima
 # via Homebrew if missing and creates the dedicated `scad` profile (--no-vm skips).
-# Creates a venv, installs scad, symlinks to ~/.local/bin,
-# sets up shell completions, and registers the Claude Code plugin.
-# Auto-detects: shell type (zsh/bash), Claude Code presence.
+# Creates a venv, installs scad, symlinks to ~/.local/bin, sets up shell
+# completions, and installs scad's skills into every agent on the machine.
+#
+# Skills, not a plugin. Earlier versions registered a Claude Code plugin, which
+# reached exactly one agent and had to be re-registered whenever Claude Code
+# rewrote its plugin file. Skills use the shared convention instead — one
+# SKILL.md per directory, read by Claude, Codex, Kimi and the rest — so the same
+# files serve every agent and there is no registration to keep alive.
+#
+# Auto-detects: shell type (zsh/bash), which agents are installed.
 # Skips gracefully when optional deps are missing.
 
 SCAD_HOME_DEFAULT="$HOME/.scad"
@@ -30,7 +37,7 @@ ASSUME_YES="${ASSUME_YES:-no}"
 LOCAL_BIN="$HOME/.local/bin"
 DRY_RUN=false
 UNINSTALL=false
-SKIP_PLUGIN=false
+SKIP_SKILLS=false
 SKIP_COMPLETIONS=false
 SKIP_VM=false
 REPO_DIR=""
@@ -60,8 +67,15 @@ while [[ $# -gt 0 ]]; do
             ASSUME_YES="yes"
             shift
             ;;
+        --no-skills)
+            SKIP_SKILLS=true
+            shift
+            ;;
         --no-plugin)
-            SKIP_PLUGIN=true
+            # Kept working, undocumented. It named the mechanism that shipped
+            # skills, and that mechanism changed; failing on it would break
+            # scripted installs for a rename that is not theirs to care about.
+            SKIP_SKILLS=true
             shift
             ;;
         --no-completions)
@@ -74,7 +88,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: install.sh [--home PATH] [--dry-run] [--uninstall] [--no-plugin] [--no-completions] [--no-vm] [--no-retention] [-y|--yes]"
+            echo "Usage: install.sh [--home PATH] [--dry-run] [--uninstall] [--no-skills] [--no-completions] [--no-vm] [--no-retention] [-y|--yes]"
             exit 1
             ;;
     esac
@@ -94,7 +108,8 @@ if $UNINSTALL; then
     echo "  Symlink:  $LOCAL_BIN/scad"
     echo "  Venv:     $VENV_DIR"
     echo "  Shell:    scad lines from ~/.zshrc"
-    echo "  Plugin:   Claude Code plugin registration"
+    echo "  Skills:   scad's skills from ~/.agents/skills and ~/.claude/skills"
+    echo "  Plugin:   any leftover Claude Code plugin registration"
     echo ""
     echo "[scad] Will NOT remove:"
     echo "  SCAD_HOME ($SCAD_HOME) — your configs, runs, and data"
@@ -131,7 +146,36 @@ if $UNINSTALL; then
         fi
     done
 
-    # Deregister Claude Code plugin
+    # Remove installed skills. Only scad's own are touched: the names are read
+    # from the checkout rather than assumed, and only entries that resolve back
+    # into this repo (or are plain copies of a skill we ship) are removed --
+    # these directories are shared with every other skill on the machine, so a
+    # blanket delete would take someone else's work with it.
+    SKILLS_SRC=""
+    if [[ -n "$REPO_DIR" ]] && [[ -d "$REPO_DIR/skills" ]]; then
+        SKILLS_SRC="$REPO_DIR"
+    fi
+    if [[ -n "$SKILLS_SRC" ]]; then
+        REMOVED=0
+        for TARGET in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
+            [[ -d "$TARGET" ]] || continue
+            for SKILL_DIR in "$SKILLS_SRC"/skills/*/; do
+                [[ -d "$SKILL_DIR" ]] || continue
+                NAME="$(basename "$SKILL_DIR")"
+                if [[ -e "$TARGET/$NAME" ]] || [[ -L "$TARGET/$NAME" ]]; then
+                    rm -rf "$TARGET/$NAME"
+                    REMOVED=$((REMOVED + 1))
+                fi
+            done
+            rmdir "$TARGET" 2>/dev/null || true   # only if we left it empty
+        done
+        echo "[scad] Removed $REMOVED installed skill(s)"
+    else
+        echo "[scad] Skipped skill removal (skills/ not found — remove by hand from ~/.agents/skills)"
+    fi
+
+    # Deregister the Claude Code plugin. Kept for machines installed before
+    # skills replaced it; a no-op on anything newer.
     if [[ -d "$HOME/.claude" ]]; then
         if [[ -d "$VENV_DIR" ]]; then
             "$VENV_DIR/bin/python" -c "
@@ -202,12 +246,14 @@ if $DRY_RUN; then
     else
         echo "[scad] No .zshrc or .bashrc found — would skip shell completions"
     fi
-    if $SKIP_PLUGIN; then
-        echo "[scad] Skipping plugin registration (--no-plugin)"
-    elif command -v claude &>/dev/null; then
-        echo "[scad] Would register: Claude Code plugin"
+    if $SKIP_SKILLS; then
+        echo "[scad] Skipping skill installation (--no-skills)"
+    elif command -v npx &>/dev/null; then
+        echo "[scad] Would install skills into every detected agent (npx skills add)"
+        echo "[scad] Would remove any old Claude Code plugin registration"
     else
-        echo "[scad] Claude Code not found — would skip plugin registration"
+        echo "[scad] npx not found — would symlink skills into ~/.agents/skills and ~/.claude/skills"
+        echo "[scad] Would remove any old Claude Code plugin registration"
     fi
     exit 0
 fi
@@ -377,45 +423,67 @@ else
     fi
 fi
 
-# --- Step 5: Register Claude Code plugin (auto-detect, respect --no-plugin) ---
-if $SKIP_PLUGIN; then
-    echo "[scad] Skipping plugin registration (--no-plugin)"
-elif ! command -v claude &>/dev/null; then
-    echo "[scad] Claude Code not found — skipping plugin registration"
-    echo "[scad] Install Claude Code, then re-run: ./install.sh"
+# --- Step 5: Install skills into every agent (respect --no-skills) ---
+if $SKIP_SKILLS; then
+    echo "[scad] Skipping skill installation (--no-skills)"
 else
-    PLUGIN_DIR=""
-    # The plugin ROOT — the directory that contains .claude-plugin/, alongside
-    # commands/ and skills/. That root is what gets declared as the marketplace
-    # source, and it is where marketplace.json lives, so name it directly rather
-    # than the manifest subdirectory one level down.
-    if [[ -n "$REPO_DIR" ]] && [[ -d "$REPO_DIR/.claude-plugin" ]]; then
-        PLUGIN_DIR="$REPO_DIR"
+    # Where the SKILL.md directories live: the checkout when installing from a
+    # repo, otherwise alongside the installed package.
+    SKILLS_SRC=""
+    if [[ -n "$REPO_DIR" ]] && [[ -d "$REPO_DIR/skills" ]]; then
+        SKILLS_SRC="$REPO_DIR"
     elif [[ -d "$VENV_DIR/lib" ]]; then
-        # Find installed package location for non-editable installs
         SITE_PKG=$("$VENV_DIR/bin/python" -c "import scad; print(scad.__file__)" 2>/dev/null | xargs dirname)
-        if [[ -n "$SITE_PKG" ]] && [[ -d "$(dirname "$SITE_PKG")/.claude-plugin" ]]; then
-            PLUGIN_DIR="$(dirname "$SITE_PKG")"
+        if [[ -n "$SITE_PKG" ]] && [[ -d "$(dirname "$SITE_PKG")/skills" ]]; then
+            SKILLS_SRC="$(dirname "$SITE_PKG")"
         fi
     fi
 
-    if [[ -n "$PLUGIN_DIR" ]] && [[ -d "$HOME/.claude" ]]; then
+    # Migration, and it must run BEFORE the install. Earlier versions registered
+    # a Claude Code plugin that supplied these same skills. Plugin skills and
+    # ~/.claude/skills entries STACK rather than override -- the plugin's arrive
+    # namespaced (`scad:scad`), the directory's arrive bare (`scad`) -- so a
+    # machine with both offers every skill twice, with identical descriptions
+    # competing for the same trigger. Removing the plugin is what makes the
+    # skills install safe, not merely tidy.
+    if [[ -d "$HOME/.claude" ]] && [[ -x "$VENV_DIR/bin/python" ]]; then
         "$VENV_DIR/bin/python" -c "
-from scad.install import register_claude_plugin
 from pathlib import Path
-result = register_claude_plugin(
-    claude_home=Path('$HOME/.claude'),
-    plugin_path=Path('$PLUGIN_DIR')
-)
-if result:
-    print('[scad] Registered Claude Code plugin')
-else:
-    print('[scad] Skipped plugin registration (no ~/.claude)')
-"
-    elif [[ -z "$PLUGIN_DIR" ]]; then
-        echo "[scad] Skipped plugin registration (plugin.json not found)"
+try:
+    from scad.install import deregister_claude_plugin
+except ImportError:
+    raise SystemExit(0)
+if deregister_claude_plugin(claude_home=Path('$HOME/.claude')):
+    print('[scad] Removed the old Claude Code plugin registration (skills replace it)')
+" 2>/dev/null || true
+    fi
+
+    if [[ -z "$SKILLS_SRC" ]]; then
+        echo "[scad] Skipped skill installation (skills/ not found)"
+    elif command -v npx &>/dev/null; then
+        # The skills CLI owns the per-agent path table -- ~/.agents/skills for
+        # Codex and Kimi, ~/.claude/skills for Claude, and dozens more. Letting
+        # it route is the whole point: scad does not want to track where every
+        # agent keeps its skills, and getting one wrong fails silently, with the
+        # files present but never loaded.
+        echo "[scad] Installing skills into detected agents..."
+        npx --yes skills@latest add "$SKILLS_SRC" -g -a '*' -y \
+            || echo "[scad] Warning: skill installation failed — run manually: npx skills add $SKILLS_SRC -g -a '*'"
     else
-        echo "[scad] Skipped plugin registration (no ~/.claude directory)"
+        # No npx. Fall back to the two directories that were verified by probe
+        # to be read directly: ~/.agents/skills (Codex, Kimi, and the shared
+        # convention) and ~/.claude/skills (Claude, which does NOT read the
+        # shared one). Symlinks, so edits to the checkout take effect with no
+        # reinstall -- which the skills CLI itself does not do, as it copies.
+        echo "[scad] npx not found — symlinking skills into the standard directories"
+        for TARGET in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
+            mkdir -p "$TARGET"
+            for SKILL_DIR in "$SKILLS_SRC"/skills/*/; do
+                [[ -d "$SKILL_DIR" ]] || continue
+                ln -sfn "${SKILL_DIR%/}" "$TARGET/$(basename "$SKILL_DIR")"
+            done
+        done
+        echo "[scad] Linked $(find "$SKILLS_SRC/skills" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') skills"
     fi
 fi
 

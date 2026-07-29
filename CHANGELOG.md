@@ -5,6 +5,9 @@
 Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-repo pip install.
 
 ### Added
+- Skills install into **every** agent, not just Claude — `install.sh` now calls `npx skills add -g -a '*'`, which routes to `~/.agents/skills` (Codex, Kimi, and the shared convention) and `~/.claude/skills` (Claude, which does not read the shared one). Falls back to symlinking those two directories when node is absent. `--no-skills` opts out; `--no-plugin` still works, undocumented
+- `/remember` is a skill (`skills/remember/SKILL.md`), not a Claude Code command. The frontmatter `name` maps to the invocation, so `/remember` is unchanged — and it now works in Codex (`$remember`) and anything else following the convention
+- `scad view --refresh` — archive and index new traces before rendering. Opt-in, so plain `scad view` stays the read-only renderer its spec promises
 - `scad run start|stop|clean|attach|info|inject|jobs|logs|send|refresh` — the container verbs, renamed off `session`. A run hosts many jobs; each job produces one agent session, so the two can never share a noun
 - `scad run ls` — the fleet view, renamed from `scad status`. `scad session` now means agent sessions only (`ls`, `show`, `read`); the old container paths and `scad status` remain as **hidden aliases** — working, absent from `--help`
 - Job state can create a session row — a job whose transcript and `history.jsonl` line are both gone is now indexed as `grade='skeleton'`, `source='claude-jobstate'`, carrying its human name
@@ -22,9 +25,14 @@ Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-re
 - `harvest --merge` / `finish --merge` — fast-forward-only merge of fetched branches per repo
 
 ### Changed
+- **scad is no longer a Claude Code plugin.** `plugin.json`, `marketplace.json` and `register_claude_plugin()` are gone; skills reach every agent instead of one. The plugin never installed the binary — `install.sh` always did that — so nothing moves but distribution. Install *deregisters* any existing plugin first: plugin skills and directory skills **stack** rather than override, so a machine carrying both offered every skill twice under two names
+- `scad session note --current` resolves the session from the id the agent exports (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) rather than by scanning directories and comparing mtimes — exact instead of inferred, and it settles the case of several sessions sharing one cwd by removing the ambiguity rather than arbitrating it. Selected by `--agent`; the cwd scan remains a fallback
 - `gpu: true` now errors on macOS — no GPU passthrough into a Lima VM
 
 ### Fixed
+- `--current` no longer files a note against another agent's session. Environment variables are inherited, so codex or kimi launched from a Claude session sees `CLAUDE_CODE_SESSION_ID`; resolution now refuses when the requested agent's own variable is absent instead of silently using the parent's id — wrong attribution in the one tier that can never be re-derived
+- Cumulative counters (`n_interrupts`, `n_tool_denials`, `n_errors`) survive an incremental reindex. They were overwritten with the tail's counts, so a session that was interrupted and then grew quietly reported zero; the values were recoverable only while raw survived
+- The test suite no longer depends on the developer's ambient git config — 17 tests failed on any machine with no global `user.email`
 - `install.sh --uninstall` on macOS — shell-config cleanup used GNU-only `sed -i "/x/,+2d"`, which BSD sed silently ignored; rewritten with portable awk and now cleans `~/.bashrc` too
 - macOS container mounts — `/etc/localtime` is no longer bind-mounted (it resolves outside `$HOME` and is invisible in the VM; `TZ` already covers it), and `~/.ssh` is staged through `/mnt/host-ssh` so the entrypoint can restore the 0600 modes OpenSSH requires
 - Submodule fetch — create `scad-*` branch inside submodules, fetch detached submodule HEAD, fetch host submodule objects into container clones, surface fetch errors

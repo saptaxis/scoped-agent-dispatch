@@ -2034,7 +2034,7 @@ def session_note(session_id, current, agent):
 
     if current:
         try:
-            session_id = current_session_id()
+            session_id = current_session_id(agent=agent)
         except NoteTargetError as exc:
             raise click.ClickException(str(exc)) from exc
 

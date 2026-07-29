@@ -1,15 +1,19 @@
 ---
-description: Capture what was just worked out — an intent-driven summary appended to this session's note file.
-argument-hint: "[optional angle/guidance]"
+name: remember
+description: >
+  Capture what was just worked out — an intent-driven summary appended to
+  this session's note file. Use when the user says remember, capture this,
+  note this down, or wants the current span of work written to the durable
+  notes store. Accepts an optional angle or guidance to narrow the capture.
 ---
 
-You are running the `/remember` capture command **inside the current session**. You already hold the conversation context — **use it directly. Do NOT re-read the transcript, re-open files, or re-ingest logs.** This must be cheap: one in-context generation plus one append.
+You are running the capture skill **inside the current session**. You already hold the conversation context — **use it directly. Do NOT re-read the transcript, re-open files, or re-ingest logs.** This must be cheap: one in-context generation plus one append.
 
-Optional guidance from the user (may be empty): **$ARGUMENTS**
+Optional guidance from the user arrives as this skill's arguments. It may be empty — if so, capture the span on your own reading of it.
 
 ## What to capture
 
-Summarize what has been worked out **since the last capture** in this session. If guidance was given above, use it as the *angle* — the human supplies the angle, you hold the material.
+Summarize what has been worked out **since the last capture** in this session. If guidance was given, use it as the *angle* — the human supplies the angle, you hold the material.
 
 ## Discipline — anti-inflation (important)
 
@@ -48,14 +52,16 @@ If you do not know the session id, skip this and use `relation: "shift"` — a w
 cat > /tmp/remember.json <<'EOF'
 { ...the record... }
 EOF
-scad session note --current < /tmp/remember.json
+scad session note --current --agent <you> < /tmp/remember.json
 ```
 
-`--current` resolves the session whose trace is being written in this cwd. If it reports that several sessions are live, re-run with `--session <id>` naming this one.
+**Name yourself in `--agent`** — `claude`, `codex`, and so on. `--current` reads the session id your harness exports (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`), and it reads **only** the one belonging to the agent you name. That matters because these variables are inherited: an agent launched from another agent's session carries the parent's id in its environment, and a note filed against the parent is filed against the wrong conversation. Naming yourself is what prevents it. Omitting the flag assumes `claude`.
+
+If `--current` reports it cannot resolve your session — your harness exports no id, as kimi does not — re-run with `--session <id>` naming this session. Do not guess an id, and do not let it fall through to another agent's.
 
 **4. Confirm briefly:** repeat the one line `scad` printed. Do **not** print the full record — you just wrote it; echoing it back doubles its cost in context for no information.
 
-## What this command does NOT do
+## What this skill does NOT do
 
 Everything about *where the note goes* belongs to `scad session note`, not here:
 
@@ -63,4 +69,4 @@ Everything about *where the note goes* belongs to `scad session note`, not here:
 - Do not pick or create a file. The store is `~/.scad/notes/<agent>/<session-uuid>.jsonl`, one file per session, and appending is the only write.
 - Do not append with `>>` yourself. The CLI validates the record, fills the defaults, and is the same contract codex and pi call.
 
-References: [`capture-format.md`](../../../traitful-docs/docs/projects/traitful-workflow-ecosystem/specs/capture-format.md) for the record; [`session-index.md`](../../../traitful-docs/docs/projects/scoped-agent-dispatch/specs/session-index.md) §Notes for the addressing.
+References (in the traitful-docs repo, not shipped with this skill): the `capture-format` spec for the record; the `session-index` spec, §Notes, for the addressing.

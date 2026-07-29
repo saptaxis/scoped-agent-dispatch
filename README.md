@@ -70,9 +70,16 @@ scad first runs. It **asks** — `~/.claude/settings.json` is Claude Code's file
 and it leaves any value you have already set alone, in either direction. `--no-retention`
 never asks; `--yes` accepts without prompting, for scripted installs.
 
-Install also registers scad as a Claude Code plugin via its own marketplace, so `/remember`
-is available immediately and survives the official-plugin updates that rewrite
-`installed_plugins.json`.
+Install also puts scad's skills where every agent on the machine will find them — `/remember`
+and the rest are available immediately in Claude, Codex, Kimi and anything else following the
+shared skills convention. It uses [`npx skills`](https://github.com/vercel-labs/skills) when
+node is present, because that tool owns the per-agent path table and a wrong path fails
+silently, with files on disk that never load; without node it symlinks into `~/.agents/skills`
+and `~/.claude/skills` directly.
+
+Earlier versions registered a Claude Code plugin instead. Install removes that registration
+if it finds one — the two stack rather than override, so a machine carrying both would offer
+every skill twice.
 
 **Linux** — needs a running Docker daemon. `install.sh` verifies it is reachable and errors with setup guidance if not.
 
@@ -125,12 +132,12 @@ Options:
 ```bash
 # Remote installer
 curl -fsSL ... | bash -s -- --prefix ~/my-scad-src  # custom clone location (default: ~/.scad/src)
-curl -fsSL ... | bash -s -- --no-plugin              # skip Claude Code plugin
+curl -fsSL ... | bash -s -- --no-skills              # do not install skills into agents
 
 # Local installer (from repo checkout)
 ./install.sh --home ~/my-scad     # custom SCAD_HOME (default: ~/.scad)
 ./install.sh --dry-run            # preview without making changes
-./install.sh --no-plugin          # skip Claude Code plugin registration
+./install.sh --no-skills          # do not install skills into agents
 ./install.sh --no-completions     # skip shell completion setup
 ./install.sh --uninstall          # remove scad (preserves your configs + data)
 ```
@@ -399,7 +406,7 @@ them the one tier here that can never be re-derived from anything else, so they 
 as plain files and the database only indexes them.
 
 ```bash
-/remember                       # from inside any Claude session
+/remember                       # from inside any agent session ($remember in Codex)
 /remember focus on the tradeoff # optional angle — you supply it, the session has the material
 ```
 
