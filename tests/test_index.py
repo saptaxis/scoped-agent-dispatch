@@ -207,6 +207,10 @@ class TestReindex:
     def test_indexes_main_and_subagents_as_separate_rows(self, tmp_path, monkeypatch):
         arc = tmp_path / "arc"
         monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        # reindex is a function of TWO roots, not one: the archive it parses and
+        # the notes store it indexes. Isolating only the archive left this
+        # asserting over whatever the developer had typed into /remember.
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
         arc_write(arc, "claude/projects/-repo/S1/subagents/agent-sub1.jsonl", SUB)
 
@@ -293,6 +297,7 @@ class TestRebuildSafety:
 
     def test_force_overrides_the_refusal(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))   # see TestReindex
         conn = connect(tmp_path / "i.sqlite")
         store(conn, rec(id="GONE"))
         conn.execute("UPDATE sessions SET raw_present = 0 WHERE id = 'GONE'")
