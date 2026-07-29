@@ -9,6 +9,7 @@ import sys
 import tempfile
 import threading
 import time
+import webbrowser
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
@@ -86,6 +87,7 @@ from scad.index import (
     session_row,
     session_turns,
 )
+from scad.live import running_run_ids, tmux_panes
 from scad.notes import (
     NoteTargetError,
     append_note,
@@ -93,6 +95,7 @@ from scad.notes import (
     note_path,
     read_note_file,
 )
+from scad.view import gather, render, write_view
 
 
 def _relative_time(iso_str: str) -> str:
@@ -2218,3 +2221,25 @@ for _verb in ("start", "stop", "clean", "attach", "info",
 
 _hidden_alias(main, run.commands["ls"], "status")
 del _verb
+
+
+@main.command()
+@click.option("--days", default=14, help="How far back the waiting list looks.")
+@click.option("--output", default=None, type=click.Path(), help="Write the page here.")
+@click.option("--no-open", is_flag=True, help="Write the page without opening a browser.")
+def view(days, output, no_open):
+    """Render the session index to a page and open it."""
+    from pathlib import Path as _Path
+
+    from scad.config import get_scad_home
+
+    conn = index_connect()
+    data = gather(conn, tmux_panes(), running_run_ids(), days=days)
+    target = _Path(output) if output else get_scad_home() / "view.html"
+    write_view(target, render(data))
+
+    click.echo(f"[scad] {target}")
+    click.echo(f"[scad]   waiting: {len(data['waiting'])}  live: {len(data['live'])}  "
+               f"total: {len(data['all'])}")
+    if not no_open:
+        webbrowser.open(target.as_uri())

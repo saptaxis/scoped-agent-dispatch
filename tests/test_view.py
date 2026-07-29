@@ -146,3 +146,84 @@ class TestGather:
         _store(conn, "A", "awaiting-user")
         _store(conn, "B", "tool-result-last", kind="subagent")
         assert len(gather(conn, [], set())["all"]) == 2
+
+
+import json as _json
+
+from scad.view import render
+
+
+class TestRender:
+    def _data(self):
+        return {"waiting": [{"id": "S1", "name": None, "project": "proj", "cwd": "/repo",
+                             "title": "a title", "outcome": "awaiting-user", "needs": None,
+                             "harness_state": None, "agent": "claude", "kind": "main",
+                             "n_turns": 3, "started": 1, "ended": 2, "grade": "full",
+                             "scad_run_id": None, "last_text": "where we left off",
+                             "reentry": {"kind": "resume",
+                                         "command": "cd /repo && claude --resume S1", "note": ""}}],
+                "live": [], "all": [], "generated": 1785000000000}
+
+    def test_is_one_self_contained_document(self):
+        html = render(self._data())
+        assert html.startswith("<!doctype html>")
+        assert "</html>" in html
+        # No external anything — the page must work with no network.
+        for bad in ("http://", "https://", "<script src", "<link rel=\"stylesheet\""):
+            assert bad not in html
+
+    def test_embeds_the_data_as_parseable_json(self):
+        html = render(self._data())
+        start = html.index("const DATA = ") + len("const DATA = ")
+        end = html.index(";\n", start)
+        assert _json.loads(html[start:end])["waiting"][0]["id"] == "S1"
+
+    def test_escapes_html_in_user_text(self):
+        data = self._data()
+        data["waiting"][0]["title"] = "<script>alert(1)</script>"
+        html = render(data)
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+    def test_survives_apostrophes_and_non_ascii(self):
+        """Real needs text contains both: "drop Hincapié & O'Leary … PDF"."""
+        data = self._data()
+        data["waiting"][0]["needs"] = "drop Hincapié & O'Leary 2026 bioRxiv PDF"
+        html = render(data)
+        assert "Hincapi" in html
+        start = html.index("const DATA = ") + len("const DATA = ")
+        end = html.index(";\n", start)
+        assert "O'Leary" in _json.loads(html[start:end])["waiting"][0]["needs"]
+
+    def test_shows_the_reentry_command(self):
+        assert "claude --resume S1" in render(self._data())
+
+    def test_the_copy_handler_attribute_is_quoted(self):
+        """Unquoted attributes containing parens are tolerated by browsers but wrong."""
+        html = render(self._data())
+        assert 'onclick="copy(this)"' in html
+        assert "onclick=copy(this)" not in html
+
+    def test_empty_data_still_renders(self):
+        html = render({"waiting": [], "live": [], "all": [], "generated": 1})
+        assert "</html>" in html
+        assert "Nothing waiting" in html
+
+
+class TestModuleSeparation:
+    """Discovery shells out; rendering queries. Neither does the other's job.
+
+    Promised by the plan's global constraints, which left it unwritten.
+    """
+
+    def test_live_does_not_depend_on_the_index(self):
+        import scad.live
+
+        src = open(scad.live.__file__).read()
+        assert "scad.index" not in src
+
+    def test_view_does_not_shell_out(self):
+        import scad.view
+
+        src = open(scad.view.__file__).read()
+        assert "subprocess" not in src

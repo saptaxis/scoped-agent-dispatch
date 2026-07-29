@@ -2235,3 +2235,28 @@ class TestRememberCommandIsAThinCaller:
 
     def test_the_fields_the_cli_fills_are_marked_as_not_the_callers_job(self):
         assert "Do not set them." in self.text
+
+
+class TestViewCommand:
+    def test_writes_a_page_and_reports_the_path(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        result = runner.invoke(main, ["view", "--no-open"])
+        assert result.exit_code == 0
+        out = tmp_path / ".scad" / "view.html"
+        assert out.is_file()
+        assert "</html>" in out.read_text()
+        assert str(out) in result.output
+
+    def test_honours_an_explicit_output_path(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        target = tmp_path / "elsewhere.html"
+        result = runner.invoke(main, ["view", "--no-open", "--output", str(target)])
+        assert result.exit_code == 0
+        assert target.is_file()
+
+    def test_no_open_does_not_launch_a_browser(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        with patch("scad.cli.webbrowser.open") as opener:
+            runner.invoke(main, ["view", "--no-open"])
+        opener.assert_not_called()
