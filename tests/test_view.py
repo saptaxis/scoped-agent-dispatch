@@ -522,3 +522,42 @@ class TestPresentation:
         html = self._full(tmp_path)
         for bad in ("http://", "https://", "<script src", '<link rel="stylesheet"'):
             assert bad not in html
+
+
+class TestHoverTitles:
+    def test_a_command_chip_carries_its_full_text(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        long_cwd = "/Users/vsr/Library/CloudStorage/Dropbox/code/a-very-long-project-name-here"
+        _store(conn, "S1", "awaiting-user", cwd=long_cwd)
+        html = render(gather(conn, [], set()))
+        assert f'title="cd {long_cwd} &amp;&amp; claude --resume S1"' in html
+
+    def test_a_truncated_title_keeps_the_original_on_hover(self, tmp_path):
+        """_clip actually removes characters, so without the title the rest of
+        the text would be unrecoverable from the page."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        long_title = "x" * 200
+        conn.execute("UPDATE sessions SET title = ? WHERE id = 'S1'", (long_title,))
+        conn.commit()
+        html = render(gather(conn, [], set()))
+        assert f'title="{long_title}"' in html
+        assert "…" in html
+
+    def test_a_short_title_gets_no_needless_tooltip(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        conn.execute("UPDATE sessions SET title = 'short' WHERE id = 'S1'")
+        conn.commit()
+        assert 'title="short"' not in render(gather(conn, [], set()))
+
+    def test_titles_are_escaped_in_the_attribute(self, tmp_path):
+        """A quote in a title would otherwise break out of the attribute."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        conn.execute("""UPDATE sessions SET title = ? WHERE id = 'S1'""",
+                     ('a "quoted" <b>x</b> ' + "y" * 100,))
+        conn.commit()
+        html = render(gather(conn, [], set()))
+        assert '&quot;quoted&quot;' in html
+        assert '<b>x</b>' not in html

@@ -438,12 +438,12 @@ const label = r => r.name || r.title || r.id.slice(0, 12);
 function rows(list) {{
   if (!list.length) return '<div class="empty">Nothing here.</div>';
   return '<div class="card">' + list.map(r =>
-    '<div class="row"><div class="who"><div class="t">' + esc(label(r)) +
+    '<div class="row"><div class="who"><div class="t" title="' + esc(r.cwd ?? "") + '">' + esc(label(r)) +
     '</div><div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
     '</div></div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
-    '</span>' + (r.reentry.command ? '<code onclick="copy(this)">' + esc(r.reentry.command) +
+    '</span>' + (r.reentry.command ? '<code title="' + esc(r.reentry.command) + '" onclick="copy(this)">' + esc(r.reentry.command) +
     '</code>' : '') + '</div></div>').join('') + '</div>';
 }}
 
@@ -490,11 +490,30 @@ def _ago(ms) -> str:
 
 
 def _chip(text: str, ghost: bool = False) -> str:
-    """A click-to-copy command chip."""
+    """A click-to-copy command chip, with the full text on hover.
+
+    CSS ellipsis only hides the overflow visually — the whole string stays in the
+    DOM, so copy still yields the full command. The title is for reading it
+    without copying, which matters most for the long paths inside `cd …`.
+    """
     if not text:
         return ""
     cls = ' class="ghost"' if ghost else ""
-    return f'<code{cls} onclick="copy(this)">{_html.escape(text)}</code>'
+    safe = _html.escape(text)
+    return f'<code{cls} title="{safe}" onclick="copy(this)">{safe}</code>'
+
+
+def _clip(text: str, n: int) -> str:
+    """Truncate for display but keep the whole thing reachable on hover.
+
+    Unlike the CSS ellipsis on chips, this actually removes characters, so
+    without the title the rest would be unrecoverable from the page.
+    """
+    text = str(text or "")
+    safe = _html.escape(text)
+    if len(text) <= n:
+        return safe
+    return f'<span title="{safe}">{_html.escape(text[:n])}…</span>'
 
 
 def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
@@ -541,7 +560,7 @@ def _grouped_panes_html(groups: list[dict]) -> str:
             rows = []
             for r in w["panes"]:
                 if r.get("likely_id"):
-                    title = e(str(r.get("likely_title") or r["likely_id"][:12])[:70])
+                    title = _clip(r.get("likely_title") or r["likely_id"][:12], 70)
                     hint = f'~{e(r["likely_id"][:8])} · best guess'
                 else:
                     title = '<span class="m">no indexed session here</span>'
@@ -555,8 +574,10 @@ def _grouped_panes_html(groups: list[dict]) -> str:
                     f'{e(r["target"])} · {hint} · {_ago(r.get("last_activity"))}',
                     [_chip(r["goto"]), _chip(resume, ghost=True)],
                 ))
+            cwds = {r.get("cwd") for r in w["panes"] if r.get("cwd")}
+            head_title = f' title="{e(", ".join(sorted(cwds)))}"' if cwds else ""
             out.append(_card(
-                e(w["label"] or w["target"]),
+                f'<span{head_title}>{e(w["label"] or w["target"])}</span>',
                 f'{e(g["session"])} · {e(w["target"])} · {len(w["panes"])} agent'
                 f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}',
                 rows,
@@ -575,12 +596,13 @@ def _waiting_rows_html(rows: list[dict]) -> str:
         if r.get("needs"):
             extra += f'<div class="needs">{e(str(r["needs"]))}</div>'
         if r.get("last_text"):
-            extra += f'<div class="snip">{e(" ".join(str(r["last_text"]).split())[:240])}</div>'
+            flat = " ".join(str(r["last_text"]).split())
+            extra += f'<div class="snip" title="{e(flat)}">{e(flat[:240])}</div>'
         chips = [_chip(_resume_command(r), ghost=True)]
         if r["reentry"]["kind"] == "tmux":
             chips.insert(0, _chip(r["reentry"]["command"]))
         out.append(_row(
-            e(str(r.get("name") or r.get("title") or r["id"][:12])[:70]),
+            _clip(r.get("name") or r.get("title") or r["id"][:12], 70),
             f'{_agent_tag(r.get("agent") or "")} · {e(r.get("project") or "")} · '
             f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}',
             chips, pill=r.get("status", ""), extra=extra,
@@ -600,7 +622,7 @@ def _grouped_closed_html(groups: list[dict]) -> str:
         for r in g["rows"]:
             extra = f'<div class="needs">{e(str(r["needs"]))}</div>' if r.get("needs") else ""
             rows.append(_row(
-                e(str(r.get("name") or r.get("title") or r["id"][:12])[:70]),
+                _clip(r.get("name") or r.get("title") or r["id"][:12], 70),
                 f'{_agent_tag(r.get("agent") or "")} · {r.get("n_turns") or 0} turns · '
                 f'{_ago(r.get("ended"))}',
                 [_chip(_resume_command(r))], extra=extra,
