@@ -580,7 +580,7 @@ def _restart_scad_containers(names: list[str]) -> None:
         click.echo("[scad] Failed to restart these sessions:", err=True)
         for name, exc in failed:
             click.echo(f"[scad]   {name}: {exc}", err=True)
-        click.echo("[scad]   Check them with: scad status", err=True)
+        click.echo("[scad]   Check them with: scad run ls", err=True)
 
 
 def reconcile_vm_mounts(config: "ScadConfig") -> bool:

@@ -2,7 +2,7 @@
 name: scad-plan-functional-test
 description: >
   Use when a plan has been executed and the user wants to confirm features
-  actually landed — after a scad session completes, after merging a feature
+  actually landed — after a scad run completes, after merging a feature
   branch, or when the user says "test the plan", "did everything land",
   "functional test", "check the build", "harvest and test", or asks what a
   plan execution actually produced.
@@ -38,13 +38,13 @@ Functionally test that an implementation plan's tasks actually landed. Not unit 
 
 You need two things:
 - **The plan document** — a markdown file with numbered tasks describing what was built
-- **The code** — a branch, a scad session to harvest, or already-checked-out code
+- **The code** — a branch, a scad run to harvest, or already-checked-out code
 
 Ask the user if either is unclear. Common situations:
 
 | Situation | What to do |
 |-----------|------------|
-| scad session just finished | `scad harvest <run-id>` to fetch branches, then checkout |
+| scad run just finished | `scad harvest <run-id>` to fetch branches, then checkout |
 | Branch already on host | Checkout the branch |
 | Already checked out | Skip straight to install |
 | Plan location unknown | Check the project's docs/plans/ directory |

@@ -14,7 +14,7 @@ Rewrite an implementation plan written for local development to work inside a sc
 
 ## When to Use
 
-- Before dispatching a plan for execution via `scad session start --prompt`
+- Before dispatching a plan for execution via `scad run start --prompt`
 - When a plan references host-specific paths (~/Dropbox/code/..., /home/user/...)
 - When preparing a plan for headless or interactive-with-prompt execution
 

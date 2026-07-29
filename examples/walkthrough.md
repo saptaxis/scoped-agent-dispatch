@@ -11,18 +11,18 @@ Run the demo script first, but stop it before it cleans up (set `PAUSE=999` or C
 ./examples/demo.sh
 ```
 
-Or start a fresh session:
+Or start a fresh run:
 
 ```bash
 scad config add examples/demo.yml   # or your own config
 scad build demo
-scad session start demo
+scad run start demo
 ```
 
 ## Attach to Claude
 
 ```bash
-scad session attach <run-id>
+scad run attach <run-id>
 ```
 
 You're now inside tmux with Claude running. Try:
@@ -32,8 +32,8 @@ You're now inside tmux with Claude running. Try:
 ## Detach and reattach
 
 - `Ctrl+b d` — detach (container keeps running)
-- `scad session status` — verify it's still running
-- `scad session attach <run-id>` — reattach
+- `scad run ls` — verify it's still running
+- `scad run attach <run-id>` — reattach
 
 ## Fetch code back to host
 
@@ -73,6 +73,6 @@ Inside the container:
 ## Clean up
 
 ```bash
-scad session clean <run-id>         # removes container + clones + run dir
+scad run clean <run-id>             # removes container + clones + run dir
 scad config remove demo             # unlinks config (source file preserved)
 ```

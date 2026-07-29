@@ -1891,3 +1891,116 @@ class TestReadAndSearch:
         result = runner.invoke(main, ["search", "zzzznomatch"])
         assert result.exit_code == 0
         assert "no match" in result.output.lower()
+
+
+class TestRunSessionSplit:
+    """v2.1 — the container verbs move to `scad run`; `session` means traces.
+
+    Three levels the code already models: a RUN is the container, a JOB is one
+    agent process inside it, a SESSION is that agent's trace. Only the command
+    group was misnamed, which is what made this mechanical.
+    """
+
+    CONTAINER_VERBS = ("start", "stop", "clean", "attach", "info",
+                       "inject", "jobs", "logs", "send", "refresh")
+    TRACE_VERBS = ("ls", "show", "read")
+
+    def test_container_verbs_live_under_run(self, runner):
+        result = runner.invoke(main, ["run", "--help"])
+        assert result.exit_code == 0
+        for verb in self.CONTAINER_VERBS:
+            assert f"  {verb}" in result.output, f"{verb} missing from `scad run --help`"
+
+    def test_run_ls_replaces_status(self, runner):
+        result = runner.invoke(main, ["run", "--help"])
+        assert "  ls" in result.output
+
+    def test_session_help_offers_only_the_trace_verbs(self, runner):
+        """The whole point of the rename: `scad session` stops being ambiguous."""
+        result = runner.invoke(main, ["session", "--help"])
+        assert result.exit_code == 0
+        listed = {name for name in main.commands["session"].commands
+                  if not main.commands["session"].commands[name].hidden}
+        assert listed == set(self.TRACE_VERBS)
+        for verb in self.CONTAINER_VERBS:
+            assert f"  {verb} " not in result.output
+
+    def test_old_paths_are_hidden_aliases_not_deletions(self, runner):
+        """Muscle memory keeps working; --help stops teaching the old shape.
+
+        Not a deprecation cycle — an advertised alias would preserve exactly the
+        ambiguity the rename removes.
+        """
+        session_group = main.commands["session"]
+        for verb in self.CONTAINER_VERBS:
+            assert verb in session_group.commands, f"scad session {verb} was deleted"
+            assert session_group.commands[verb].hidden is True
+
+    def test_the_alias_and_the_new_path_are_the_same_command(self, runner):
+        run_group = main.commands["run"]
+        session_group = main.commands["session"]
+        for verb in self.CONTAINER_VERBS:
+            assert (session_group.commands[verb].callback
+                    is run_group.commands[verb].callback)
+
+    def test_status_still_works_and_is_hidden(self, runner):
+        assert main.commands["status"].hidden is True
+        assert main.commands["status"].callback is main.commands["run"].commands["ls"].callback
+        top = runner.invoke(main, ["--help"])
+        assert "  status" not in top.output
+        assert "  run " in top.output
+
+    @patch("scad.cli.list_scad_containers")
+    @patch("scad.cli.get_recently_crashed")
+    def test_run_ls_lists_runs(self, mock_crashed, mock_containers, runner):
+        mock_containers.return_value = [
+            {"run_id": "demo-test-Mar03-1200", "config": "demo",
+             "branch": "scad-demo-test-Mar03-1200", "started": "2026-03-03T12:00:00+00:00"},
+        ]
+        mock_crashed.return_value = []
+        result = runner.invoke(main, ["run", "ls"])
+        assert result.exit_code == 0
+        assert "demo-test-Mar03-1200" in result.output
+
+    @patch("scad.cli.get_session_usage", return_value=None)
+    @patch("scad.cli.get_session_info")
+    def test_session_info_alias_still_resolves_a_run_id(self, mock_info, _usage, runner):
+        mock_info.return_value = {"run_id": "demo-test-Mar03-1200", "config": "demo",
+                                  "branch": "b", "container": "running",
+                                  "clones_path": None, "clones": [],
+                                  "claude_sessions": [], "events": []}
+        old = runner.invoke(main, ["session", "info", "demo-test-Mar03-1200"])
+        new = runner.invoke(main, ["run", "info", "demo-test-Mar03-1200"])
+        assert old.exit_code == 0, old.output
+        assert old.output == new.output
+
+
+class TestRenameLeftNoStaleDocs:
+    """~95 references across 9 files. skills/scad/SKILL.md is the critical one:
+    it teaches agents the commands, so a stale copy makes every scad-skill agent
+    call dead verbs."""
+
+    VERBS = ("start", "stop", "clean", "attach", "info",
+             "inject", "jobs", "logs", "send", "refresh")
+
+    def _sources(self):
+        root = Path(__file__).resolve().parent.parent
+        for pattern in ("*.md", "docs/*.md", "skills/**/*.md", "examples/*",
+                        "commands/*.md"):
+            for p in root.glob(pattern):
+                if p.is_file() and p.name != "CHANGELOG.md":
+                    yield p
+
+    def test_no_doc_teaches_a_container_verb_under_session(self):
+        stale = []
+        for path in self._sources():
+            text = path.read_text(errors="ignore")
+            for verb in self.VERBS:
+                if f"scad session {verb}" in text:
+                    stale.append(f"{path.name}: scad session {verb}")
+        assert stale == []
+
+    def test_no_doc_teaches_scad_status(self):
+        stale = [p.name for p in self._sources()
+                 if "scad status" in p.read_text(errors="ignore")]
+        assert stale == []

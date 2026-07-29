@@ -1285,7 +1285,7 @@ def get_all_sessions() -> list[dict]:
     # 2. Scan runs dir for all sessions
     if RUNS_DIR.exists():
         # Connect once for the whole scan rather than once per run dir --
-        # `scad status` on a machine with many old runs used to open (and
+        # `scad run ls` on a machine with many old runs used to open (and
         # ping) a fresh Docker client per directory.
         try:
             client = get_docker_client()

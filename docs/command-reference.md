@@ -12,7 +12,7 @@ A use-case-oriented guide to every `scad` command: what it does, and **when / un
 - **Job** — a Claude process injected into a session. Interactive (a tmux window you can attach to) or headless (`claude -p`, fire-and-forget). One session can hold many jobs.
 - **Code flow** — repos are *cloned* into the container on a scad branch; your host repos are untouched until you explicitly **fetch** the branches back.
 
-Lifecycle in one line: **`config → build → session start → inject → (work) → fetch → clean`.** The composites (`dispatch`, `harvest`, `finish`) bundle these steps.
+Lifecycle in one line: **`config → build → run start → inject → (work) → fetch → clean`.** The composites (`dispatch`, `harvest`, `finish`) bundle these steps.
 
 ---
 
@@ -26,9 +26,9 @@ Lifecycle in one line: **`config → build → session start → inject → (wor
 | …and pull the code back automatically when done | add `--fetch` |
 | Run an implementation plan | `scad dispatch <config> --tag t --plan plan.md` |
 | Run N independent tasks in parallel | `scad batch <config> --tag t --prompt-file prompts.txt` |
-| Add more work to a session that's already running | `scad session inject <run-id> --prompt "..."` |
-| See what's running right now | `scad status` |
-| See what one session/job did | `scad session info <run-id>` / `scad session logs <run-id> --job <id>` |
+| Add more work to a session that's already running | `scad run inject <run-id> --prompt "..."` |
+| See what's running right now | `scad run ls` |
+| See what one session/job did | `scad run info <run-id>` / `scad run logs <run-id> --job <id>` |
 | Get the code back onto my host | `scad code fetch <run-id>` (or `scad harvest`) |
 | Save work and tear the session down | `scad finish <run-id>` |
 | Free up memory when done for the day (macOS) | `scad vm stop` |
@@ -41,11 +41,11 @@ If you're new, start with `dispatch` — it does build + start + inject in one c
 
 | Condition | Linux | macOS |
 |---|---|---|
-| Docker daemon | Native `dockerd` must be running | scad's Colima VM — **auto-started** by `build`/`session start`/`dispatch`/`batch`. You rarely run `scad vm` by hand. |
+| Docker daemon | Native `dockerd` must be running | scad's Colima VM — **auto-started** by `build`/`run start`/`dispatch`/`batch`. You rarely run `scad vm` by hand. |
 | Claude auth | Logged into Claude Code (`claude /login`) | Same — scad reads credentials from the **macOS Keychain** automatically |
 | First run | `install.sh` sets up venv + symlink + completions | `install.sh` additionally installs Colima and creates the `scad` VM |
 
-scad warns when Claude credentials are within ~1 hour of expiring. Use `scad session refresh <run-id>` to push fresh credentials into a long-running session without restarting it.
+scad warns when Claude credentials are within ~1 hour of expiring. Use `scad run refresh <run-id>` to push fresh credentials into a long-running session without restarting it.
 
 ---
 
@@ -69,24 +69,24 @@ These bundle the lifecycle. Reach for these first; drop to `session`/`code` sub-
 
 ---
 
-## `scad session` — container + Claude lifecycle
+## `scad run` — the container run lifecycle
 
 Use these when you want step-by-step control instead of a composite.
 
 | Command | Does | When / conditions |
 |---|---|---|
-| `session start <config> --tag <t>` | build (if needed) + start container, **no work injected** | You want the environment up before deciding what to run. Auto-starts the VM on macOS. `--prompt` to inject immediately, `--headless` (needs `--prompt`), `--branch` to name the branch, `--rebuild` to force a fresh image. |
-| `session inject <run-id> --prompt "..."` | inject a new Claude process, **interactive** | Add work to a running session. `--headless` for fire-and-forget, `--wait` to block (headless only), `--tail` to stream during wait, `--branch` to switch branch first. |
-| `session send <run-id> "text"` | type into a running **interactive** Claude | Reply to Claude mid-conversation without attaching |
-| `session attach <run-id>` | attach to the session's tmux | Watch/drive an interactive job. Detaching returns you to the host shell; the container keeps running. |
-| `session jobs <run-id>` | list jobs in the session with status | "What has this session run?" |
-| `session logs <run-id>` | read the entrypoint/agent log | Setup and lifecycle output. `--job <id>` for one job, `-s/--stream` for Claude's tool activity, `-f/--follow` to tail, `-n` for line count. |
-| `session info <run-id>` | single-session dashboard: clones, Claude session IDs, event log | Drill into one session |
-| `session refresh <run-id>` | push fresh credentials into the container | Long-running session whose Claude auth is nearing expiry (scad warns) |
-| `session stop <run-id>` | stop the container, **preserve** clones/state | Pause a session; restartable state stays on disk. `--all [--yes]` for every running session. |
-| `session clean <run-id>` | **destroy** container + clones + run data | Point of no return. Fetch first (`harvest`) or use `finish` which fetches automatically. `--all [--yes] [--force]`. |
+| `run start <config> --tag <t>` | build (if needed) + start container, **no work injected** | You want the environment up before deciding what to run. Auto-starts the VM on macOS. `--prompt` to inject immediately, `--headless` (needs `--prompt`), `--branch` to name the branch, `--rebuild` to force a fresh image. |
+| `run inject <run-id> --prompt "..."` | inject a new Claude process, **interactive** | Add work to a running session. `--headless` for fire-and-forget, `--wait` to block (headless only), `--tail` to stream during wait, `--branch` to switch branch first. |
+| `run send <run-id> "text"` | type into a running **interactive** Claude | Reply to Claude mid-conversation without attaching |
+| `run attach <run-id>` | attach to the session's tmux | Watch/drive an interactive job. Detaching returns you to the host shell; the container keeps running. |
+| `run jobs <run-id>` | list the run's jobs with their status | "What has this session run?" |
+| `run logs <run-id>` | read the entrypoint/agent log | Setup and lifecycle output. `--job <id>` for one job, `-s/--stream` for Claude's tool activity, `-f/--follow` to tail, `-n` for line count. |
+| `run info <run-id>` | single-session dashboard: clones, Claude session IDs, event log | Drill into one session |
+| `run refresh <run-id>` | push fresh credentials into the container | Long-running session whose Claude auth is nearing expiry (scad warns) |
+| `run stop <run-id>` | stop the container, **preserve** clones/state | Pause a session; restartable state stays on disk. `--all [--yes]` for every running session. |
+| `run clean <run-id>` | **destroy** container + clones + run data | Point of no return. Fetch first (`harvest`) or use `finish` which fetches automatically. `--all [--yes] [--force]`. |
 
-> `scad status` (top-level) is the fleet view — every running session with jobs nested. There is no `scad session list`; use `scad status`.
+> `scad run ls` (top-level) is the fleet view — every running session with jobs nested. `scad session` is now the trace index only (`ls`, `show`, `read`).
 
 ---
 
@@ -119,20 +119,20 @@ The container works on cloned copies. These move code between the clone and your
 
 ---
 
-## `scad build` / `scad status` / `scad gc`
+## `scad build` / `scad run ls` / `scad gc`
 
 | Command | Does | When / conditions |
 |---|---|---|
 | `build <config>` | build/rebuild the Docker image | After creating or changing a config, or changing deps. Composites build automatically; run this to pre-build or force a rebuild. `-v` verbose, `--no-cache` to bust the layer cache. Auto-starts the VM on macOS. |
-| `status` | list running sessions with their jobs (the fleet view) | Day-to-day "what's running?" `--all` for full history (incl. cleaned), `--cost` to add token cost (slow). |
-| `status <config>` | cross-session overview for one project | Aggregate view of a project's sessions. `--cost` for cost. |
+| `run ls` | list running sessions with their jobs (the fleet view) | Day-to-day "what's running?" `--all` for full history (incl. cleaned), `--cost` to add token cost (slow). |
+| `run ls <config>` | cross-session overview for one project | Aggregate view of a project's sessions. `--cost` for cost. |
 | `gc` | find orphaned containers/run-dirs/images (**dry-run**) | Housekeeping after crashes or manual docker meddling. `--force` to actually clean. |
 
 ---
 
 ## `scad vm` — the macOS Docker VM (escape hatch, rarely needed)
 
-On macOS scad runs containers in a dedicated Colima VM it owns (profile `scad`, isolated from any other Docker). **It's auto-managed:** `build`, `session start`, `dispatch`, and `batch` start it if it's down. You only touch `scad vm` for the cases below. On Linux there is no VM — `status`/`info` report the native daemon; `start`/`stop`/`delete` exit with a macOS-only message.
+On macOS scad runs containers in a dedicated Colima VM it owns (profile `scad`, isolated from any other Docker). **It's auto-managed:** `build`, `run start`, `dispatch`, and `batch` start it if it's down. You only touch `scad vm` for the cases below. On Linux there is no VM — `vm status`/`vm info` report the native daemon; `start`/`stop`/`delete` exit with a macOS-only message.
 
 | Command | Does | When / conditions |
 |---|---|---|
@@ -150,9 +150,9 @@ On macOS scad runs containers in a dedicated Colima VM it owns (profile `scad`, 
 
 - **`--wait` is headless-only.** Interactive jobs live in tmux and can't block. Use `--headless --wait` (or just `--wait`, which implies headless).
 - **`--fetch` implies `--wait`.** You can't fetch results from unfinished work.
-- **`session clean` is destructive, no undo.** Fetch first (`harvest`) or use `finish`, which fetches automatically.
-- **Detaching tmux drops you to the host shell.** Expected — the container keeps running. Reattach with `session attach`.
-- **Credentials expire.** scad warns when within ~1h. `session refresh <run-id>` pushes fresh credentials without restarting.
-- **macOS, non-`$HOME` mounts:** paths outside `$HOME` (external drives, `/Volumes/…`, `/data`) aren't visible to the VM by default. At `session start` scad reconciles them and restarts the VM **only when the set changed**. `code add` of such a path mid-session can't hot-add — it warns and offers a restart.
+- **`run clean` is destructive, no undo.** Fetch first (`harvest`) or use `finish`, which fetches automatically.
+- **Detaching tmux drops you to the host shell.** Expected — the container keeps running. Reattach with `run attach`.
+- **Credentials expire.** scad warns when within ~1h. `run refresh <run-id>` pushes fresh credentials without restarting.
+- **macOS, non-`$HOME` mounts:** paths outside `$HOME` (external drives, `/Volumes/…`, `/data`) aren't visible to the VM by default. At `run start` scad reconciles them and restarts the VM **only when the set changed**. `code add` of such a path mid-session can't hot-add — it warns and offers a restart.
 - **macOS, `gpu: true`:** unsupported (no GPU passthrough into the Lima VM) — it errors clearly. GPU stays Linux-only.
 - **First command after boot/`vm stop` is slower** on macOS — it pays a few seconds to start the VM. Everything after is instant until you stop it.

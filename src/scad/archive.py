@@ -2,7 +2,7 @@
 
 Retention settings are a postponement, not a solution: they are per-machine and
 manual, they belong to the agent vendor rather than to us, and they do not cover
-`scad session clean`, which destroys a run's traces outright. This module copies
+`scad run clean`, which destroys a run's traces outright. This module copies
 raw JSONL somewhere nothing deletes it.
 
 Invariants, in order of importance:
@@ -35,11 +35,11 @@ MARKER_TEXT = """\
 This directory holds the only surviving copy of agent session traces.
 
 Agents prune their own transcripts (Claude Code defaults to 30 days), and
-`scad session clean` destroys a run's traces along with its container. Once
+`scad run clean` destroys a run's traces along with its container. Once
 those are gone, the contents of this directory cannot be regenerated from
 anything else on this machine.
 
-`scad gc` and `scad session clean` never touch this directory. Neither should you.
+`scad gc` and `scad run clean` never touch this directory. Neither should you.
 
 Rebuild the session index from here with: scad reindex
 """

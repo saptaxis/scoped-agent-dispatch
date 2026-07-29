@@ -5,6 +5,10 @@
 Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-repo pip install.
 
 ### Added
+- `scad run start|stop|clean|attach|info|inject|jobs|logs|send|refresh` — the container verbs, renamed off `session`. A run hosts many jobs; each job produces one agent session, so the two can never share a noun
+- `scad run ls` — the fleet view, renamed from `scad status`. `scad session` now means agent sessions only (`ls`, `show`, `read`); the old container paths and `scad status` remain as **hidden aliases** — working, absent from `--help`
+- Job state can create a session row — a job whose transcript and `history.jsonl` line are both gone is now indexed as `grade='skeleton'`, `source='claude-jobstate'`, carrying its human name
+- `tool-result-last` outcome — a tool returned and the model never spoke again; 944 of 1458 rows on a real index, previously NULL. Distinct from `in-flight`, which is a call awaiting its result
 - macOS support — scad runs on macOS via a dedicated `scad` Colima VM it owns, isolated from any other Docker. `get_docker_client()` resolves the daemon per-OS (Linux: native; macOS: `~/.colima/scad/docker.sock`); Linux behaviour is unchanged
 - `scad vm start|stop|status|info|delete` — manage the macOS VM; `build`, `session start`, `dispatch`, and `batch` all start it lazily
 - Auto mount-translation on macOS — non-`$HOME` repo and `mounts:` paths are added to the VM's mount list (writable) and the VM restarted, only when the required set changed

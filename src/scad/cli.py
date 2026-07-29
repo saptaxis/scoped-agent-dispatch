@@ -1,5 +1,6 @@
 """CLI entry point."""
 
+import copy
 import json
 import os
 import subprocess
@@ -296,8 +297,24 @@ def where(start):
 
 
 @main.group()
+def run():
+    """Container runs — start, inspect, inject into, tear down.
+
+    Three levels, each with the name the code already uses: a RUN is the
+    container, a JOB is one launched agent process inside it, and a SESSION is
+    that agent's trace. A run hosts many jobs, so `run` and `session` are a
+    genuine one-to-many and cannot share a noun.
+    """
+    pass
+
+
+@main.group()
 def session():
-    """Container + Claude session lifecycle."""
+    """Agent sessions — the indexed traces of what actually ran.
+
+    Every session on the machine, whether scad launched it or merely observed
+    it. For the container lifecycle see `scad run`.
+    """
     pass
 
 
@@ -307,15 +324,15 @@ def code():
     pass
 
 
-@main.command()
+@run.command("ls")
 @click.argument("config_name", required=False, default=None, shell_complete=_complete_config_names)
-@click.option("--all", "show_all", is_flag=True, help="Show full session history.")
+@click.option("--all", "show_all", is_flag=True, help="Show full run history.")
 @click.option("--cost", is_flag=True, help="Include cost data (slow — runs ccusage).")
 def status(config_name: str, show_all: bool, cost: bool):
-    """List sessions, or show project overview for a config.
+    """List runs, or show project overview for a config.
 
-    Without arguments: list running sessions (like session status).
-    With a config name: show cross-session project overview.
+    Without arguments: list running containers.
+    With a config name: show cross-run project overview.
     """
     if config_name:
         # Project overview mode
@@ -477,18 +494,18 @@ def run_agent(
         mode = "headless" if headless else "interactive"
         click.echo(f"[scad] Injected {mode}: {job_id}")
         if headless:
-            click.echo(f"[scad]   Setup log:    scad session logs {run_id}")
-            click.echo(f"[scad]   Claude stream: scad session logs {run_id} --stream")
-            click.echo(f"[scad]   Live follow:   scad session logs {run_id} -sf")
+            click.echo(f"[scad]   Setup log:    scad run logs {run_id}")
+            click.echo(f"[scad]   Claude stream: scad run logs {run_id} --stream")
+            click.echo(f"[scad]   Live follow:   scad run logs {run_id} -sf")
         else:
-            click.echo(f"[scad]   Attach: scad session attach {run_id}")
+            click.echo(f"[scad]   Attach: scad run attach {run_id}")
     else:
-        click.echo(f"[scad] Session ready. Run: scad session attach {run_id}")
+        click.echo(f"[scad] Session ready. Run: scad run attach {run_id}")
 
     return run_id
 
 
-@session.command("start")
+@run.command("start")
 @click.argument("config_name", shell_complete=_complete_config_names)
 @click.option("--tag", required=True, help="Session tag (e.g., plan07, bugfix-auth). Use 'notag' to opt out.")
 @click.option("--branch", default=None, help="Branch name (auto-generated if not specified).")
@@ -496,7 +513,7 @@ def run_agent(
 @click.option("--headless", is_flag=True, help="Fire-and-forget mode (requires --prompt). Uses claude -p.")
 @click.option("--rebuild", is_flag=True, help="Force rebuild the Docker image.")
 def session_start(config_name: str, tag: str, branch: str, prompt: str, headless: bool, rebuild: bool):
-    """Launch an agent in a new container."""
+    """Start a run — a container with the config's repos, ready for jobs."""
     if headless and not prompt:
         raise click.ClickException("--headless requires --prompt.")
 
@@ -830,10 +847,10 @@ def vm_delete_cmd(yes: bool):
     click.echo(f"[scad] VM '{SCAD_PROFILE}' deleted")
 
 
-@session.command("info")
+@run.command("info")
 @click.argument("run_id", shell_complete=_complete_run_ids)
 def session_info(run_id: str):
-    """Show session dashboard."""
+    """Show a run's dashboard: clones, jobs, agent sessions, usage."""
     validate_run_id(run_id)
     try:
         info = get_session_info(run_id)
@@ -889,7 +906,7 @@ def session_info(run_id: str):
         click.echo(f"Usage:       {usage_str}")
 
 
-@session.command("logs")
+@run.command("logs")
 @click.argument("run_id", shell_complete=_complete_run_ids)
 @click.option("--follow", "-f", is_flag=True, help="Stream logs as they are written.")
 @click.option("--lines", "-n", default=100, help="Number of lines to show (default: 100).")
@@ -959,13 +976,13 @@ def session_logs(run_id: str, follow: bool, lines: int, stream: bool, job: str):
             click.echo(line)
 
 
-@session.command("stop")
+@run.command("stop")
 @click.argument("run_id", required=False, shell_complete=_complete_running_sessions)
 @click.option("--all", "stop_all", is_flag=True, help="Stop all running sessions.")
 @click.option("--config", "config_name", help="Stop all sessions for this config.")
 @click.option("--yes", "-y", is_flag=True, help="Skip confirmation.")
 def session_stop(run_id, stop_all, config_name, yes):
-    """Stop a running session."""
+    """Stop a run's container, preserving clones and state."""
     if run_id and (stop_all or config_name):
         raise click.ClickException("Cannot use run_id with --all or --config.")
     if not run_id and not stop_all and not config_name:
@@ -999,10 +1016,10 @@ def session_stop(run_id, stop_all, config_name, yes):
             click.echo(f"[scad] Stopped: {t['run_id']}")
 
 
-@session.command("attach")
+@run.command("attach")
 @click.argument("run_id", shell_complete=_complete_running_sessions)
 def session_attach(run_id: str):
-    """Attach to an interactive tmux session."""
+    """Attach to a run's tmux session."""
     validate_run_id(run_id)
     container_name = f"scad-{run_id}"
     try:
@@ -1023,7 +1040,7 @@ def session_attach(run_id: str):
     if check.exit_code != 0:
         click.echo(
             f"[scad] No tmux session in '{run_id}'. "
-            f"Inject work first: scad session inject {run_id} --prompt \"...\"",
+            f"Inject work first: scad run inject {run_id} --prompt \"...\"",
             err=True,
         )
         sys.exit(1)
@@ -1036,7 +1053,7 @@ def session_attach(run_id: str):
     sys.exit(result.returncode)
 
 
-@session.command("inject")
+@run.command("inject")
 @click.argument("run_id", shell_complete=_complete_running_sessions)
 @click.option("--prompt", required=True, help="Prompt to send to Claude.")
 @click.option("--headless", is_flag=True, help="Fire-and-forget mode (claude -p).")
@@ -1044,7 +1061,7 @@ def session_attach(run_id: str):
 @click.option("--wait", is_flag=True, help="Block until Claude finishes (headless only).")
 @click.option("--tail", is_flag=True, help="Stream Claude's activity during --wait.")
 def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: bool, tail: bool):
-    """Inject a Claude process into a running session."""
+    """Inject a job — one Claude process — into a running run."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
 
@@ -1149,15 +1166,15 @@ def session_inject(run_id: str, prompt: str, headless: bool, branch: str, wait: 
         mode = "headless" if headless else "interactive"
         click.echo(f"[scad] Injected {mode}: {job_id}")
         if headless:
-            click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+            click.echo(f"[scad]   Stream log: scad run logs {run_id} --stream --job {job_id}")
         else:
-            click.echo(f"[scad]   Attach: scad session attach {run_id}")
+            click.echo(f"[scad]   Attach: scad run attach {run_id}")
 
 
-@session.command("jobs")
+@run.command("jobs")
 @click.argument("run_id", shell_complete=_complete_running_sessions)
 def session_jobs(run_id: str):
-    """List jobs in a session."""
+    """List a run's jobs."""
     validate_run_id(run_id)
     jobs = list_jobs(run_id)
 
@@ -1173,7 +1190,7 @@ def session_jobs(run_id: str):
         click.echo(f"{job['job_id']:<35} {job['mode']:<12} {branch:<25} {started}")
 
 
-@session.command("send")
+@run.command("send")
 @click.argument("run_id", shell_complete=_complete_running_sessions)
 @click.argument("text")
 @click.option("--job", "job_id", default=None, help="Target a specific job (required if multiple interactive jobs).")
@@ -1188,7 +1205,7 @@ def session_send(run_id: str, text: str, job_id: str):
         sys.exit(1)
 
 
-@session.command("clean")
+@run.command("clean")
 @click.argument("run_id", required=False, shell_complete=_complete_cleanable_sessions)
 @click.option("--all", "clean_all", is_flag=True, help="Clean all sessions.")
 @click.option("--config", "config_name", help="Clean all sessions for this config.")
@@ -1319,7 +1336,7 @@ def code_branch(run_id: str, branch_name: str):
         sys.exit(1)
 
 
-@session.command("refresh")
+@run.command("refresh")
 @click.argument("run_id", shell_complete=_complete_running_sessions)
 def session_refresh(run_id: str):
     """Push fresh credentials into a running container."""
@@ -1388,7 +1405,7 @@ def code_add(run_id: str, path: str, name: str, clone: bool, restart_vm: bool):
         except docker.errors.DockerException as e:
             click.echo(
                 f"[scad] Could not restart the session container: {e}\n"
-                f"[scad] Check it with: scad status",
+                f"[scad] Check it with: scad run ls",
                 err=True,
             )
 
@@ -1576,7 +1593,7 @@ def batch(config_name, tag, prompt_file, parallel, fail_fast, no_build):
 @click.option("--no-build", is_flag=True, help="Skip image build check.")
 @click.option("--tail", is_flag=True, help="Stream Claude activity during wait.")
 def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fetch, no_build, tail):
-    """Start a session and dispatch work. Composites: build -> start -> inject."""
+    """Start a run and dispatch work. Composites: build -> run start -> inject."""
     # --- Plan/prompt validation ---
     if plan_path and prompt:
         raise click.ClickException("--plan and --prompt are mutually exclusive.")
@@ -1746,9 +1763,9 @@ def dispatch(config_name, tag, prompt, plan_path, no_wait, headless, attach, fet
         click.echo(f"[scad] Dispatched {mode}: {job_id}")
         click.echo(f"[scad]   Session: {run_id}")
         if headless:
-            click.echo(f"[scad]   Stream log: scad session logs {run_id} --stream --job {job_id}")
+            click.echo(f"[scad]   Stream log: scad run logs {run_id} --stream --job {job_id}")
         else:
-            click.echo(f"[scad]   Attach: scad session attach {run_id}")
+            click.echo(f"[scad]   Attach: scad run attach {run_id}")
 
 
 @main.command()
@@ -1808,7 +1825,7 @@ def harvest(run_id: str, diff: bool, merge: bool):
 @click.option("--keep-session", is_flag=True, help="Keep the session after fetching.")
 @click.option("--force", is_flag=True, help="Clean even if session is running.")
 def finish(run_id: str, no_fetch: bool, merge: bool, keep_session: bool, force: bool):
-    """Fetch branches + clean session. The 'I'm done' command."""
+    """Fetch branches + clean the run. The 'I'm done' command."""
     validate_run_id(run_id)
     config = _config_for_run(run_id)
 
@@ -1855,7 +1872,7 @@ def finish(run_id: str, no_fetch: bool, merge: bool, keep_session: bool, force: 
 def archive(run_id, as_json):
     """Copy agent traces into the append-only archive.
 
-    Agents prune their own transcripts and `scad session clean` destroys a run's
+    Agents prune their own transcripts and `scad run clean` destroys a run's
     traces outright. This copies them somewhere nothing deletes them. Safe to run
     repeatedly: unchanged files are skipped and nothing is ever overwritten.
     """
@@ -2070,3 +2087,33 @@ def search(query, project, kind, limit, as_json):
         snippet = " ".join(h["text"].split())[:140]
         click.echo(f"{h['session_id'][:12]:<14} {when}  {h['kind']:<12} "
                    f"{(h['project'] or '?'):<20} {snippet}")
+
+
+# --- v2.1 rename: the old paths, kept working but off the help ------------------
+#
+# `scad run start|stop|…` and `scad run ls` moved to `scad run …` when the
+# run / job / session split landed. They stay registered so muscle memory does
+# not break mid-flow, and `hidden=True` so `--help` stops teaching the old shape.
+#
+# Deliberately NOT a deprecation cycle. This is a single-user tool with no
+# external consumers, so "deprecate over a release" is a meaningless unit — and
+# an ADVERTISED alias would preserve exactly the ambiguity the rename removes:
+# `scad run info <run-id>` and `scad session show <session-uuid>` taking
+# incompatible identifiers side by side. Delete these whenever, no coordination.
+#
+# A shallow copy, not the same object: `hidden` lives on the Command, so sharing
+# one instance would hide it from `scad run --help` too. The callback is shared,
+# which is the part that has to stay identical.
+def _hidden_alias(group, command, name=None):
+    alias = copy.copy(command)
+    alias.hidden = True
+    group.add_command(alias, name or command.name)
+    return alias
+
+
+for _verb in ("start", "stop", "clean", "attach", "info",
+              "inject", "jobs", "logs", "send", "refresh"):
+    _hidden_alias(session, run.commands[_verb])
+
+_hidden_alias(main, run.commands["ls"], "status")
+del _verb

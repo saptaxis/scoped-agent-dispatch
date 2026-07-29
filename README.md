@@ -8,19 +8,19 @@ Running Claude Code on your working tree means it touches your files, your branc
 
 ## What this does
 
-`scad` manages the full lifecycle: **config** your project, **build** a Docker image, start a **session**, inject **jobs**, manage **code** flow between host and container, and **clean up** when done.
+`scad` manages the full lifecycle: **config** your project, **build** a Docker image, start a **run**, inject **jobs**, manage **code** flow between host and container, and **clean up** when done.
 
 ```bash
 scad config new myproject --edit          # scaffold and edit a config
 scad build myproject                      # build Docker image
-scad session start myproject --tag feat1  # start session (environment only)
-scad session inject myproject-feat1-Mar02-1400 --prompt "implement X"  # inject a job
-scad session inject myproject-feat1-Mar02-1400 --prompt "fix tests"   # another job, same session
-scad code add myproject-feat1-Mar02-1400 --path ~/data --name data  # update workspace anytime
-scad status                                     # see sessions and their jobs
-scad session logs myproject-feat1-Mar02-1400 --job job-001  # what did a job do?
-scad code fetch myproject-feat1-Mar02-1400      # fetch branches back to host
-scad session clean myproject-feat1-Mar02-1400   # tear down
+scad run start myproject --tag feat1      # start the run (environment only)
+scad run inject myproject-feat1-Mar02-1400 --prompt "implement X"  # inject a job
+scad run inject myproject-feat1-Mar02-1400 --prompt "fix tests"    # another job, same run
+scad code add myproject-feat1-Mar02-1400 --path ~/data --name data # update workspace anytime
+scad run ls                               # see runs and their jobs
+scad run logs myproject-feat1-Mar02-1400 --job job-001  # what did a job do?
+scad code fetch myproject-feat1-Mar02-1400  # fetch branches back to host
+scad run clean myproject-feat1-Mar02-1400   # tear down
 ```
 
 Composites combine primitives for common workflows:
@@ -33,18 +33,18 @@ scad batch myproject --tag exp --prompt-file prompts.txt     # parallel headless
 scad finish myproject-feat1-Mar02-1400                      # fetch + clean
 ```
 
-A **session** is a long-lived container for a project. Start it once, then inject as many **jobs** as you need — each job is a Claude process (interactive or headless) that can target its own branch. Update the workspace, add repos or data mounts, push fresh credentials — all while the session runs.
+A **run** is a long-lived container for a project. Start it once, then inject as many **jobs** as you need — each job is a Claude process (interactive or headless) that can target its own branch, and each produces one agent **session** (its trace). Update the workspace, add repos or data mounts, push fresh credentials — all while the run continues.
 
-Each session gets:
+Each run gets:
 - **Its own container** with a baked Python environment
 - **Isolated git clones** from your local repos — the host repo is never touched
 - **Shared data mounts** for bidirectional host/container I/O
 - **Full `--dangerously-skip-permissions`** since it's isolated
 - **Persistent Claude session data** across stop/restart
 - **Pre-configured plugins** active from the first prompt
-Detach and reattach, exit Claude and drop to bash, restart the container — the session survives until you `scad session clean` it.
+Detach and reattach, exit Claude and drop to bash, restart the container — the run survives until you `scad run clean` it.
 
-Operational visibility: `scad status` shows running sessions and their jobs, `scad session info` shows token usage and Claude session history, `scad status <config>` aggregates across sessions, and `scad gc` cleans orphaned state.
+Operational visibility: `scad run ls` shows running runs and their jobs, `scad run info` shows token usage and Claude session history, `scad run ls <config>` aggregates across runs, and `scad gc` cleans orphaned state.
 
 ## Install
 
@@ -115,35 +115,35 @@ curl -fsSL ... | bash -s -- --no-plugin              # skip Claude Code plugin
 ## CLI
 
 ```bash
-# Top-level composites + status
-scad dispatch <config> --tag <tag> --prompt "..."  # start session + inject work (interactive default)
-scad dispatch <config> --tag <tag> --plan plan.md  # start session + inject from plan file
+# Top-level composites + the fleet view
+scad dispatch <config> --tag <tag> --prompt "..."  # start a run + inject work (interactive default)
+scad dispatch <config> --tag <tag> --plan plan.md  # start a run + inject from plan file
 scad batch <config> --tag <tag> --prompt-file prompts.txt  # parallel headless jobs from file
 scad harvest <run-id>                              # fetch branches + show summary
 scad harvest <run-id> --diff                       # fetch + show full diff
 scad finish <run-id>                               # fetch + clean (safe teardown)
-scad status                                        # list running sessions
-scad status --all                                  # full session history
-scad status <config>                               # cross-session project overview
-scad status <config> --cost                        # include cost data (slow)
+scad run ls                                        # list running runs
+scad run ls --all                                  # full run history
+scad run ls <config>                               # cross-run project overview
+scad run ls <config> --cost                        # include cost data (slow)
 
-# Session — container + Claude lifecycle
-scad session start <config> --tag <tag>            # launch session (setup only, no Claude)
-scad session start <config> --tag <tag> --prompt "..."  # start + immediate inject (sugar)
-scad session inject <run-id> --prompt "..."         # inject new Claude process (interactive default)
-scad session inject <run-id> --prompt "..." --headless  # inject headless (fire-and-forget)
-scad session inject <run-id> --prompt "..." --wait  # inject headless + block until done
-scad session inject <run-id> --prompt "..." --wait --tail  # block + stream activity
-scad session send <run-id> "text"                  # type into running interactive Claude
-scad session jobs <run-id>                         # list injected jobs with status
-scad session stop <run-id>                         # stop container (preserves state)
-scad session stop --all [--yes]                    # stop all running sessions
-scad session attach <run-id>                       # attach to tmux session
-scad session clean <run-id>                        # remove container + clones (destructive)
-scad session clean --all [--yes] [--force]         # clean all sessions
-scad session logs <run-id>                         # read agent output
-scad session info <run-id>                         # session dashboard
-scad session refresh <run-id>                      # push fresh credentials into container
+# Run — the container lifecycle (a run hosts many jobs)
+scad run start <config> --tag <tag>                # launch the run (setup only, no Claude)
+scad run start <config> --tag <tag> --prompt "..." # start + immediate inject (sugar)
+scad run inject <run-id> --prompt "..."            # inject new Claude process (interactive default)
+scad run inject <run-id> --prompt "..." --headless # inject headless (fire-and-forget)
+scad run inject <run-id> --prompt "..." --wait     # inject headless + block until done
+scad run inject <run-id> --prompt "..." --wait --tail  # block + stream activity
+scad run send <run-id> "text"                      # type into running interactive Claude
+scad run jobs <run-id>                             # list injected jobs with status
+scad run stop <run-id>                             # stop container (preserves state)
+scad run stop --all [--yes]                        # stop all running runs
+scad run attach <run-id>                           # attach to tmux session
+scad run clean <run-id>                            # remove container + clones (destructive)
+scad run clean --all [--yes] [--force]             # clean all runs
+scad run logs <run-id>                             # read agent output
+scad run info <run-id>                             # run dashboard
+scad run refresh <run-id>                          # push fresh credentials into container
 
 # Code — git state between host and clones
 scad code fetch <run-id>                           # fetch branches back to host
@@ -216,8 +216,8 @@ claude:
 
 ```bash
 scad build my-project                       # builds Docker image (cached after first run)
-scad session start my-project --tag initial # creates clones, starts container
-scad session attach my-project-initial-Mar02-1400  # drops into tmux with Claude
+scad run start my-project --tag initial     # creates clones, starts container
+scad run attach my-project-initial-Mar02-1400   # drops into tmux with Claude
 ```
 
 Or dispatch from a plan file:
@@ -246,7 +246,7 @@ git merge scad-my-project-initial-Mar02-1400
 ### 5. Clean up
 
 ```bash
-scad session clean my-project-initial-Mar02-1400  # removes container, clones, session data
+scad run clean my-project-initial-Mar02-1400  # removes container, clones, session data
 ```
 
 ## How it works
@@ -256,7 +256,7 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 3. **Branch** — Auto-generates branch name (`scad-{config}-{tag}-MonDD-HHMM`) and checks it out in each clone.
 4. **Configure** — `claude_config.py` centralizes all Claude Code configuration: `settings.json` (permissions, `attribution`, `enabledPlugins`), `.claude.json` (persisted across sessions via bind-mount from the run dir), host timezone inheritance (IANA `TZ` env var + `/etc/localtime` mount).
 5. **Run** — Starts container detached. Entrypoint performs setup only (git config, tmux init) — no Claude launch.
-6. **Inject** — `scad session inject` runs Claude inside the container via `docker exec`. Each injection is a tracked job with its own mode (interactive/headless), optional branch, and log stream.
+6. **Inject** — `scad run inject` runs Claude inside the container via `docker exec`. Each injection is a tracked job with its own mode (interactive/headless), optional branch, and log stream.
 7. **Session** — Claude session data persists at `~/.scad/runs/<run-id>/claude/`. Job metadata lives in `~/.scad/runs/<run-id>/jobs/`. Survives stop/restart.
 8. **Fetch** — `scad code fetch` discovers all branches across clones and snapshots them back to host repos.
 9. **GC** — `scad gc` finds orphaned containers, dead run dirs, and unused images.
@@ -267,7 +267,7 @@ scad session clean my-project-initial-Mar02-1400  # removes container, clones, s
 append-only archive at `~/.scad/archive/`, overridable with `SCAD_ARCHIVE`.
 
 Agents prune their own transcripts — Claude Code keeps 30 days by default — and
-`scad session clean` destroys a run's traces along with its container. This copies
+`scad run clean` destroys a run's traces along with its container. This copies
 them somewhere nothing deletes them. Safe to run repeatedly: unchanged files are
 skipped, growing files have only their new lines appended, and nothing is ever
 overwritten or shortened.
@@ -284,7 +284,7 @@ run. If a source is ever rewritten or rotated rather than appended to, the exist
 archive is kept untouched and the new content is written beside it as
 `<name>.<mtime>.jsonl`.
 
-`scad session clean` now archives a run's traces automatically before removing it —
+`scad run clean` now archives a run's traces automatically before removing it —
 that is the one loss no schedule can catch, since a run that lived an hour is gone
 before any cron fires.
 

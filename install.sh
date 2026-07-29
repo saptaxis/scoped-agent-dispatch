@@ -247,7 +247,7 @@ elif [[ "$OS" == "Linux" ]]; then
         # already ran, but no symlink/completions/plugin) with no way for the
         # printed advice to un-stick the user -- re-running hits the exact
         # same not-yet-logged-in-again failure. Warn and keep going instead;
-        # `scad status` / the first real command will tell them if it's still
+        # `scad run ls` / the first real command will tell them if it's still
         # broken after they log back in.
         describe_docker_check_failure "$DOCKER_CHECK_ERR" "[scad] WARNING: no reachable Docker daemon (yet)."
         echo "[scad]   Install Docker Engine, then:  sudo systemctl enable --now docker"

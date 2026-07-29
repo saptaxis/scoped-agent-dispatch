@@ -173,11 +173,11 @@ pause
 # ── 4. Start session ─────────────────────────────────────────────────
 banner "Step 4: Start a session"
 
-explain "scad session start creates local clones on a new branch,"
+explain "scad run start creates local clones on a new branch,"
 explain "starts a Docker container, and launches Claude inside tmux."
 explain "Branch name auto-generated: scad-MonDD-HHMM."
 
-run scad session start demo
+run scad run start demo
 
 # Capture run-id from the worktrees dir (most recent)
 RUN_ID=$(ls -t ~/.scad/worktrees/ | grep "^demo-" | head -1)
@@ -194,23 +194,23 @@ run ls ~/.scad/runs/"$RUN_ID"/
 pause
 
 # ── 5. Status ─────────────────────────────────────────────────────────
-banner "Step 5: Session status + info"
+banner "Step 5: Run list + info"
 
-explain "scad session status shows running sessions (default)."
-explain "scad session info shows a full dashboard for one session."
+explain "scad run ls shows running runs (default)."
+explain "scad run info shows a full dashboard for one run."
 
-run scad session status
-run scad session info "$RUN_ID"
+run scad run ls
+run scad run info "$RUN_ID"
 
 pause
 
 # ── 6. Stop ──────────────────────────────────────────────────────────
 banner "Step 6: Stop session (preserves state)"
 
-explain "scad session stop stops the container but does NOT remove it."
+explain "scad run stop stops the container but does NOT remove it."
 explain "Session data, clones, run dir — all preserved."
 
-run scad session stop "$RUN_ID"
+run scad run stop "$RUN_ID"
 
 explain "Container stopped. Clones still exist:"
 run ls ~/.scad/worktrees/"$RUN_ID"/
@@ -219,17 +219,17 @@ explain "Session data still exists:"
 run ls ~/.scad/runs/"$RUN_ID"/
 
 explain "Status with --all shows stopped sessions:"
-run scad session status --all
+run scad run ls --all
 
 pause
 
 # ── 7. Clean ─────────────────────────────────────────────────────────
 banner "Step 7: Clean up (destructive)"
 
-explain "scad session clean removes EVERYTHING: container, clones, run dir."
+explain "scad run clean removes EVERYTHING: container, clones, run dir."
 explain "This is the point of no return."
 
-run scad session clean "$RUN_ID"
+run scad run clean "$RUN_ID"
 
 explain "Clones gone:"
 echo "  \$ ls ~/.scad/worktrees/$RUN_ID/ 2>&1"
@@ -242,7 +242,7 @@ ls ~/.scad/runs/"$RUN_ID"/ 2>&1 | sed 's/^/    /' || true
 echo ""
 
 explain "Status --all shows cleaned:"
-run scad session status --all
+run scad run ls --all
 
 pause
 
@@ -270,7 +270,7 @@ echo "  What you saw:"
 echo "    1. Config registration via symlink (version-controlled configs)"
 echo "    2. Docker image build with Step N/M progress"
 echo "    3. Session start (clone + branch + container + Claude)"
-echo "    4. Session status and info dashboard"
+echo "    4. Run list and info dashboard"
 echo "    5. Stop preserving state vs clean destroying everything"
 echo "    6. Config unregistration (source file preserved)"
 echo ""
