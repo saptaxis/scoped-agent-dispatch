@@ -1,7 +1,21 @@
 """Tests for the session viewer."""
 
-from scad.live import TmuxPane
+import pytest
+
+from scad.live import ClaudeSession, TmuxPane
 from scad.view import Reentry, reentry_for
+
+
+@pytest.fixture(autouse=True)
+def _no_real_claude_registry(monkeypatch):
+    """No test may read the real `~/.claude/sessions`.
+
+    `gather()` reaches for the live registry by default — on a developer's
+    machine that is a directory full of their actual sessions, and a test whose
+    result depends on what they happen to have open is not a test. Anything
+    that wants live sessions passes them in.
+    """
+    monkeypatch.setattr("scad.view.claude_live_sessions", lambda *a, **k: [])
 
 
 def row(**kw) -> dict:
@@ -99,17 +113,19 @@ class TestReentry:
 
 
 import time
+from datetime import datetime
 
 from scad.index import append_turns, connect, upsert_session
 from scad.records import KIND_MAIN, SessionRecord, TurnRecord
 from scad.view import gather
 
 
-def _store(conn, sid, outcome, ended_days_ago=0, cwd="/repo", agent="claude", kind=KIND_MAIN):
+def _store(conn, sid, outcome, ended_days_ago=0, cwd="/repo", agent="claude", kind=KIND_MAIN,
+           project="proj"):
     ended = int((time.time() - ended_days_ago * 86400) * 1000)
     rec = SessionRecord(id=sid, kind=kind, agent=agent, source="claude-transcript",
                         cwd=cwd, started=ended - 1000, ended=ended, outcome=outcome)
-    upsert_session(conn, rec, machine="mac", project="proj", archive_path=f"/arc/{sid}.jsonl",
+    upsert_session(conn, rec, machine="mac", project=project, archive_path=f"/arc/{sid}.jsonl",
                    source_size=1, source_mtime=1, parsed_offset=1)
     return rec
 
@@ -124,17 +140,29 @@ class TestGather:
         assert {r["id"] for r in data["waiting"]} == {"W1", "Q1"}
 
     def test_questions_sort_before_plain_waiting(self, tmp_path):
-        """An explicit question is a stronger claim on your attention."""
+        """An explicit question is a stronger claim on your attention.
+
+        The question is the OLDER of the two here on purpose: rows are newest
+        first, so a question that also happened to be newest would prove
+        nothing about the grouping.
+        """
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "W1", "awaiting-user", ended_days_ago=5)
-        _store(conn, "Q1", "awaiting-question", ended_days_ago=1)
+        _store(conn, "W1", "awaiting-user", ended_days_ago=1)
+        _store(conn, "Q1", "awaiting-question", ended_days_ago=5)
         assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["Q1", "W1"]
 
-    def test_oldest_first_within_a_group_so_nothing_rots(self, tmp_path):
+    def test_newest_first_within_a_group(self, tmp_path):
+        """The page is read top-down, so current work belongs at the top.
+
+        Oldest-first was the earlier rule, on the grounds that nothing should
+        rot at the bottom of the list. Nothing does: the old rows are still
+        there, further down, and the window keeps the list from growing without
+        bound.
+        """
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "NEW", "awaiting-user", ended_days_ago=1)
         _store(conn, "OLD", "awaiting-user", ended_days_ago=6)
-        assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["OLD", "NEW"]
+        assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["NEW", "OLD"]
 
     def test_window_excludes_ancient_sessions(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
@@ -480,6 +508,42 @@ class TestResumeCwd:
         assert "cd /Users/vsr/.config/nvim" in gather(conn, [], set())["waiting"][0]["reentry"]["command"]
 
 
+class TestHumanName:
+    """The name position holds only a name a human chose.
+
+    `title` is derived — the agent's own summary, or on a skeleton row the
+    literal first message. Putting it where a name belongs is what made a
+    renamed session display as "/rename writing-wm-evals-research".
+    """
+
+    def _html(self, tmp_path, **columns):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        for column, value in columns.items():
+            conn.execute(f"UPDATE sessions SET {column} = ? WHERE id = 'S1'", (value,))
+        conn.commit()
+        return render(gather(conn, [], set()))
+
+    def test_a_renamed_session_is_labelled_by_its_name(self, tmp_path):
+        html = self._html(tmp_path, name="jul29-session-cli", title="Doing the thing")
+        assert '<div class="t">jul29-session-cli</div>' in html
+
+    def test_an_unnamed_session_shows_its_id_not_its_title(self, tmp_path):
+        html = self._html(tmp_path, title="/rename writing-wm-evals-research")
+        assert '<div class="t">S1</div>' in html
+        assert '<div class="t">/rename' not in html
+
+    def test_the_client_side_label_follows_the_same_rule(self, tmp_path):
+        """`All sessions` is rendered in the browser from the embedded rows."""
+        html = self._html(tmp_path, title="Doing the thing")
+        assert "r.name || r.id.slice(0, 12)" in html
+
+    def test_the_derived_title_is_still_carried(self, tmp_path):
+        """Demoted, not discarded: it stays on the row and stays filterable."""
+        html = self._html(tmp_path, title="Doing the thing")
+        assert "Doing the thing" in html
+
+
 class TestPresentation:
     def _full(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
@@ -656,3 +720,386 @@ class TestNotesSection:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/repo")
         assert "/remember" in render(gather(conn, [], set()))
+
+
+def _session(sid, **over) -> ClaudeSession:
+    """A registry record for a Claude process that is running right now."""
+    fields = {"session_id": sid, "pid": 4242, "cwd": "/repo", "name": "",
+              "status": "idle", "waiting_for": "", "started_at": 0,
+              "kind": "interactive", "entrypoint": "cli", "version": "2.1.219"}
+    fields.update(over)
+    return ClaudeSession(**fields)
+
+
+class TestOpenNow:
+    """The registry names live sessions exactly, so the page can too.
+
+    `gather()` has always taken `live_ids`, and nothing ever passed one — so
+    `status_for` could never return `open` and every session read `maybe-open`.
+    """
+
+    def test_a_live_session_the_index_knows_becomes_a_row(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        data = gather(conn, [], set(),
+                      live_sessions=[_session("S1", name="jul29-viewer", status="busy")])
+        row = data["open_now"][0]
+        assert row["id"] == "S1"
+        assert row["name"] == "jul29-viewer"        # from the registry
+        assert row["status"] == "busy"              # from the registry
+        assert row["project"] == "proj"             # from the index
+        assert row["n_turns"] == 0
+        assert row["ended"]
+        assert "claude --resume S1" in row["reentry"]["command"]
+
+    def test_a_waiting_session_carries_what_it_is_blocked_on(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        data = gather(conn, [], set(), live_sessions=[
+            _session("S1", status="waiting", waiting_for="permission prompt")])
+        assert data["open_now"][0]["status"] == "waiting"
+        assert data["open_now"][0]["waiting_for"] == "permission prompt"
+
+    def test_rows_sort_by_last_activity_not_by_session_start(self, tmp_path):
+        """"Newest" means last message, not when the process was launched — a
+        session opened this morning and untouched since is not the live one."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "STALE", "awaiting-user", ended_days_ago=9, cwd="/a")
+        _store(conn, "FRESH", "awaiting-user", ended_days_ago=1, cwd="/b")
+        data = gather(conn, [], set(), live_sessions=[
+            _session("STALE", started_at=9_000_000),     # started most recently
+            _session("FRESH", started_at=1_000_000),
+        ])
+        assert [r["id"] for r in data["open_now"]] == ["FRESH", "STALE"]
+
+    def test_a_live_session_the_index_never_saw_still_appears(self, tmp_path):
+        """A session started minutes ago has not been archived yet. Dropping it
+        from a section called "open now" is the worst failure this can have."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "KNOWN", "awaiting-user", cwd="/repo")
+        data = gather(conn, [], set(), live_sessions=[
+            _session("KNOWN"),
+            _session("BRAND-NEW", cwd="/elsewhere", name="just-started",
+                     started_at=int(time.time() * 1000)),
+        ])
+        new = next(r for r in data["open_now"] if r["id"] == "BRAND-NEW")
+        assert new["name"] == "just-started"        # registry's own name
+        assert new["cwd"] == "/elsewhere"           # registry's own cwd
+        assert new["indexed"] is False
+        assert new["project"] is None
+        assert "claude --resume BRAND-NEW" in new["reentry"]["command"]
+
+    def test_the_index_never_invents_a_row_for_a_session_it_has_not_seen(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        data = gather(conn, [], set(), live_sessions=[_session("GHOST")])
+        assert data["all"] == []
+        assert [r["id"] for r in data["open_now"]] == ["GHOST"]
+
+    def test_a_live_session_is_open_not_maybe_open(self, tmp_path):
+        """The bug: `live_ids` defaulted to empty because nothing passed one."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+        data = gather(conn, panes, set(), live_sessions=[_session("S1")])
+        assert data["waiting"][0]["status"] == "open"
+        assert data["all"][0]["status"] == "open"
+
+    def test_gather_reads_the_registry_when_nothing_is_injected(self, tmp_path, monkeypatch):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        monkeypatch.setattr("scad.view.claude_live_sessions",
+                            lambda *a, **k: [_session("S1", status="busy")])
+        data = gather(conn, [], set())
+        assert [r["id"] for r in data["open_now"]] == ["S1"]
+        assert data["waiting"][0]["status"] == "open"
+
+    def test_an_unreadable_registry_leaves_the_page_intact(self, tmp_path, monkeypatch):
+        """A machine with no ~/.claude/sessions renders exactly as before."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+
+        def boom(*a, **k):
+            raise OSError("no such directory")
+
+        monkeypatch.setattr("scad.view.claude_live_sessions", boom)
+        data = gather(conn, [], set())
+        assert data["open_now"] == []
+        assert data["waiting"][0]["status"] == "closed"
+        assert "</html>" in render(data)
+
+    def test_an_explicit_live_id_is_still_honoured(self, tmp_path):
+        """The daemon roster and the process registry are separate evidence."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        data = gather(conn, [], set(), live_ids={"S1"})
+        assert data["waiting"][0]["status"] == "open"
+
+    def test_non_claude_sessions_keep_todays_behaviour(self, tmp_path):
+        """There is no registry for codex or kimi, and guessing one from cwd or
+        timing would be inference. A codex pane stays `maybe-open`."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "CX", "awaiting-user", cwd="/repo", agent="codex")
+        data = gather(conn, [TmuxPane("main:1.0", "/repo", "codex")], set())
+        assert data["open_now"] == []
+        assert data["waiting"][0]["status"] == "maybe-open"
+
+
+class TestOpenNowSection:
+    def _html(self, tmp_path, sessions, **kw):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        return render(gather(conn, [], set(), live_sessions=sessions, **kw))
+
+    def test_it_is_the_first_section_on_the_page(self, tmp_path):
+        html = self._html(tmp_path, [_session("S1", name="mine")])
+        assert html.index("Open now") < html.index("Waiting")
+        assert html.index("Open now") < html.index("Agent panes")
+
+    def test_the_registry_status_is_visible(self, tmp_path):
+        html = self._html(tmp_path, [_session("S1", status="busy")])
+        assert 'class="pill busy">busy<' in html
+
+    def test_a_waiting_session_names_what_it_wants(self, tmp_path):
+        html = self._html(tmp_path, [
+            _session("S1", status="waiting", waiting_for="permission prompt")])
+        assert 'class="pill waiting">waiting<' in html
+        assert "permission prompt" in html
+
+    def test_the_resume_command_is_offered(self, tmp_path):
+        assert "claude --resume S1" in self._html(tmp_path, [_session("S1")])
+
+    def test_an_unindexed_session_is_still_drawn(self, tmp_path):
+        html = self._html(tmp_path, [_session("NEW1", name="fresh", cwd="/elsewhere")])
+        assert "fresh" in html
+        assert "claude --resume NEW1" in html
+
+    def test_nothing_open_says_so_plainly(self, tmp_path):
+        html = self._html(tmp_path, [])
+        assert "No Claude sessions are running" in html
+
+    def test_it_reuses_the_shared_row_markup(self, tmp_path):
+        html = self._html(tmp_path, [_session("S1")])
+        assert html.count('class="who"') == html.count('class="go"')
+
+    def test_user_text_is_escaped(self, tmp_path):
+        html = self._html(tmp_path, [_session("S1", name="<script>alert(1)</script>")])
+        assert "<script>alert(1)</script>" not in html
+        assert "&lt;script&gt;" in html
+
+
+class TestProjectTabs:
+    """One page, scoped in the browser. The data is already embedded, so
+    switching project costs nothing and needs no second file."""
+
+    def _seed(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD1", "tool-result-last", ended_days_ago=9, cwd="/o", project="stale")
+        _store(conn, "OLD2", "tool-result-last", ended_days_ago=9, cwd="/o", project="stale")
+        _store(conn, "NEW1", "awaiting-user", ended_days_ago=1, cwd="/n", project="fresh")
+        return conn
+
+    def test_a_tab_per_project_ordered_by_recent_activity(self, tmp_path):
+        """Alphabetical would bury the project you were just in."""
+        tabs = gather(self._seed(tmp_path), [], set())["tabs"]
+        assert [t["project"] for t in tabs] == ["fresh", "stale"]
+
+    def test_each_tab_carries_its_counts(self, tmp_path):
+        tabs = {t["project"]: t for t in gather(self._seed(tmp_path), [], set())["tabs"]}
+        assert tabs["stale"]["sessions"] == 2
+        assert tabs["stale"]["waiting"] == 0
+        assert tabs["fresh"]["sessions"] == 1
+        assert tabs["fresh"]["waiting"] == 1
+
+    def test_subagents_are_not_counted(self, tmp_path):
+        conn = self._seed(tmp_path)
+        _store(conn, "SUB", "tool-result-last", kind="subagent", project="fresh")
+        tabs = {t["project"]: t for t in gather(conn, [], set())["tabs"]}
+        assert tabs["fresh"]["sessions"] == 1
+
+    def test_a_row_with_no_project_gets_no_tab(self, tmp_path):
+        """An empty label would collide with the All tab's own empty value."""
+        conn = self._seed(tmp_path)
+        conn.execute("UPDATE sessions SET project = NULL WHERE id = 'OLD1'")
+        conn.commit()
+        assert "" not in {t["project"] for t in gather(conn, [], set())["tabs"]}
+
+
+class TestTabsInThePage:
+    def _html(self, tmp_path, **kw):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "S2", "awaiting-user", cwd="/b", project="beta")
+        return render(gather(conn, [], set(), **kw))
+
+    def test_the_strip_lists_every_project_and_an_all_default(self, tmp_path):
+        html = self._html(tmp_path)
+        assert 'data-tab=""' in html                     # All
+        assert 'data-tab="alpha"' in html
+        assert 'data-tab="beta"' in html
+        # All is the selected tab, so the page opens exactly as it did before.
+        assert 'class="tab on hot" data-tab=""' in html
+        # The count on a tab is what is waiting there — nothing waiting has to
+        # look different from five things waiting.
+        assert 'class="tab hot" data-tab="alpha"' in html
+
+    def test_switching_needs_no_re_render(self, tmp_path):
+        """Everything is already in the document; the tabs only hide rows."""
+        html = self._html(tmp_path)
+        assert "function applyScope()" in html
+        assert "scad view" not in html.split("<script>")[1]
+
+    def test_every_row_declares_its_project(self, tmp_path):
+        html = self._html(tmp_path)
+        assert 'data-project="alpha"' in html
+        assert 'data-project="beta"' in html
+
+    def test_open_now_rows_declare_their_project_too(self, tmp_path):
+        """Scoping that missed a section would be worse than no scoping."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        html = render(gather(conn, [], set(), live_sessions=[_session("S1")]))
+        section = html[html.index("Open now"):html.index("Agent panes")]
+        assert 'data-project="alpha"' in section
+
+    def test_notes_rows_declare_their_project(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+                     "VALUES ('S1', 0, 1, 'topic', 'a note', '/n.jsonl')")
+        conn.commit()
+        html = render(gather(conn, [], set()))
+        section = html[html.index("<h2>Notes"):html.index("<h2>All sessions")]
+        assert 'data-project="alpha"' in section
+
+    def test_an_empty_section_says_so_in_words(self, tmp_path):
+        html = self._html(tmp_path)
+        assert "Nothing here for " in html
+        assert 'class="empty scoped"' in html
+
+    def test_hidden_rows_are_really_hidden(self, tmp_path):
+        """`.row` sets display:grid, which outranks the UA's [hidden] rule."""
+        html = self._html(tmp_path)
+        assert "[hidden] {{ display: none !important; }}".replace("{{", "{").replace("}}", "}") in html
+
+    def test_a_project_name_cannot_break_out_of_the_markup(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project='ev"il<script>')
+        html = render(gather(conn, [], set()))
+        assert '<script>' not in html.replace("<script>\nconst DATA", "")
+        assert "&quot;il&lt;script&gt;" in html
+
+    def test_the_all_sessions_list_is_scoped_by_the_same_selection(self, tmp_path):
+        html = self._html(tmp_path)
+        assert "SCOPE" in html
+        assert 'r.project || ""' in html
+
+
+class TestStaleness:
+    """A page left open all day must show its own age.
+
+    There is no refresh button and cannot be one: this is a `file://` document
+    with no server, so it cannot run `scad reindex`, and a button that re-read
+    an unchanged file would look like refreshing while changing nothing.
+    """
+
+    def _html(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        return render(gather(conn, [], set()))
+
+    def test_the_absolute_time_is_in_the_header(self, tmp_path):
+        data = gather(connect(tmp_path / "i.sqlite"), [], set())
+        data["generated"] = 1785000000000
+        stamp = datetime.fromtimestamp(1785000000000 / 1000).strftime("%Y-%m-%d %H:%M")
+        header = render(data).split("</header>")[0]
+        assert stamp in header
+
+    def test_the_relative_age_keeps_counting_in_the_browser(self, tmp_path):
+        """Honest: the page genuinely knows more about its age as time passes,
+        which is the one thing it can update without a server."""
+        html = self._html(tmp_path)
+        assert "setInterval" in html
+        assert "DATA.generated" in html
+        assert 'id="gen"' in html
+
+    def test_an_old_page_marks_itself_stale(self, tmp_path):
+        html = self._html(tmp_path)
+        assert "stale" in html
+
+    def test_the_regenerate_command_is_there_to_copy(self, tmp_path):
+        header = self._html(tmp_path).split("</header>")[0]
+        assert 'onclick="copy(this)"' in header
+        assert "scad view" in header
+
+    def test_there_is_no_fake_refresh(self, tmp_path):
+        """A meta-refresh or a reload button re-reads the same file and reports
+        success — the exact failure mode this section exists to prevent."""
+        html = self._html(tmp_path)
+        for fake in ("http-equiv", "location.reload", "window.location =",
+                     "<button>Refresh", "setTimeout(() => location"):
+            assert fake not in html
+
+
+class TestTabCountsMatchTheSections:
+    def test_the_number_on_a_tab_is_what_the_waiting_sections_draw(self, tmp_path):
+        """A count that disagrees with the rows below it is worse than none."""
+        conn = connect(tmp_path / "i.sqlite")
+        for sid in ("A1", "A2", "A3"):
+            _store(conn, sid, "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "A4", "tool-result-last", cwd="/a", project="alpha")
+        _store(conn, "B1", "awaiting-user", cwd="/b", project="beta")
+        data = gather(conn, [], set())
+
+        tab = next(t for t in data["tabs"] if t["project"] == "alpha")
+        drawn = [r for r in data["waiting_at_hand"] + data["waiting_closed"]
+                 if r["project"] == "alpha"]
+        assert tab["waiting"] == len(drawn) == 3
+        assert tab["sessions"] == len([r for r in data["all"] if r["project"] == "alpha"]) == 4
+
+    def test_all_hides_nothing(self, tmp_path):
+        """The default selection has to leave the page exactly as it was."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        html = render(gather(conn, [], set()))
+        assert 'r.hidden = SCOPE !== "" && (r.dataset.project || "") !== SCOPE;' in html
+
+
+class TestTheEmbeddedScriptParses:
+    """One bad token takes the whole `<script>` down, silently.
+
+    This is not hypothetical. An escaped quote written inside the Python
+    template collapsed to three bare quote characters in the emitted page — a
+    JS syntax error — so the All-sessions list never drew, `copy()` and
+    `expand()` were never defined, and every click handler on the page was
+    dead. The page still looked plausible, which is why nothing caught it:
+    only the parts rendered in Python were visible.
+    """
+
+    def _html(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        conn.execute("""UPDATE sessions SET title = ? WHERE id = 'S1'""",
+                     ('a "quoted" & <tagged> title',))
+        conn.commit()
+        return render(gather(conn, [], set()))
+
+    def test_the_escaper_is_well_formed(self, tmp_path):
+        html = self._html(tmp_path)
+        assert '\'"\':"&quot;"' in html
+        assert '""":' not in html
+
+    def test_the_whole_script_parses(self, tmp_path):
+        """A real parse, when a JS engine is at hand — the only check that
+        covers tokens nobody thought to assert on."""
+        import shutil
+        import subprocess
+
+        node = shutil.which("node")
+        if not node:
+            pytest.skip("no node to parse with")
+        script = self._html(tmp_path).split("<script>", 1)[1].rsplit("</script>", 1)[0]
+        path = tmp_path / "page.js"
+        path.write_text(script)
+        result = subprocess.run([node, "--check", str(path)],
+                                capture_output=True, text=True)
+        assert result.returncode == 0, result.stderr

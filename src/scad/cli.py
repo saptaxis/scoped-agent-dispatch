@@ -1967,12 +1967,15 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
     for r in rows:
         when = datetime.fromtimestamp(r["started"] / 1000).strftime("%Y-%m-%d %H:%M") \
             if r["started"] else "?"
-        title = (r["title"] or "")[:48]
-        # The human name if the harness recorded one — "nd-5" is how a person
-        # refers to the session; a uuid prefix is only how the filesystem does.
-        label = (r["name"] or r["id"][:12])[:22]
-        click.echo(f"{label:<24} {when}  {r['agent']:<7} {r['kind']:<14} "
-                   f"{(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
+        title = (r["title"] or "")[:40]
+        # Two columns, never one. The id is always shown because it is what
+        # `--resume` takes. `name` is the human's own label — from `/rename` or
+        # from the harness — and stays BLANK when nobody chose one: `title` is
+        # derived (an agent's summary, or a first message verbatim) and printing
+        # it here would dress a guess up as a name.
+        name = (r["name"] or "")[:26]     # the longest real one is 26 characters
+        click.echo(f"{r['id'][:12]:<14} {name:<27} {when}  {r['agent']:<7} "
+                   f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
 
 
 @session.command("show")
@@ -2128,18 +2131,25 @@ def project_ls():
 def project_show(name, limit):
     """List a project's sessions."""
     conn = index_connect()
+    # Only sessions you started — kind = 'main', the same rule `scad view` uses.
+    # A subagent is triggered BY an agent, has no independent existence and
+    # cannot be resumed; listing them here while the page hid them made the two
+    # disagree about the same project (1309 of 1462 rows are subagents).
     rows = conn.execute(
-        "SELECT id, kind, agent, title, n_turns, started FROM sessions "
-        "WHERE project = ? ORDER BY started DESC LIMIT ?",
+        "SELECT id, name, kind, agent, title, n_turns, started FROM sessions "
+        "WHERE project = ? AND kind = 'main' ORDER BY started DESC LIMIT ?",
         (name, limit),
     ).fetchall()
     if not rows:
-        raise click.ClickException(f"No sessions for project {name}.")
+        raise click.ClickException(f"No sessions you started for project {name}.")
     for r in rows:
         when = datetime.fromtimestamp(r["started"] / 1000).strftime("%Y-%m-%d %H:%M") \
             if r["started"] else "?"
-        click.echo(f"{r['id'][:12]:<14} {when}  {r['agent']:<7} {r['kind']:<14} "
-                   f"{r['n_turns']:>5}t  {(r['title'] or '')[:52]}")
+        # Same rule as `session ls`: the human's own label, and BLANK when
+        # nobody chose one. `title` is derived and never stands in for a name.
+        label = (r["name"] or "")[:26]
+        click.echo(f"{r['id'][:12]:<14} {label:<27} {when}  {r['agent']:<7} "
+                   f"{r['kind']:<14} {r['n_turns']:>5}t  {(r['title'] or '')[:52]}")
 
 
 @session.command("read")
@@ -2244,25 +2254,32 @@ del _verb
 @click.option("--days", default=14, help="How far back the waiting list looks.")
 @click.option("--output", default=None, type=click.Path(), help="Write the page here.")
 @click.option("--no-open", is_flag=True, help="Write the page without opening a browser.")
-@click.option("--refresh", is_flag=True,
-              help="Archive and index new traces before rendering.")
-def view(days, output, no_open, refresh):
+@click.option("--no-refresh", is_flag=True,
+              help="Render the existing index without archiving or indexing first.")
+# Kept working, undocumented: refreshing is what happens anyway now, so the
+# flag is a no-op that spares muscle memory and any script already passing it.
+# Two documented flags for one decision would be one too many.
+@click.option("--refresh", is_flag=True, hidden=True)
+def view(days, output, no_open, refresh, no_refresh):
     """Render the session index to a page and open it.
 
-    Read-only by default: the page reflects whatever the last `scad reindex`
-    captured. `--refresh` is the opt-in exception, and it is opt-in on purpose —
-    the viewer's contract is that it never writes to the index, so the side
-    effect happens only when asked for.
+    Archives and indexes first, then renders. This inverts what the viewer spec
+    calls a non-goal ("the viewer never writes to the index"), and deliberately:
+    nothing else refreshes the index — there is no timer — so an opt-in refresh
+    meant a stale page every time it was forgotten. Worse, live tmux, container
+    and registry state IS gathered at render time, so an unrefreshed page was
+    half fresh while looking authoritative: a session started minutes earlier
+    was simply missing, with nothing to say so.
 
-    Worth knowing what --refresh does *not* fix: live tmux and container state
-    is gathered at render time and is always current, so an unrefreshed page is
-    half fresh. That asymmetry is the reason to reach for this flag.
+    `--no-refresh` keeps the pure reader for anyone who wants the old contract.
     """
     from pathlib import Path as _Path
 
     from scad.config import get_scad_home
 
-    if refresh:
+    del refresh                                  # accepted, deliberately inert
+
+    if not no_refresh:
         # Incremental, and archiving first. The index reads the archive rather
         # than the live trace dirs, so a refresh that skipped the sweep would
         # report success and render exactly the same stale page.
@@ -2287,7 +2304,8 @@ def view(days, output, no_open, refresh):
     write_view(target, render(data))
 
     click.echo(f"[scad] {target}")
-    click.echo(f"[scad]   waiting: {len(data['waiting'])}  "
+    click.echo(f"[scad]   open now: {len(data.get('open_now') or [])}  "
+               f"waiting: {len(data['waiting'])}  "
                f"open panes: {len(data.get('panes') or [])}  total: {len(data['all'])}")
     if not no_open:
         webbrowser.open(target.as_uri())

@@ -15,7 +15,13 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from scad.live import TmuxPane, agent_panes, is_agent_command
+from scad.live import (
+    ClaudeSession,
+    TmuxPane,
+    agent_panes,
+    claude_live_sessions,
+    is_agent_command,
+)
 
 _RESUME = {"claude": "claude --resume {id}", "codex": "codex resume {id}"}
 
@@ -61,7 +67,7 @@ def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
         # Match the pane's own agent: a codex pane must not be offered a claude
         # session as its likely occupant, which the unfiltered query did.
         guess = conn.execute(
-            "SELECT id, project, title, outcome, ended FROM sessions "
+            "SELECT id, project, name, title, outcome, ended FROM sessions "
             "WHERE cwd = ? AND kind = 'main' AND agent = ? ORDER BY ended DESC LIMIT 1",
             (pane.path, agent),
         ).fetchone()
@@ -74,6 +80,7 @@ def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
             "version": pane.command,
             "project": (guess["project"] if guess else None),
             "likely_id": (guess["id"] if guess else None),
+            "likely_name": (guess["name"] if guess else None),
             "likely_title": (guess["title"] if guess else None),
             "likely_outcome": (guess["outcome"] if guess else None),
             "last_activity": (guess["ended"] if guess else None),
@@ -307,6 +314,110 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
     return out
 
 
+def _live_sessions(injected) -> list[ClaudeSession]:
+    """The claude process registry, or nothing at all.
+
+    Same contract as `tmux_panes()` and `running_run_ids()`: a viewer that
+    raised because a machine has no `~/.claude/sessions` would be useless, so
+    every failure degrades to "nothing is provably open". `claude_live_sessions`
+    already swallows its own errors; this covers the import-time and
+    monkeypatched cases too.
+    """
+    if injected is not None:
+        return list(injected)
+    try:
+        return list(claude_live_sessions())
+    except Exception:
+        return []
+
+
+def project_tabs(rows: list[dict], waiting: list[dict]) -> list[dict]:
+    """One tab per project, most recently active first.
+
+    Recency, not the alphabet: the project you were just in is the one you are
+    coming back to, and an alphabetical strip buries it wherever its name falls.
+
+    Each tab carries both counts because they answer different questions — how
+    much is here, and how much of it wants you. A project with nothing waiting
+    has to look different from one with five, which is the whole reason the
+    number is on the tab rather than only inside the section.
+
+    Rows with no project at all get no tab: there is nothing to name it, and an
+    empty label would collide with the "All" tab's own empty value. They stay
+    visible under All.
+    """
+    waits: dict[str, int] = {}
+    for row in waiting:
+        key = row.get("project") or ""
+        waits[key] = waits.get(key, 0) + 1
+
+    tabs: dict[str, dict] = {}
+    for row in rows:
+        key = row.get("project") or ""
+        if not key:
+            continue
+        tab = tabs.setdefault(key, {"project": key, "sessions": 0, "waiting": 0,
+                                    "last_activity": 0})
+        tab["sessions"] += 1
+        tab["last_activity"] = max(tab["last_activity"], row.get("ended") or 0)
+    for key, tab in tabs.items():
+        tab["waiting"] = waits.get(key, 0)
+    return sorted(tabs.values(), key=lambda t: (t["last_activity"], t["project"]),
+                  reverse=True)
+
+
+def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
+                  panes: list[TmuxPane], running: set[str]) -> list[dict]:
+    """One row per Claude session that is running right now.
+
+    Exact, not inferred. The registry names the session, so this is the one
+    section on the page that can say "open" without hedging — which is also why
+    it holds claude only: there is no equivalent registry for codex or kimi, and
+    correlating a pane by cwd or timing would put a guess in a section whose
+    entire value is that it does not guess.
+
+    A session the index has never seen — started minutes ago, not yet archived —
+    still gets a row, built from the registry's own `cwd` and `name`. Losing a
+    running session from "open now" is the worst failure this section has.
+
+    Ordered by last activity, newest first. `ended` is that; `started_at` is
+    when the *process* began and says nothing about which session you were just
+    in. An unindexed session has no `ended` at all, so its registry
+    `started_at` stands in for the sort — it is the only timestamp that exists
+    for it, and it keeps a brand-new session near the top where it belongs.
+    """
+    by_id = {row["id"]: row for row in indexed}
+    rows = []
+    for session in sessions:
+        known = by_id.get(session.session_id)
+        base = known or {}
+        row = {
+            "id": session.session_id,
+            "pid": session.pid,
+            "agent": base.get("agent") or "claude",
+            "kind": "main",
+            # From the registry: what the human called it, and what it is doing.
+            "name": session.name or base.get("name") or "",
+            "status": session.status or "",
+            "waiting_for": session.waiting_for or "",
+            "started_at": session.started_at,
+            # From the index: where it lives and how far it got.
+            "cwd": base.get("cwd") or session.cwd or "",
+            "project": base.get("project"),
+            "n_turns": base.get("n_turns") or 0,
+            "ended": base.get("ended"),
+            "title": base.get("title"),
+            "outcome": base.get("outcome"),
+            "scad_run_id": base.get("scad_run_id"),
+            "indexed": known is not None,
+        }
+        re_ = reentry_for(row, panes, running)
+        row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note}
+        rows.append(row)
+    rows.sort(key=lambda r: r["ended"] or r["started_at"] or 0, reverse=True)
+    return rows
+
+
 def _last_text(conn, session_id: str) -> str:
     row = conn.execute(
         "SELECT text FROM turns WHERE session_id = ? ORDER BY idx DESC LIMIT 1",
@@ -316,10 +427,23 @@ def _last_text(conn, session_id: str) -> str:
 
 
 def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
-           live_ids: set[str] | None = None) -> dict:
-    """Everything the page needs: what waits, what is live, and the full list."""
+           live_ids: set[str] | None = None, live_sessions: list | None = None) -> dict:
+    """Everything the page needs: what waits, what is live, and the full list.
+
+    `live_sessions` is the claude process registry. It is read here rather than
+    passed by the caller so the page cannot silently lose it — but it stays
+    injectable, exactly like `panes` and `running`, because a test must never
+    depend on what the developer happens to have open.
+
+    Nothing is filtered by project here. The page embeds every row already and
+    scopes itself in the browser, so a second filter in SQL would be a parallel
+    mechanism that could disagree with the tabs about the same project.
+    """
     cutoff = int((time.time() - days * 86400) * 1000)
-    live_ids = live_ids or set()
+    sessions = _live_sessions(live_sessions)
+    # The registry names sessions exactly, which is what finally lets status_for
+    # answer `open` rather than `maybe-open` for a claude session.
+    live_ids = set(live_ids or ()) | {s.session_id for s in sessions}
     # A cwd with an agent in it means "something is running here", not "this
     # session is". That distinction is what status_for reports honestly.
     cwds = {p.path for p in panes if is_agent_command(p.command) and p.path}
@@ -327,8 +451,12 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     waiting_rows = conn.execute(
         f"SELECT {_COLUMNS} FROM sessions "
         f"WHERE kind = 'main' AND outcome IN (?, ?) AND ended >= ? "
-        # Questions first, then oldest first inside each group so nothing rots.
-        f"ORDER BY CASE outcome WHEN 'awaiting-question' THEN 0 ELSE 1 END, ended ASC",
+        # Questions first — one that actually asked you something outranks one
+        # merely idle — then newest first inside each group. The page is read
+        # top-down and current work is what you want at hand. Oldest-first was
+        # the earlier rule, to keep old rows from rotting unseen at the bottom;
+        # they are still listed, just below the live ones rather than above them.
+        f"ORDER BY CASE outcome WHEN 'awaiting-question' THEN 0 ELSE 1 END, ended DESC",
         (*_WAITING, cutoff),
     ).fetchall()
     waiting = _as_rows(waiting_rows, panes, running, live_ids, cwds)
@@ -363,6 +491,8 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     at_hand, closed_waiting = split_waiting(waiting, cwds)
 
     return {
+        "open_now": open_now_rows(sessions, all_rows, panes, running),
+        "tabs": project_tabs(all_rows, waiting),
         "waiting": waiting,
         "waiting_at_hand": at_hand,
         "waiting_closed": closed_waiting,
@@ -379,7 +509,7 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
 
 _PAGE = """<!doctype html>
 <meta charset="utf-8">
-<title>scad — sessions</title>
+<title>scad — {page_name}</title>
 <style>
  :root {{
    --bg:#f6f7f9; --card:#fff; --ink:#1c1f24; --dim:#6b7280; --faint:#9ca3af;
@@ -429,6 +559,10 @@ _PAGE = """<!doctype html>
  .open {{ color: var(--open); background: var(--open-bg); }}
  .maybe-open {{ color: var(--maybe); background: var(--maybe-bg); }}
  .closed {{ color: var(--shut); background: var(--shut-bg); }}
+ /* The registry's own status for a session proven to be running. */
+ .busy {{ color: var(--open); background: var(--open-bg); }}
+ .waiting {{ color: var(--maybe); background: var(--maybe-bg); }}
+ .idle {{ color: var(--shut); background: var(--shut-bg); }}
  .ag {{ font-size: .72rem; font-weight: 600; }}
  .ag.claude {{ color: var(--claude); }}
  .ag.codex {{ color: var(--codex); }}
@@ -447,45 +581,102 @@ _PAGE = """<!doctype html>
  .clip {{ cursor: zoom-in; border-bottom: 1px dotted var(--faint); }}
  .clip.open {{ cursor: auto; border-bottom: 0; user-select: text;
                -webkit-line-clamp: unset; overflow: visible; }}
+ /* .row is display:grid, which outranks the UA sheet's [hidden] rule, so a
+    hidden row would otherwise still be drawn. Same for .card and .body. */
+ [hidden] {{ display: none !important; }}
+ .tabs {{ display: flex; flex-wrap: wrap; gap: .35rem; margin: 0 0 .4rem;
+          padding-bottom: .8rem; border-bottom: 1px solid var(--line); }}
+ .tab {{ font: inherit; font-size: .8rem; display: inline-flex; align-items: center;
+         gap: .35rem; padding: .28rem .6rem; border-radius: 999px; cursor: pointer;
+         background: var(--card); color: var(--dim);
+         border: 1px solid var(--line); }}
+ .tab:hover {{ background: var(--chip-h); }}
+ .tab.on {{ background: var(--ink); color: var(--bg); border-color: var(--ink); }}
+ .tab .n {{ font-size: .7rem; font-weight: 600; color: var(--faint); }}
+ .tab.on .n {{ color: var(--bg); opacity: .75; }}
+ /* Anything waiting on you is the reason to click a tab at all. */
+ .tab.hot .n {{ color: var(--ask); }}
+ .tab.on.hot .n {{ color: var(--bg); opacity: 1; }}
+ .row.top {{ border-top: 0; }}
+ #gen {{ font-weight: 600; }}
+ #gen.stale {{ color: var(--ask); }}
 </style>
 <div class="wrap">
 <header>
  <h1>scad sessions</h1>
- <div class="sub">{generated} · {n_panes} panes open · {n_at_hand} waiting at hand ·
-   {n_closed} waiting closed · {n_all} sessions · click any command to copy</div>
+ <!-- There is no refresh button and there cannot be one: this is a file://
+      document with no server, so it cannot run an index pass. A button that
+      re-read the same file would look like refreshing while changing nothing.
+      What the page CAN do honestly is say how old it is, and keep saying it. -->
+ <div class="sub">generated {generated} · <b id="gen">just now</b> ·
+   regenerate with <code onclick="copy(this)">scad view</code></div>
+ <div class="sub">{n_open_now} open now · {n_panes} panes open ·
+   {n_at_hand} waiting at hand · {n_closed} waiting closed · {n_all} sessions ·
+   click any command to copy</div>
 </header>
 
-<h2>Open now <span class="n">{n_panes}</span></h2>
-{grouped_panes}
+<div class="tabs" id="tabs">{tabs}</div>
 
-<h2>Waiting — a pane is open for it <span class="n">{n_at_hand}</span></h2>
-{waiting}
+<section data-sec="open-now">
+<h2>Open now <span class="n" data-count>{n_open_now}</span></h2>
+<div class="body">{open_now}</div>
+<div class="empty scoped" hidden></div>
+</section>
 
-<h2>Waiting — closed <span class="n">{n_closed}</span></h2>
-{grouped_closed}
+<section data-sec="panes">
+<h2>Agent panes <span class="n" data-count>{n_panes}</span></h2>
+<div class="body">{grouped_panes}</div>
+<div class="empty scoped" hidden></div>
+</section>
 
-<h2>Notes <span class="n">{n_notes}</span></h2>
-{notes}
+<section data-sec="at-hand">
+<h2>Waiting — a pane is open for it <span class="n" data-count>{n_at_hand}</span></h2>
+<div class="body">{waiting}</div>
+<div class="empty scoped" hidden></div>
+</section>
 
-<h2>All sessions <span class="n">{n_all}</span></h2>
+<section data-sec="closed">
+<h2>Waiting — closed <span class="n" data-count>{n_closed}</span></h2>
+<div class="body">{grouped_closed}</div>
+<div class="empty scoped" hidden></div>
+</section>
+
+<section data-sec="notes">
+<h2>Notes <span class="n" data-count>{n_notes}</span></h2>
+<div class="body">{notes}</div>
+<div class="empty scoped" hidden></div>
+</section>
+
+<section data-sec="all">
+<h2>All sessions <span class="n" data-count>{n_all}</span></h2>
 <input id="f" placeholder="filter by name, project, cwd, title…" autocomplete="off">
 <div id="all"></div>
+</section>
 </div>
 
 <script>
 const DATA = {data};
+// The quote key is single-quoted on purpose. Written as an escaped double
+// quote it collapsed here into three bare quote characters, a syntax error
+// that took the ENTIRE script down with it: no All-sessions list, no copy, no
+// expand, no tabs, and a page that still looked plausible. Single quotes need
+// no escape on either side, so the hazard cannot come back.
 const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c =>
-  ({{"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}})[c]);
+  ({{"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}})[c]);
 const when = ms => ms ? new Date(ms).toLocaleString() : "";
-const label = r => r.name || r.title || r.id.slice(0, 12);
+// Same rule as the server-rendered rows: the name a human chose, else the id.
+// A derived title never stands in for one — it rides along in the meta line.
+const label = r => r.name || r.id.slice(0, 12);
 
 function rows(list) {{
-  if (!list.length) return '<div class="empty">Nothing here.</div>';
+  if (!list.length) return '<div class="empty">' +
+    (SCOPE ? 'No sessions in ' + esc(SCOPE) + '.' : 'Nothing here.') + '</div>';
   return '<div class="card">' + list.map(r =>
     '<div class="row"><div class="who"><div class="t" title="' + esc(r.cwd ?? "") + '">' + esc(label(r)) +
     '</div><div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
+    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
     '</div></div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
     '</span>' + (r.reentry.command ? '<code title="' + esc(r.reentry.command) + '" onclick="copy(this)">' + esc(r.reentry.command) +
     '</code>' : '') + '</div></div>').join('') + '</div>';
@@ -510,11 +701,82 @@ function copy(el) {{
 const f = document.getElementById("f");
 const draw = () => {{
   const q = f.value.toLowerCase();
-  document.getElementById("all").innerHTML = rows(DATA.all.filter(r => !q ||
-    [r.name, r.project, r.cwd, r.title, r.id].some(v => (v ?? "").toLowerCase().includes(q))));
+  const list = DATA.all.filter(r =>
+    (!SCOPE || (r.project || "") === SCOPE) &&
+    (!q || [r.name, r.project, r.cwd, r.title, r.id]
+             .some(v => (v ?? "").toLowerCase().includes(q))));
+  document.getElementById("all").innerHTML = rows(list);
+  const n = document.querySelector('section[data-sec="all"] [data-count]');
+  if (n) n.textContent = list.length;
 }};
 f.addEventListener("input", draw);
-draw();
+
+// Which project the page is scoped to. "" is All — the page as it has always
+// looked. Everything is already in the document, so a tab only hides rows:
+// no re-render, no second file, nothing to re-run.
+let SCOPE = "";
+
+function applyScope() {{
+  document.querySelectorAll(".row[data-project]").forEach(r => {{
+    r.hidden = SCOPE !== "" && (r.dataset.project || "") !== SCOPE;
+  }});
+  document.querySelectorAll(".card").forEach(card => {{
+    const rs = [...card.querySelectorAll(".row")];
+    const vis = rs.filter(r => !r.hidden);
+    card.hidden = rs.length > 0 && vis.length === 0;
+    // The first row draws no top border. Which row is first changes with
+    // the scope, so the rule cannot be :first-of-type alone.
+    rs.forEach(r => r.classList.remove("top"));
+    if (vis.length) vis[0].classList.add("top");
+  }});
+  document.querySelectorAll("section[data-sec]").forEach(sec => {{
+    if (sec.dataset.sec === "all") return;      // drawn from DATA, see draw()
+    const body = sec.querySelector(".body");
+    const rs = [...body.querySelectorAll(".row")];
+    const vis = rs.filter(r => !r.hidden).length;
+    const note = sec.querySelector(".scoped");
+    // A section that empties out under a scope says so. A blank region reads
+    // as a broken page, not as an answer.
+    const blank = SCOPE !== "" && rs.length > 0 && vis === 0;
+    body.hidden = blank;
+    note.hidden = !blank;
+    if (blank) note.textContent = "Nothing here for " + SCOPE + ".";
+    const n = sec.querySelector("[data-count]");
+    if (n) n.textContent = SCOPE === "" ? rs.length : vis;
+  }});
+  draw();
+}}
+
+// The page is opened once and left open, so its age is the one fact it can
+// still learn without a server. STALE_AFTER is 15 minutes — long enough not to
+// nag, short enough that a morning-old page is unmistakable.
+const STALE_AFTER = 15 * 60 * 1000;
+function since(ms) {{
+  const s = Math.max(0, (Date.now() - ms) / 1000);
+  if (s < 90) return Math.round(s) + "s ago";
+  const m = Math.round(s / 60);
+  if (m < 90) return m + (m === 1 ? " minute ago" : " minutes ago");
+  const h = Math.round(m / 60);
+  if (h < 36) return h + (h === 1 ? " hour ago" : " hours ago");
+  return Math.round(h / 24) + " days ago";
+}}
+const genEl = document.getElementById("gen");
+const age = () => {{
+  genEl.textContent = since(DATA.generated);
+  genEl.classList.toggle("stale", Date.now() - DATA.generated > STALE_AFTER);
+}};
+age();
+setInterval(age, 15000);
+
+document.getElementById("tabs").addEventListener("click", ev => {{
+  const tab = ev.target.closest(".tab");
+  if (!tab) return;
+  SCOPE = tab.dataset.tab;
+  document.querySelectorAll(".tab").forEach(t => t.classList.toggle("on", t === tab));
+  applyScope();
+}});
+
+applyScope();
 </script>
 </html>
 """
@@ -576,22 +838,45 @@ def _clip(text: str, n: int) -> str:
 
 
 def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
-         extra: str = "", flag: bool = False) -> str:
+         extra: str = "", flag: bool = False, project: str | None = None) -> str:
     """One row, identical in every section.
 
     Every section previously built its own `<table>`, so each computed column
     widths independently and nothing lined up down the page. One grid row shared
     everywhere fixes that by construction — the columns cannot drift apart
     because there is only one definition of them.
+
+    `data-project` is what the tab strip scopes on. Every row carries it, empty
+    string included, so the project filter is one selector rather than a rule
+    per section that some future section would forget to join.
     """
     pill_html = f'<span class="pill {pill}">{_html.escape(pill)}</span>' if pill else ""
+    scope = _html.escape(project or "")
     return (
-        f'<div class="row{" q" if flag else ""}">'
+        f'<div class="row{" q" if flag else ""}" data-project="{scope}">'
         f'<div class="who"><div class="t">{title}</div>'
         f'<div class="m">{meta}</div>{extra}</div>'
         f'<div class="go">{pill_html}{"".join(chips)}</div>'
         f'</div>'
     )
+
+
+def _label(row: dict) -> str:
+    """What a row is called: the human's name, or the id when there is none.
+
+    Never the title. `title` is derived — an agent's summary of the work, or on
+    a skeleton row the first message verbatim — and standing it in for a name is
+    what put the literal string "/rename writing-wm-evals-research" at the top of
+    a row as though the user had titled it that. An id prefix says less and
+    claims nothing, and the name is right there whenever someone chose one.
+    """
+    return _clip(row.get("name") or (row.get("id") or "")[:12], 70)
+
+
+def _title_meta(row: dict) -> str:
+    """The derived title, demoted to the meta line where it cannot pose as a name."""
+    title = row.get("title")
+    return f' · {_clip(title, 70)}' if title else ""
 
 
 def _card(head: str, meta: str, rows: list[str]) -> str:
@@ -608,6 +893,61 @@ def _agent_tag(agent: str) -> str:
     return f'<span class="ag {a}">{a}</span>'
 
 
+def _tabs_html(tabs: list[dict], n_all: int, n_waiting: int) -> str:
+    """The project strip. "All" first and selected, then recency order.
+
+    The number on each tab is what is waiting on you there, because that is the
+    reason to click one. The totals ride along in the tooltip.
+    """
+    e = _html.escape
+    out = [f'<button class="tab on{" hot" if n_waiting else ""}" data-tab="" '
+           f'title="{n_all} sessions · {n_waiting} waiting">All'
+           f'<span class="n">{n_waiting}</span></button>']
+    for tab in tabs:
+        name = e(tab["project"])
+        out.append(
+            f'<button class="tab{" hot" if tab["waiting"] else ""}" data-tab="{name}" '
+            f'title="{tab["sessions"]} sessions · {tab["waiting"]} waiting · '
+            f'{_ago(tab["last_activity"])}">{name}'
+            f'<span class="n">{tab["waiting"]}</span></button>')
+    return "".join(out)
+
+
+def _open_now_html(rows: list[dict]) -> str:
+    """Sessions the registry proves are running, newest activity first.
+
+    The status pill is the point of the section: `waiting` is the one asking
+    for you, `busy` is working without you, `idle` is open and quiet.
+    """
+    if not rows:
+        return _empty("No Claude sessions are running — nothing is provably open. "
+                      "(codex and kimi publish no registry, so they never appear here.)")
+    e = _html.escape
+    out = []
+    for r in rows:
+        bits = [_agent_tag(r.get("agent") or "claude")]
+        if r.get("indexed"):
+            bits += [e(r.get("project") or ""), f'{r.get("n_turns") or 0} turns',
+                     _ago(r.get("ended"))]
+        else:
+            # Started too recently to have been archived. Say so rather than
+            # showing zeros that look like a session which did nothing.
+            bits += [_clip(r.get("cwd") or "", 60), "not indexed yet"]
+        meta = " · ".join(b for b in bits if b) + _title_meta(r)
+
+        extra = ""
+        if r.get("waiting_for"):
+            extra = f'<div class="needs">waiting on {e(str(r["waiting_for"]))}</div>'
+
+        chips = [_chip(_resume_command(r), ghost=True)]
+        if r["reentry"]["kind"] in ("tmux", "container"):
+            chips.insert(0, _chip(r["reentry"]["command"]))
+        out.append(_row(_label(r), meta, chips, pill=r.get("status") or "open",
+                        extra=extra, flag=r.get("status") == "waiting",
+                        project=r.get("project")))
+    return f'<div class="card">{"".join(out)}</div>'
+
+
 def _grouped_panes_html(groups: list[dict]) -> str:
     """tmux session -> window card -> one row per agent pane."""
     if not groups:
@@ -619,8 +959,10 @@ def _grouped_panes_html(groups: list[dict]) -> str:
             rows = []
             for r in w["panes"]:
                 if r.get("likely_id"):
-                    title = _clip(r.get("likely_title") or r["likely_id"][:12], 70)
+                    title = _label({"name": r.get("likely_name"), "id": r["likely_id"]})
                     hint = f'~{e(r["likely_id"][:8])} · best guess'
+                    if r.get("likely_title"):
+                        hint += f' · {_clip(r["likely_title"], 70)}'
                 else:
                     title = '<span class="m">no indexed session here</span>'
                     hint = "unmatched"
@@ -632,6 +974,7 @@ def _grouped_panes_html(groups: list[dict]) -> str:
                     f'{_agent_tag(r["agent"])} {e(r.get("version") or "")} · '
                     f'{e(r["target"])} · {hint} · {_ago(r.get("last_activity"))}',
                     [_chip(r["goto"]), _chip(resume, ghost=True)],
+                    project=r.get("project"),
                 ))
             cwds = ", ".join(sorted({r.get("cwd") for r in w["panes"] if r.get("cwd")}))
             head = (f'<span class="clip" title="{e(cwds)}" data-full="{e(cwds)}" '
@@ -664,11 +1007,12 @@ def _waiting_rows_html(rows: list[dict]) -> str:
         if r["reentry"]["kind"] == "tmux":
             chips.insert(0, _chip(r["reentry"]["command"]))
         out.append(_row(
-            _clip(r.get("name") or r.get("title") or r["id"][:12], 70),
+            _label(r),
             f'{_agent_tag(r.get("agent") or "")} · {e(r.get("project") or "")} · '
-            f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}',
+            f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}{_title_meta(r)}',
             chips, pill=r.get("status", ""), extra=extra,
             flag=r.get("outcome") == "awaiting-question",
+            project=r.get("project"),
         ))
     return f'<div class="card">{"".join(out)}</div>'
 
@@ -684,11 +1028,12 @@ def _grouped_closed_html(groups: list[dict]) -> str:
         for r in g["rows"]:
             extra = f'<div class="needs">{e(str(r["needs"]))}</div>' if r.get("needs") else ""
             rows.append(_row(
-                _clip(r.get("name") or r.get("title") or r["id"][:12], 70),
+                _label(r),
                 f'{_agent_tag(r.get("agent") or "")} · {r.get("n_turns") or 0} turns · '
-                f'{_ago(r.get("ended"))}',
+                f'{_ago(r.get("ended"))}{_title_meta(r)}',
                 [_chip(_resume_command(r))], extra=extra,
                 flag=r.get("outcome") == "awaiting-question",
+                project=r.get("project") or g["project"],
             ))
         out.append(_card(e(g["project"]),
                          f'{len(g["rows"])} waiting · {_ago(g["last_activity"])}', rows))
@@ -715,7 +1060,7 @@ def _notes_html(groups: list[dict]) -> str:
             rows.append(_row(
                 _clip(n.get("title") or n.get("topic") or "(untitled)", 90),
                 f'<b>{e(str(n.get("topic") or ""))}</b> · {e(rel)}{parent} · {_ago(n.get("ts"))}',
-                [], extra=out_extra,
+                [], extra=out_extra, project=n.get("project"),
             ))
         out.append(_card(
             _clip(g["label"], 60),
@@ -726,11 +1071,21 @@ def _notes_html(groups: list[dict]) -> str:
 
 
 def render(data: dict) -> str:
-    """One self-contained page. No network, no external assets."""
+    """One self-contained page. No network, no external assets.
+
+    Every row is in the document already, so the project tabs scope the page in
+    the browser. That keeps one artifact that still survives `scp` — which is
+    the whole reason this is a static file — and one filtering mechanism, so
+    nothing can disagree with anything else about a project.
+    """
     return _PAGE.format(
+        page_name="sessions",
+        tabs=_tabs_html(data.get("tabs") or [], len(data["all"]), len(data["waiting"])),
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
         n_panes=len(data.get("panes") or []),
+        n_open_now=len(data.get("open_now") or []),
+        open_now=_open_now_html(data.get("open_now") or []),
         n_at_hand=len(data.get("waiting_at_hand") or []),
         n_closed=len(data.get("waiting_closed") or []),
         grouped_panes=_grouped_panes_html(data.get("grouped_panes") or []),

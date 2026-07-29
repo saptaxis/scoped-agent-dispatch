@@ -20,6 +20,20 @@ def runner():
     return CliRunner()
 
 
+@pytest.fixture
+def offline_view(monkeypatch):
+    """Keep `scad view` off the developer's real Claude state.
+
+    Two paths reach outside the tmp dirs and neither can be redirected by
+    SCAD_HOME, because both are Claude Code's own directories: the live session
+    registry under `~/.claude/sessions`, and the archive sweep that `view` now
+    runs by default. Tests that care about the sweep patch `run_reindex`
+    themselves; this stops everyone else from touching it.
+    """
+    monkeypatch.setattr("scad.view.claude_live_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("scad.cli.run_reindex", lambda *a, **k: {})
+
+
 class TestRelativeTime:
     def test_just_now(self):
         from datetime import datetime, timezone
@@ -1834,6 +1848,37 @@ class TestIndexCommands:
         result = runner.invoke(main, ["session", "ls"])
         assert "S1" in result.output
 
+    def test_session_ls_shows_a_renamed_session_by_its_name(self, runner, tmp_path, monkeypatch):
+        """`/rename` is the commoner way a session acquires a human name."""
+        self._seed(tmp_path, monkeypatch)
+        p = (Path(os.environ["SCAD_ARCHIVE"]) / "claude" / "projects" / "-repo" / "S1.jsonl")
+        with p.open("a") as fh:
+            fh.write(json.dumps({"type": "custom-title", "sessionId": "S1",
+                                 "customTitle": "jul29-session-cli"}) + "\n")
+        runner.invoke(main, ["reindex", "--no-archive"])
+
+        result = runner.invoke(main, ["session", "ls"])
+        assert result.exit_code == 0
+        line = next(ln for ln in result.output.splitlines() if "S1" in ln)
+        assert re.match(r"^S1\s+jul29-session-cli\s", line), line
+
+    def test_session_ls_leaves_the_name_blank_when_nobody_renamed(self, runner, tmp_path,
+                                                                  monkeypatch):
+        """The id is always shown; the name column is EMPTY rather than filled
+        with derived text. Showing an agent's own title there is what made a
+        session read as "/rename writing-wm-evals-research"."""
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex", "--no-archive"])
+        from scad.index import connect as index_connect
+
+        conn = index_connect()
+        conn.execute("UPDATE sessions SET title = 'Doing the thing' WHERE id = 'S1'")
+        conn.commit()
+
+        result = runner.invoke(main, ["session", "ls"])
+        line = next(ln for ln in result.output.splitlines() if "S1" in ln)
+        assert re.match(r"^S1\s+2026-", line), line       # id, then blank, then the date
+
     def test_grade_filter_separates_skeletons(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
         runner.invoke(main, ["reindex", "--no-archive"])
@@ -2305,6 +2350,7 @@ class TestRememberSkillIsAThinCaller:
         assert "Do not set them." in self.text
 
 
+@pytest.mark.usefixtures("offline_view")
 class TestViewCommand:
     def test_writes_a_page_and_reports_the_path(self, runner, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
@@ -2345,27 +2391,57 @@ class TestReindexSweepIsolation:
         sweep.assert_not_called()
 
 
+@pytest.mark.usefixtures("offline_view")
 class TestViewRefresh:
-    """`scad view` is a read-only renderer by default — the viewer spec states it
-    three times, including the non-goal "the viewer never writes to the index."
+    """`scad view` archives and indexes before rendering, by default.
 
-    `--refresh` is the opt-in exception. Keeping it opt-in is the whole point:
-    the default contract stays true, and the page only gains a side effect when
-    you ask for one.
+    It shipped the other way round — read-only, with `--refresh` as the opt-in
+    exception — because the viewer spec states the read-only contract three
+    times. Two things overturned that. Nothing else refreshes the index (the
+    launchd timer was declined), so opt-in meant stale whenever you forgot. And
+    the failure path already existed: a refresh that fails warns and renders
+    the existing index rather than withholding the page, which was the
+    strongest argument against defaulting it.
+
+    `--no-refresh` preserves the pure reader for anyone who wants it.
     """
 
-    def test_default_does_not_touch_the_index(self, runner, tmp_path, monkeypatch):
+    def test_the_default_refreshes(self, runner, tmp_path, monkeypatch):
+        """Nothing else refreshes the index — the timer was declined — so an
+        opt-in refresh means a stale page every time you forget the flag."""
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         with patch("scad.cli.run_reindex") as ri:
-            runner.invoke(main, ["view", "--no-open"])
+            result = runner.invoke(main, ["view", "--no-open"])
+        ri.assert_called_once()
+        assert result.exit_code == 0
+
+    def test_no_refresh_keeps_the_pure_reader(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        with patch("scad.cli.run_reindex") as ri:
+            result = runner.invoke(main, ["view", "--no-open", "--no-refresh"])
         ri.assert_not_called()
+        assert result.exit_code == 0
+
+    def test_the_old_refresh_flag_is_still_accepted(self, runner, tmp_path, monkeypatch):
+        """Muscle memory and scripts should not break — it just does nothing."""
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        with patch("scad.cli.run_reindex") as ri:
+            result = runner.invoke(main, ["view", "--no-open", "--refresh"])
+        assert result.exit_code == 0
+        ri.assert_called_once()
+
+    def test_only_one_way_is_documented(self, runner):
+        """Two documented flags for one decision is one too many."""
+        help_text = runner.invoke(main, ["view", "--help"]).output
+        assert "--no-refresh" in help_text
+        assert "--refresh" not in help_text.replace("--no-refresh", "")
 
     def test_refresh_runs_an_incremental_pass_before_rendering(
         self, runner, tmp_path, monkeypatch
     ):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         with patch("scad.cli.run_reindex") as ri:
-            result = runner.invoke(main, ["view", "--refresh", "--no-open"])
+            result = runner.invoke(main, ["view", "--no-open"])
         ri.assert_called_once()
         # Incremental, and sweeping: archiving is how new work enters the index
         # at all, so a refresh that skipped it would render the same stale page.
@@ -2379,7 +2455,82 @@ class TestViewRefresh:
         nothing, provided the failure is said out loud."""
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         with patch("scad.cli.run_reindex", side_effect=OSError("disk full")):
-            result = runner.invoke(main, ["view", "--refresh", "--no-open"])
+            result = runner.invoke(main, ["view", "--no-open"])
         assert result.exit_code == 0
         assert "disk full" in result.output
         assert str(tmp_path / ".scad") in result.output
+
+
+class TestProjectShow:
+    """It has to agree with the page about the same project."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        (arc / "claude" / "projects" / "-repo").mkdir(parents=True)
+        (arc / "claude" / "projects" / "-repo" / "S1.jsonl").write_text(json.dumps({
+            "type": "assistant", "sessionId": "S1", "timestamp": "2026-07-28T10:00:00.000Z",
+            "cwd": "/repo", "message": {"role": "assistant",
+                                        "content": [{"type": "text", "text": "hello"}]},
+        }) + "\n")
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        return arc
+
+    def _indexed(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex", "--no-archive"])
+        from scad.index import connect as index_connect
+
+        from scad.index import upsert_session
+        from scad.records import SessionRecord
+
+        conn = index_connect()
+        conn.execute("UPDATE sessions SET project = 'alpha' WHERE id = 'S1'")
+        upsert_session(conn, SessionRecord(
+            id="SUB1", kind="subagent", agent="claude", source="claude-transcript",
+            cwd="/repo", started=1000, ended=2000, parent_session_id="S1"),
+            machine="mac", project="alpha", archive_path="/arc/SUB1.jsonl",
+            source_size=1, source_mtime=1, parsed_offset=1)
+        conn.commit()
+        return conn
+
+    def test_subagents_are_excluded_exactly_as_the_viewer_excludes_them(
+        self, runner, tmp_path, monkeypatch
+    ):
+        """A subagent is triggered BY an agent and cannot be resumed. Listing it
+        here while the page hides it made the two disagree about one project."""
+        self._indexed(runner, tmp_path, monkeypatch)
+        result = runner.invoke(main, ["project", "show", "alpha"])
+        assert result.exit_code == 0, result.output
+        assert "S1" in result.output
+        assert "SUB1" not in result.output
+
+    def test_the_name_column_is_shown(self, runner, tmp_path, monkeypatch):
+        """`session ls` shows it; the same session in `project show` did not."""
+        conn = self._indexed(runner, tmp_path, monkeypatch)
+        conn.execute("UPDATE sessions SET name = 'jul29-viewer' WHERE id = 'S1'")
+        conn.commit()
+        result = runner.invoke(main, ["project", "show", "alpha"])
+        line = next(ln for ln in result.output.splitlines() if "S1" in ln)
+        assert re.match(r"^S1\s+jul29-viewer\s", line), line
+
+    def test_an_unnamed_session_leaves_the_column_blank_never_the_title(
+        self, runner, tmp_path, monkeypatch
+    ):
+        conn = self._indexed(runner, tmp_path, monkeypatch)
+        conn.execute("UPDATE sessions SET title = 'Doing the thing' WHERE id = 'S1'")
+        conn.commit()
+        result = runner.invoke(main, ["project", "show", "alpha"])
+        line = next(ln for ln in result.output.splitlines() if "S1" in ln)
+        assert re.match(r"^S1\s+2026-", line), line     # id, blank name, then the date
+        assert "Doing the thing" in line               # still there, as the title
+
+    def test_a_project_with_nothing_you_started_is_an_error_not_a_blank(
+        self, runner, tmp_path, monkeypatch
+    ):
+        conn = self._indexed(runner, tmp_path, monkeypatch)
+        conn.execute("UPDATE sessions SET project = 'beta' WHERE id = 'S1'")
+        conn.commit()
+        result = runner.invoke(main, ["project", "show", "alpha"])
+        assert result.exit_code != 0
+        assert "alpha" in result.output
