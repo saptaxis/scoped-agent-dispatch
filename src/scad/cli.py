@@ -82,8 +82,16 @@ from scad.index import (
     connect as index_connect,
     reindex as run_reindex,
     search_turns,
+    session_notes as index_session_notes,
     session_row,
     session_turns,
+)
+from scad.notes import (
+    NoteTargetError,
+    append_note,
+    current_session_id,
+    note_path,
+    read_note_file,
 )
 
 
@@ -1990,6 +1998,98 @@ def session_show(session_id):
     ).fetchone()["n"]
     if kids:
         click.echo(f"{'subagents':<18} {kids}")
+
+    # The authored tier. Listed by topic rather than counted alone, because the
+    # question a note answers is "what did I decide here", and a bare count
+    # answers nothing. `scad session notes <id>` prints the text.
+    notes = index_session_notes(conn, session_id)
+    click.echo(f"{'notes':<18} {len(notes)}")
+    for n in notes:
+        click.echo(f"  [{n['idx']:>3}] {n['topic'] or '?':<24} {(n['title'] or '')[:48]}")
+
+
+@session.command("note")
+@click.option("--session", "session_id", default=None,
+              help="Append to this session's note file.")
+@click.option("--current", is_flag=True,
+              help="Append to the session whose trace is being written in this cwd.")
+@click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
+def session_note(session_id, current, agent):
+    """Append one /remember capture, read as JSON on stdin.
+
+    The record is composed in-session, where the context already is — this only
+    decides where it lands and appends it. That split is the point: judgment
+    belongs to the agent holding the conversation, and store resolution belongs
+    here, so codex and pi get the same store without reimplementing it in prose.
+    """
+    if bool(session_id) == bool(current):
+        raise click.ClickException("Pass exactly one of --session <id> or --current.")
+
+    if current:
+        try:
+            session_id = current_session_id()
+        except NoteTargetError as exc:
+            raise click.ClickException(str(exc)) from exc
+
+    raw = sys.stdin.read()
+    try:
+        record = json.loads(raw)
+    except ValueError as exc:
+        raise click.ClickException(f"stdin is not valid JSON: {exc}") from exc
+
+    try:
+        path = append_note(record, session_id=session_id, agent=agent)
+    except ValueError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    # Confirm, do not echo: the caller just wrote the record and printing it back
+    # into the transcript would double its cost in context for no information.
+    rel = record.get("relation") or "?"
+    if record.get("parent"):
+        rel += f" <- {record['parent']}"
+    click.echo(f"[scad] noted {session_id}  {record.get('topic') or '?'}  "
+               f"{rel}  {len(record.get('tags') or [])} tags")
+    click.echo(f"[scad] {path}")
+
+
+@session.command("notes")
+@click.argument("session_id")
+@click.option("--agent", default="claude", help="Which agent's shard to read.")
+@click.option("--json", "as_json", is_flag=True, help="Emit the records as written.")
+def session_notes_cmd(session_id, agent, as_json):
+    """Print a session's notes, oldest first.
+
+    Reads the FILE, not the index. The file is truth, and a note must be
+    readable before anything has been indexed and after a --rebuild has dropped
+    every row.
+    """
+    path = note_path(session_id, agent)
+    records = read_note_file(path)
+
+    if as_json:
+        click.echo(json.dumps(records, ensure_ascii=False, default=str))
+        return
+    if not records:
+        click.echo(f"[scad] No notes for {session_id}.")
+        return
+
+    click.echo(f"[scad] {path}")
+    for i, r in enumerate(records):
+        head = f"[{i:>3}] {r.get('ts') or '?'}  {r.get('topic') or '?'}"
+        if r.get("relation"):
+            head += f"  ({r['relation']}" + (f" <- {r['parent']}" if r.get("parent") else "") + ")"
+        click.echo(head)
+        click.echo(f"      {r.get('title') or ''}")
+        if r.get("text"):
+            click.echo()
+            for line in str(r["text"]).splitlines():
+                click.echo(f"      {line}")
+        for field in ("tags", "entities"):
+            if r.get(field):
+                click.echo(f"      {field}: {', '.join(str(v) for v in r[field])}")
+        if r.get("invalidation"):
+            click.echo(f"      invalidation: {r['invalidation']}")
+        click.echo()
 
 
 @main.group()

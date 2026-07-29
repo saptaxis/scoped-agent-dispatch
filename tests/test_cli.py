@@ -1903,7 +1903,10 @@ class TestRunSessionSplit:
 
     CONTAINER_VERBS = ("start", "stop", "clean", "attach", "info",
                        "inject", "jobs", "logs", "send", "refresh")
-    TRACE_VERBS = ("ls", "show", "read")
+    # `note` and `notes` belong here rather than under `run`: they are keyed on
+    # a session uuid, not a run id, and a note can outlive every container that
+    # ever existed.
+    TRACE_VERBS = ("ls", "show", "read", "note", "notes")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -2004,3 +2007,173 @@ class TestRenameLeftNoStaleDocs:
         stale = [p.name for p in self._sources()
                  if "scad status" in p.read_text(errors="ignore")]
         assert stale == []
+
+
+class TestSessionNote:
+    """`scad session note` — the write CLI for the one tier with no second copy."""
+
+    NOTE = {"topic": "notes-store", "relation": "continue", "title": "built it",
+            "text": "**Frame**\nmulti\nline", "tags": ["notes", "jsonl"],
+            "entities": ["session-index.md"]}
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return tmp_path / ".scad"
+
+    def _projects(self, tmp_path, monkeypatch, cwd, session_id="S1"):
+        """A fake ~/.claude/projects holding one live transcript for `cwd`."""
+        from scad.notes import encode_cwd
+        home = tmp_path / "home"
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        d = home / ".claude" / "projects" / encode_cwd(str(Path(cwd).resolve()))
+        d.mkdir(parents=True)
+        (d / f"{session_id}.jsonl").write_text(
+            json.dumps({"sessionId": session_id, "cwd": str(Path(cwd).resolve())}) + "\n")
+        return home
+
+    def test_explicit_session_appends_the_record(self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code == 0, result.output
+        path = scad_home / "notes" / "claude" / "S1.jsonl"
+        assert json.loads(path.read_text())["title"] == "built it"
+
+    def test_the_file_lands_agent_sharded_and_session_keyed(self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "X9", "--agent", "codex"],
+                      input=json.dumps(self.NOTE))
+        assert (scad_home / "notes" / "codex" / "X9.jsonl").is_file()
+
+    def test_a_second_note_appends_leaving_the_first_byte_identical(
+            self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        path = scad_home / "notes" / "claude" / "S1.jsonl"
+        first = path.read_bytes()
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps({**self.NOTE, "title": "and again"}))
+        assert path.read_bytes().startswith(first)
+        assert len(path.read_text().splitlines()) == 2
+
+    def test_current_resolves_the_live_session_in_this_cwd(self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        work = tmp_path / "work"
+        work.mkdir()
+        self._projects(tmp_path, monkeypatch, work, session_id="LIVE")
+        monkeypatch.chdir(work)
+        result = runner.invoke(main, ["session", "note", "--current"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code == 0, result.output
+        assert (scad_home / "notes" / "claude" / "LIVE.jsonl").is_file()
+
+    def test_current_records_the_cwd_it_resolved_from(self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        work = tmp_path / "work"
+        work.mkdir()
+        self._projects(tmp_path, monkeypatch, work, session_id="LIVE")
+        monkeypatch.chdir(work)
+        runner.invoke(main, ["session", "note", "--current"], input=json.dumps(self.NOTE))
+        rec = json.loads((scad_home / "notes" / "claude" / "LIVE.jsonl").read_text())
+        assert rec["cwd_at_write"] == str(work.resolve())
+
+    def test_two_live_sessions_refuse_and_name_the_flag(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        work = tmp_path / "work"
+        work.mkdir()
+        home = self._projects(tmp_path, monkeypatch, work, session_id="alpha")
+        from scad.notes import encode_cwd
+        d = home / ".claude" / "projects" / encode_cwd(str(work.resolve()))
+        (d / "beta.jsonl").write_text(json.dumps({"cwd": str(work.resolve())}) + "\n")
+        monkeypatch.chdir(work)
+        result = runner.invoke(main, ["session", "note", "--current"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code != 0
+        assert "--session" in result.output
+
+    def test_no_session_at_all_is_a_clear_error_not_a_traceback(
+            self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+        work = tmp_path / "work"
+        work.mkdir()
+        monkeypatch.chdir(work)
+        result = runner.invoke(main, ["session", "note", "--current"],
+                               input=json.dumps(self.NOTE))
+        assert result.exit_code != 0
+        assert "--session" in result.output
+
+    def test_neither_target_is_refused(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note"], input=json.dumps(self.NOTE))
+        assert result.exit_code != 0
+
+    def test_malformed_stdin_is_refused_without_writing_anything(
+            self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input="not json at all")
+        assert result.exit_code != 0
+        assert not (scad_home / "notes" / "claude" / "S1.jsonl").exists()
+
+    def test_it_confirms_briefly_without_echoing_the_record(
+            self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps(self.NOTE))
+        assert "notes-store" in result.output          # the topic
+        assert "**Frame**" not in result.output        # not the whole text
+
+
+class TestSessionNotes:
+    NOTE = {"topic": "t", "relation": "continue", "title": "first", "tags": ["a"]}
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return tmp_path / ".scad"
+
+    def test_reads_back_newest_last(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps({**self.NOTE, "title": "second"}))
+        result = runner.invoke(main, ["session", "notes", "S1"])
+        assert result.exit_code == 0
+        assert result.output.index("first") < result.output.index("second")
+
+    def test_json_round_trips_the_records_as_written(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["session", "notes", "S1", "--json"])
+        payload = json.loads(result.stdout)
+        assert payload[0]["title"] == "first"
+        assert payload[0]["cwd_at_write"]
+
+    def test_it_reads_the_file_not_the_index(self, runner, tmp_path, monkeypatch):
+        # The file is truth. A note must be readable before any reindex has run,
+        # and after a rebuild has dropped every row.
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["session", "notes", "S1"])
+        assert result.exit_code == 0 and "first" in result.output
+
+    def test_a_session_with_no_notes_says_so(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "notes", "NOPE"])
+        assert result.exit_code == 0
+        assert "no notes" in result.output.lower()
+
+    def test_session_show_counts_the_notes(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "show", "S1"])
+        assert result.exit_code == 0
+        assert "notes" in result.output
