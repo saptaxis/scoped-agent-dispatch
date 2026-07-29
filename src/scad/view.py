@@ -406,6 +406,9 @@ _PAGE = """<!doctype html>
  input {{ font: inherit; padding: .5rem .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
           border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); }}
  input:focus {{ outline: 2px solid var(--claude); outline-offset: -1px; }}
+ .clip {{ cursor: zoom-in; border-bottom: 1px dotted var(--faint); }}
+ .clip.open {{ cursor: auto; border-bottom: 0; user-select: text;
+               -webkit-line-clamp: unset; overflow: visible; }}
 </style>
 <div class="wrap">
 <header>
@@ -445,6 +448,16 @@ function rows(list) {{
     '</div></div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
     '</span>' + (r.reentry.command ? '<code title="' + esc(r.reentry.command) + '" onclick="copy(this)">' + esc(r.reentry.command) +
     '</code>' : '') + '</div></div>').join('') + '</div>';
+}}
+
+function expand(ev, el) {{
+  // A title tooltip cannot be selected, so hover alone makes text readable but
+  // not copyable. Expanding turns it into ordinary selectable content.
+  ev.stopPropagation();
+  if (el.classList.contains("open")) return;
+  el.textContent = el.dataset.full;
+  el.classList.add("open");
+  el.removeAttribute("title");
 }}
 
 function copy(el) {{
@@ -504,16 +517,21 @@ def _chip(text: str, ghost: bool = False) -> str:
 
 
 def _clip(text: str, n: int) -> str:
-    """Truncate for display but keep the whole thing reachable on hover.
+    """Truncate for display, expandable to the full text on click.
 
-    Unlike the CSS ellipsis on chips, this actually removes characters, so
-    without the title the rest would be unrecoverable from the page.
+    A `title` tooltip alone is not enough: browser tooltips cannot be selected,
+    so anything only reachable by hover cannot be copied — and a path you can
+    read but not copy is half a feature. Clicking expands the element in place,
+    after which the text is ordinary selectable content.
+
+    The tooltip stays for a quick peek that needs no click.
     """
     text = str(text or "")
     safe = _html.escape(text)
     if len(text) <= n:
         return safe
-    return f'<span title="{safe}">{_html.escape(text[:n])}…</span>'
+    return (f'<span class="clip" title="{safe}" data-full="{safe}" '
+            f'onclick="expand(event, this)">{_html.escape(text[:n])}…</span>')
 
 
 def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
@@ -574,10 +592,12 @@ def _grouped_panes_html(groups: list[dict]) -> str:
                     f'{e(r["target"])} · {hint} · {_ago(r.get("last_activity"))}',
                     [_chip(r["goto"]), _chip(resume, ghost=True)],
                 ))
-            cwds = {r.get("cwd") for r in w["panes"] if r.get("cwd")}
-            head_title = f' title="{e(", ".join(sorted(cwds)))}"' if cwds else ""
+            cwds = ", ".join(sorted({r.get("cwd") for r in w["panes"] if r.get("cwd")}))
+            head = (f'<span class="clip" title="{e(cwds)}" data-full="{e(cwds)}" '
+                    f'onclick="expand(event, this)">{e(w["label"] or w["target"])}</span>'
+                    if cwds else e(w["label"] or w["target"]))
             out.append(_card(
-                f'<span{head_title}>{e(w["label"] or w["target"])}</span>',
+                head,
                 f'{e(g["session"])} · {e(w["target"])} · {len(w["panes"])} agent'
                 f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}',
                 rows,
@@ -597,7 +617,8 @@ def _waiting_rows_html(rows: list[dict]) -> str:
             extra += f'<div class="needs">{e(str(r["needs"]))}</div>'
         if r.get("last_text"):
             flat = " ".join(str(r["last_text"]).split())
-            extra += f'<div class="snip" title="{e(flat)}">{e(flat[:240])}</div>'
+            extra += (f'<div class="snip clip" title="{e(flat)}" data-full="{e(flat)}" '
+                      f'onclick="expand(event, this)">{e(flat[:240])}</div>')
         chips = [_chip(_resume_command(r), ghost=True)]
         if r["reentry"]["kind"] == "tmux":
             chips.insert(0, _chip(r["reentry"]["command"]))

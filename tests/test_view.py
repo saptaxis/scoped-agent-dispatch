@@ -561,3 +561,43 @@ class TestHoverTitles:
         html = render(gather(conn, [], set()))
         assert '&quot;quoted&quot;' in html
         assert '<b>x</b>' not in html
+
+
+class TestExpandableText:
+    def _html_with_long_title(self, tmp_path, title):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        conn.execute("UPDATE sessions SET title = ? WHERE id = 'S1'", (title,))
+        conn.commit()
+        return render(gather(conn, [], set()))
+
+    def test_clipped_text_carries_the_full_string_for_expansion(self, tmp_path):
+        """A tooltip cannot be selected, so hover-only text cannot be copied."""
+        long_title = "y" * 200
+        html = self._html_with_long_title(tmp_path, long_title)
+        assert f'data-full="{long_title}"' in html
+        assert 'onclick="expand(event, this)"' in html
+
+    def test_the_expand_handler_makes_it_selectable(self, tmp_path):
+        html = self._html_with_long_title(tmp_path, "z" * 200)
+        assert "function expand(" in html
+        assert "el.textContent = el.dataset.full" in html
+        assert "user-select: text" in html
+
+    def test_expanding_drops_the_now_redundant_tooltip(self, tmp_path):
+        html = self._html_with_long_title(tmp_path, "z" * 200)
+        assert 'el.removeAttribute("title")' in html
+
+    def test_expanding_does_not_trigger_the_row_copy(self, tmp_path):
+        """Chips copy on click; expanding sits inside the same row and must not
+        also fire a copy."""
+        html = self._html_with_long_title(tmp_path, "z" * 200)
+        assert "ev.stopPropagation()" in html
+
+    def test_data_full_is_attribute_escaped(self, tmp_path):
+        html = self._html_with_long_title(tmp_path, 'has "quotes" ' + "w" * 200)
+        assert 'data-full="has &quot;quotes&quot;' in html
+
+    def test_short_text_is_neither_clipped_nor_clickable(self, tmp_path):
+        html = self._html_with_long_title(tmp_path, "brief")
+        assert 'data-full="brief"' not in html
