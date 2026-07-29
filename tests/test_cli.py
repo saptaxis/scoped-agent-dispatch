@@ -283,7 +283,7 @@ class TestSessionStatus:
         mock_crashed.return_value = []
         result = runner.invoke(main, ["status"])
         assert result.exit_code == 0
-        assert "No running sessions" in result.output
+        assert "No running runs" in result.output
 
     @patch("scad.cli.get_all_sessions")
     def test_status_all_shows_history(self, mock_all, runner):

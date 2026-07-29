@@ -339,7 +339,7 @@ def status(config_name: str, show_all: bool, cost: bool):
         status_data = get_project_status(config_name, include_cost=cost)
 
         if status_data["total_sessions"] == 0:
-            click.echo(f"[scad] No sessions found for config: {config_name}")
+            click.echo(f"[scad] No runs found for config: {config_name}")
             return
 
         parts = []
@@ -397,7 +397,7 @@ def status(config_name: str, show_all: bool, cost: bool):
         else:
             running = list_scad_containers()
             if not running:
-                click.echo("[scad] No running sessions.")
+                click.echo("[scad] No running runs.")
             else:
                 click.echo(
                     f"{'RUN ID':<30} {'CONFIG':<12} {'BRANCH':<25} "
