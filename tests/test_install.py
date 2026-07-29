@@ -554,3 +554,75 @@ class TestPortableUninstall:
         # BSD sed rejects `sed -i "/x/,+2d"`; the uninstall path must be portable.
         assert 'sed -i "/$MARKER/,+2d"' not in content
         assert "awk" in content
+
+
+class TestInstallPathIsThePluginRoot:
+    """installPath must name the directory Claude Code loads components from.
+
+    Measured, not assumed: every working entry in a real installed_plugins.json
+    points at a directory that CONTAINS `.claude-plugin/`, alongside
+    `commands/` and `skills/`. install.sh passes `$REPO_DIR/.claude-plugin`,
+    one level too deep, so Claude Code looked for `commands/` inside the
+    manifest directory, found none, and `/remember` never loaded — with the
+    entry present and enabled, which is what made it look like a registration
+    problem rather than a path problem.
+    """
+
+    def _repo(self, tmp_path):
+        import json
+        repo = tmp_path / "repo"
+        (repo / ".claude-plugin").mkdir(parents=True)
+        (repo / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "scad", "version": "0.3.0"}))
+        (repo / "commands").mkdir()
+        (repo / "commands" / "remember.md").write_text("# remember\n")
+        (tmp_path / ".claude").mkdir()
+        return repo
+
+    def _entry(self, tmp_path):
+        import json
+        data = json.loads(
+            (tmp_path / ".claude" / "plugins" / "installed_plugins.json").read_text())
+        return data["plugins"]["scad"][0]
+
+    def test_being_handed_the_manifest_dir_still_records_the_root(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo = self._repo(tmp_path)
+        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin")
+        assert self._entry(tmp_path)["installPath"] == str(repo)
+
+    def test_the_recorded_path_is_where_commands_actually_live(self, tmp_path):
+        from scad.install import register_claude_plugin
+        from pathlib import Path as P
+
+        repo = self._repo(tmp_path)
+        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin")
+        recorded = P(self._entry(tmp_path)["installPath"])
+        assert (recorded / "commands" / "remember.md").is_file()
+        assert (recorded / ".claude-plugin" / "plugin.json").is_file()
+
+    def test_being_handed_the_root_directly_is_unchanged(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo = self._repo(tmp_path)
+        register_claude_plugin(tmp_path / ".claude", repo)
+        assert self._entry(tmp_path)["installPath"] == str(repo)
+
+    def test_a_pre_existing_entry_is_never_dropped(self, tmp_path):
+        # An official plugin update overwrote installed_plugins.json once and
+        # took scad's entry with it. Registration must not return the favour.
+        import json
+        from scad.install import register_claude_plugin
+
+        repo = self._repo(tmp_path)
+        plugins = tmp_path / ".claude" / "plugins"
+        plugins.mkdir(parents=True)
+        (plugins / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {"humanizer@humanizer": [{"scope": "user", "installPath": "/x"}]},
+        }))
+        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin")
+        data = json.loads((plugins / "installed_plugins.json").read_text())
+        assert set(data["plugins"]) == {"humanizer@humanizer", "scad"}
+        assert data["plugins"]["humanizer@humanizer"][0]["installPath"] == "/x"
