@@ -1,14 +1,27 @@
 # scad — scoped agent dispatch
 
-Thin, config-driven CLI that wraps Docker, git, and Claude Code into a repeatable workflow for isolated AI coding sessions. Define your project once in YAML — scad handles environment setup, session lifecycle, code flow, and operational visibility.
+A CLI with state that knows every agent session on your machine — and can run them in isolated containers when you want that.
+
+Two halves that share one substrate:
+
+- **Session state.** Every Claude and codex session on the machine, archived before it is pruned, indexed, searchable, and answerable: *what is waiting on me, and how do I get back to it?*
+- **Isolated runs.** Define a project once in YAML; scad handles Docker, git branches, mounts and session lifecycle so agents never touch your working tree.
 
 ## The problem
 
-Running Claude Code on your working tree means it touches your files, your branch, your environment. If you want isolated agents — or parallel plans on separate branches — you're stuck setting up Docker, entrypoint scripts, git branches, and volume mounts by hand.
+Two problems, and they turn out to be the same one.
+
+**Agents forget, and then the evidence disappears.** Claude Code deletes transcripts after 30 days by default; `scad run clean` used to destroy a container's traces outright. Run five agents in parallel and you lose track of which conversation is waiting on you — and once a session's terminal closes, it is effectively unreachable even though the data survives.
+
+**Running Claude Code on your working tree** means it touches your files, your branch, your environment. Isolated or parallel agents mean Docker, entrypoints, branches and mounts by hand.
 
 ## What this does
 
-`scad` manages the full lifecycle: **config** your project, **build** a Docker image, start a **run**, inject **jobs**, manage **code** flow between host and container, and **clean up** when done.
+**Knows what ran.** Reads the agents' own JSONL — it instruments nothing — and archives it somewhere nothing deletes it. `scad view` renders one self-contained page: open agent panes grouped by tmux window, sessions waiting on you, and a copy-pasteable command to re-enter any of them (`tmux select-pane`, `scad run attach`, or `cd <cwd> && claude --resume <id>` for one that has been closed).
+
+**Remembers what mattered.** `/remember` from any agent appends a durable note keyed to that session — the one thing here that cannot be re-derived from anything else.
+
+**Runs agents in isolation.** **config** your project, **build** an image, start a **run**, inject **jobs**, manage **code** flow between host and container, **clean up** when done.
 
 ```bash
 scad config new myproject --edit          # scaffold and edit a config
@@ -49,6 +62,17 @@ Operational visibility: `scad run ls` shows running runs and their jobs, `scad r
 ## Install
 
 Requires Python 3.11+ and Git.
+
+On first install scad offers to raise Claude Code's transcript retention
+(`cleanupPeriodDays`, 30 days by default). The archive can only keep what still exists, so
+on a machine that has been running a while the default has already destroyed history before
+scad first runs. It **asks** — `~/.claude/settings.json` is Claude Code's file, not scad's —
+and it leaves any value you have already set alone, in either direction. `--no-retention`
+never asks; `--yes` accepts without prompting, for scripted installs.
+
+Install also registers scad as a Claude Code plugin via its own marketplace, so `/remember`
+is available immediately and survives the official-plugin updates that rewrite
+`installed_plugins.json`.
 
 **Linux** — needs a running Docker daemon. `install.sh` verifies it is reachable and errors with setup guidance if not.
 
@@ -171,14 +195,21 @@ scad archive --run <run-id>                        # archive one run only
 scad archive --json                                # machine-readable counts
 
 # Session index
-scad reindex [--rebuild] [--force]                 # build the index from the archive
+scad reindex [--rebuild] [--force]                 # archive new traces, then index them
+scad reindex --no-archive                          # index only what is already archived
 scad session ls [--project X] [--kind K] ...       # list indexed sessions
+scad session ls --outcome awaiting-question        # what is explicitly asking you something
 scad session show <id>                             # one session's metadata + turn breakdown
 scad session read <id> [--kind text]               # print a session's turns
 scad search <query> [--kind thinking]              # full-text search across every turn
 scad project ls | scad project show <name>         # sessions grouped by resolved project
 scad where                                         # which project scad resolves for a directory
 scad view [--days N] [--no-open] [--output PATH]   # render the index to a page and open it
+
+# Notes — the authored tier
+scad session note --current                        # append a record (JSON on stdin); /remember calls this
+scad session notes <id>                            # read a session's notes back
+scad search <query> --notes                        # search topic, title, tags, entities
 ```
 
 ## Quick start
@@ -352,6 +383,38 @@ Live panes are matched by working directory, which is approximate — several pa
 share one. Only panes actually running an agent count, and where more than one matches
 every candidate is listed rather than one being guessed at. tmux and docker are queried
 at render time and degrade to empty if either is unavailable, so the page still renders.
+
+## Notes — what the agent chose to record
+
+Traces are *evidence*: what happened, derived, rebuildable, and pruned by the agents
+themselves. Notes are *self-report*: what an agent decided was worth keeping. That makes
+them the one tier here that can never be re-derived from anything else, so they are stored
+as plain files and the database only indexes them.
+
+```bash
+/remember                       # from inside any Claude session
+/remember focus on the tradeoff # optional angle — you supply it, the session has the material
+```
+
+The command produces the record in-session — where the context already is, so it costs one
+generation and no re-reading — and pipes it to `scad session note --current`, which resolves
+"the session whose trace is being written in this cwd right now". Notes land at
+`~/.scad/notes/<agent>/<session-uuid>.jsonl`, one appending file per session.
+
+```bash
+scad session notes <id>         # read them back, from the file
+scad search "resolver" --notes  # search topic, title, tags, entities
+```
+
+**Session-keyed, never project-keyed.** A project is derived and can be redefined; a path
+containing one would orphan every file the moment it changed. Each record carries
+`cwd_at_write`, so the project stays rederivable from the note alone even after every trace
+is gone.
+
+Each record is one JSON line: `topic`, `relation` (`continue` / `shift` / `branch` /
+`return`), `parent`, `title`, `text`, `tags`, `entities`. The relation edges form the
+session's semantic tree, so the notes viewer shows them in write order — a note out of
+sequence says nothing about the shape of the work.
 
 ## Config reference
 
