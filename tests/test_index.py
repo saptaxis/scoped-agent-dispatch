@@ -486,6 +486,63 @@ class TestApplyJobState:
         assert row["needs"] is None
 
 
+class TestOutcomeCoverage:
+    """`outcome` after tool-result-last: what is total, and what is honestly not.
+
+    The spec claims outcome becomes total. It does not, for two reasons that have
+    nothing to do with this branch, and both are pinned here so the gap is a
+    documented fact rather than a surprise at query time:
+
+      1. `read_codex_rollout` never calls `derive_outcome` at all — 107 of 1458
+         rows on the real index. That is a separate reader, not a missing branch.
+      2. A transcript with no `message` records at all (a job that died before
+         the model spoke) has an empty tail, so there is nothing to derive.
+    """
+
+    TOOL_RESULT_LAST = [
+        {"type": "assistant", "sessionId": "S1", "timestamp": "2026-07-28T10:00:00.000Z",
+         "cwd": "/repo", "message": {"role": "assistant", "stop_reason": "tool_use",
+                                     "content": [{"type": "tool_use", "name": "Bash",
+                                                  "input": {}}]}},
+        {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:01.000Z",
+         "cwd": "/repo", "message": {"role": "user",
+                                     "content": [{"type": "tool_result", "content": "ok"}]}},
+    ]
+    NO_MESSAGES = [{"type": "mode", "sessionId": "S2", "mode": "default"},
+                   {"type": "permission-mode", "sessionId": "S2", "permissionMode": "plan"}]
+
+    def _index(self, tmp_path, monkeypatch, files):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        for rel, records in files:
+            arc_write(arc, rel, records)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        return conn
+
+    def test_claude_transcripts_with_turns_all_get_an_outcome(self, tmp_path, monkeypatch):
+        conn = self._index(tmp_path, monkeypatch, [
+            ("claude/projects/-repo/S1.jsonl", self.TOOL_RESULT_LAST),
+            ("claude/projects/-repo/S1/subagents/agent-sub1.jsonl", self.TOOL_RESULT_LAST),
+            ("claude/projects/-repo/S3.jsonl",
+             [{**r, "sessionId": "S3"} for r in MAIN]),
+        ])
+        nulls = conn.execute(
+            "SELECT count(*) FROM sessions WHERE grade = 'full' AND n_turns > 0 "
+            "AND agent = 'claude' AND outcome IS NULL").fetchone()[0]
+        assert nulls == 0
+        assert session_row(conn, "S1")["outcome"] == "tool-result-last"
+        assert session_row(conn, "sub1")["outcome"] == "tool-result-last"
+
+    def test_a_transcript_with_no_messages_keeps_a_null_outcome(self, tmp_path, monkeypatch):
+        """There is genuinely nothing to derive; a fabricated label would be worse."""
+        conn = self._index(tmp_path, monkeypatch,
+                           [("claude/projects/-repo/S2.jsonl", self.NO_MESSAGES)])
+        row = session_row(conn, "S2")
+        assert row["n_turns"] == 0
+        assert row["outcome"] is None
+
+
 class TestReindexJoinsJobState:
     STATE = [{"name": "nd-5", "sessionId": "S1", "state": "blocked",
               "needs": "drop the bioRxiv PDF", "detail": "workflow salvaged",

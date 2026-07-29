@@ -20,6 +20,7 @@ from scad.records import (
     OUTCOME_AWAITING_USER,
     OUTCOME_IN_FLIGHT,
     OUTCOME_INTERRUPTED,
+    OUTCOME_TOOL_RESULT_LAST,
     OUTCOME_USER_LAST,
     TOOL_RESULT_CAP,
     JobStateRecord,
@@ -129,6 +130,14 @@ def derive_outcome(tail: dict) -> str | None:
         return OUTCOME_IN_FLIGHT
     if tail.get("last_role") == "assistant":
         return OUTCOME_AWAITING_USER
+    if tail.get("last_was_tool_result"):
+        # A tool returned and the model never spoke again — the ordinary terminal
+        # state of a subagent transcript, and 73% of a real index before it had a
+        # name. It reached here by construction: `last_role == "user"` is excluded
+        # from user-last by last_was_tool_result, and that same tool_result has
+        # already cleared pending_tool_use, so in-flight cannot fire either.
+        # NOT in-flight: see records.py for why the two stay apart.
+        return OUTCOME_TOOL_RESULT_LAST
     return None
 
 

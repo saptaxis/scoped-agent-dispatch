@@ -25,6 +25,13 @@ OUTCOME_AWAITING_USER = "awaiting-user"           # model spoke last, nobody rep
 OUTCOME_INTERRUPTED = "interrupted"               # user stopped it
 OUTCOME_IN_FLIGHT = "in-flight"                   # tool call with no result
 OUTCOME_USER_LAST = "user-last"                   # user spoke, model never answered
+OUTCOME_TOOL_RESULT_LAST = "tool-result-last"     # a tool returned; the model never spoke again
+
+# `in-flight` and `tool-result-last` are opposite sides of the same stall and are
+# deliberately NOT one value: in-flight is a call awaiting its RESULT,
+# tool-result-last is a result awaiting the MODEL. Collapsing them would make the
+# column lie about which side the work is stuck on — the one question it exists
+# to answer.
 
 
 @dataclass(frozen=True)

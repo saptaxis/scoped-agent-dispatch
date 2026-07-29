@@ -358,6 +358,7 @@ from scad.records import (  # noqa: E402
     OUTCOME_AWAITING_USER,
     OUTCOME_IN_FLIGHT,
     OUTCOME_INTERRUPTED,
+    OUTCOME_TOOL_RESULT_LAST,
     OUTCOME_USER_LAST,
 )
 
@@ -429,6 +430,58 @@ class TestSessionOutcome:
         session, _, _ = read_claude_transcript(p)
         assert session.n_tool_denials == 1
         assert session.n_errors == 1
+
+    def test_a_result_with_no_reply_is_tool_result_last(self, tmp_path):
+        """The ordinary terminal state of a subagent transcript — 943 of 1070
+        NULL-outcome rows on the real index, and 200/200 of a hand sample.
+
+        It fell through every branch by construction: `last_role == 'user'` is
+        excluded from user-last by last_was_tool_result, and that same
+        tool_result has already cleared pending_tool_use, so in-flight cannot
+        fire either.
+        """
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "tool_use", "name": "Bash", "input": {}}], stop_reason="tool_use"),
+            {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:01.000Z",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}},
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.outcome == OUTCOME_TOOL_RESULT_LAST
+
+    def test_it_is_not_folded_into_in_flight(self, tmp_path):
+        """Opposite sides of the same stall: in-flight is a call awaiting its
+        RESULT; this is a result awaiting the MODEL. Collapsing them would make
+        the column lie about which side the work is stuck on."""
+        assert OUTCOME_TOOL_RESULT_LAST != OUTCOME_IN_FLIGHT
+
+        call_only = write_jsonl(tmp_path / "A.jsonl", [assistant(
+            [{"type": "tool_use", "name": "Bash", "input": {}}], stop_reason="tool_use")])
+        result_last = write_jsonl(tmp_path / "B.jsonl", [
+            assistant([{"type": "tool_use", "name": "Bash", "input": {}}], stop_reason="tool_use"),
+            {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:01.000Z",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}},
+        ])
+        assert read_claude_transcript(call_only)[0].outcome == OUTCOME_IN_FLIGHT
+        assert read_claude_transcript(result_last)[0].outcome == OUTCOME_TOOL_RESULT_LAST
+
+    def test_an_answered_result_still_wins_over_tool_result_last(self, tmp_path):
+        """Only the TAIL matters: a result the model then answered is not a stall."""
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "tool_use", "name": "Bash", "input": {}}], stop_reason="tool_use"),
+            {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:01.000Z",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}},
+            assistant([{"type": "text", "text": "done"}], ts="2026-07-28T10:00:02.000Z"),
+        ])
+        assert read_claude_transcript(p)[0].outcome == OUTCOME_AWAITING_USER
+
+    def test_an_interrupt_still_wins_over_a_trailing_result(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", [
+            assistant([{"type": "tool_use", "name": "Bash", "input": {}}], stop_reason="tool_use"),
+            {"type": "user", "sessionId": "S1", "timestamp": "2026-07-28T10:00:01.000Z",
+             "interruptedMessageId": "m1",
+             "message": {"role": "user", "content": [{"type": "tool_result", "content": "ok"}]}},
+        ])
+        assert read_claude_transcript(p)[0].outcome == OUTCOME_INTERRUPTED
 
     def test_no_heuristic_on_question_marks(self, tmp_path):
         """Prose ending in '?' must NOT be labelled awaiting-question — that is a

@@ -1800,6 +1800,13 @@ class TestIndexCommands:
         assert result.exit_code == 0
         assert json.loads(result.stdout)[0]["id"] == "S1"
 
+    def test_tool_result_last_is_a_filterable_outcome(self, runner, tmp_path, monkeypatch):
+        """The majority outcome on a real index — unfilterable is unusable."""
+        self._seed(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["session", "ls", "--outcome", "tool-result-last"])
+        assert result.exit_code == 0, result.output
+
     def test_session_ls_shows_the_human_name_over_a_uuid(self, runner, tmp_path, monkeypatch):
         """nd-5 is how a person refers to the session; the uuid prefix is not."""
         self._seed(tmp_path, monkeypatch)

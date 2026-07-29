@@ -1900,7 +1900,7 @@ def reindex(rebuild, force):
               help="full = has turns; skeleton = known only from history.jsonl.")
 @click.option("--outcome", default=None,
               type=click.Choice(["awaiting-question", "awaiting-user", "interrupted",
-                                 "in-flight", "user-last"]),
+                                 "in-flight", "tool-result-last", "user-last"]),
               help="Terminal state — e.g. --outcome awaiting-question for sessions asking you something.")
 @click.option("--since", default=None, help="Only sessions started on/after YYYY-MM-DD.")
 @click.option("--until", default=None, help="Only sessions started before YYYY-MM-DD.")
