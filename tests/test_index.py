@@ -327,6 +327,99 @@ class TestReindex:
         assert stats["skipped_lines"] >= 1
 
 
+KIMI_WIRE = [
+    {"type": "context.append_message", "time": 1785232800003,
+     "message": {"role": "user", "content": [{"type": "text", "text": "do the thing"}],
+                 "origin": {"kind": "user"}}},
+    {"type": "turn.prompt", "input": [{"type": "text", "text": "do the thing"}],
+     "origin": {"kind": "user"}, "time": 1785232800004},
+    {"type": "context.append_loop_event", "time": 1785232800005,
+     "event": {"type": "content.part", "uuid": "p1",
+               "part": {"type": "text", "text": "on it"}}},
+]
+
+
+class TestReindexKimi:
+    def _archive(self, arc: Path) -> None:
+        arc_write(arc, "kimi/wd_repo_ab/session_K1/agents/main/wire.jsonl", KIMI_WIRE)
+        arc_write(arc, "kimi/wd_repo_ab/session_K1/agents/agent-0/wire.jsonl", KIMI_WIRE)
+        state = arc / "kimi" / "wd_repo_ab" / "session_K1" / "state-history.jsonl"
+        state.write_text(json.dumps({
+            "workDir": "/repo", "title": "kimi work",
+            "createdAt": "2026-07-28T10:00:00.000Z",
+            "updatedAt": "2026-07-28T10:05:00.000Z",
+        }) + "\n")
+
+    def test_kimi_files_route_to_the_kimi_reader(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._archive(arc)
+
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+
+        row = session_row(conn, "K1")
+        assert row["agent"] == "kimi"
+        assert row["source"] == "kimi-wire"
+        assert row["cwd"] == "/repo"
+        assert row["title"] == "kimi work"
+
+    def test_main_and_subagent_are_separate_rows(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._archive(arc)
+
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+
+        rows = list(conn.execute(
+            "SELECT id, kind, parent_session_id FROM sessions WHERE agent='kimi'"))
+        assert len(rows) == 2
+        sub = next(r for r in rows if r["kind"] == "subagent")
+        assert sub["parent_session_id"] == "K1"
+
+    def test_user_turns_are_not_doubled_through_the_index(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._archive(arc)
+
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+
+        n = conn.execute(
+            "SELECT count(*) FROM turns WHERE session_id='K1' AND role='user'"
+        ).fetchone()[0]
+        assert n == 1
+
+    def test_second_pass_is_a_no_op(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._archive(arc)
+
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        stats = reindex(conn)
+        assert stats["sessions"] == 0
+        assert stats["turns"] == 0
+
+    def test_a_kimi_state_history_makes_no_phantom_job_row(self, tmp_path, monkeypatch):
+        """It rides the job-state name, but carries no sessionId — so it must add
+        nothing rather than forge a row."""
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._archive(arc)
+
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 2
+
+
 class TestRebuildSafety:
     def test_rebuild_refuses_when_raw_is_missing(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))

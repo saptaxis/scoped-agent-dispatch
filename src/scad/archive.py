@@ -250,12 +250,24 @@ def archive_json_snapshot(src: Path, dest: Path) -> ArchiveResult:
     return ArchiveResult("created" if previous is None else "appended", src, dest, len(data))
 
 
-def archive_tree(src_root: Path, label: str) -> list[ArchiveResult]:
+# Where a root keeps its mutable JSON snapshots, relative to that root. Each is
+# converted to a log on the way in — see archive_json_snapshot.
+#   claude: jobs/<short>/state.json         — the only place a session is NAMED
+#   kimi:   wd_<name>_<hash>/session_<uuid>/state.json
+#           — the only place a kimi session records its workDir, and so the only
+#             way an archived wire can still resolve to a project
+SNAPSHOT_GLOB_CLAUDE = "jobs/*/state.json"
+SNAPSHOT_GLOB_KIMI = "*/*/state.json"
+
+
+def archive_tree(
+    src_root: Path, label: str, *, snapshot_glob: str = SNAPSHOT_GLOB_CLAUDE
+) -> list[ArchiveResult]:
     """Archive every *.jsonl under `src_root` into archive/<label>/…
 
-    Job state is swept alongside, converted to a log on the way in: it is the
-    only place a session's human name exists, and a flat *.jsonl glob leaves it
-    behind.
+    Mutable snapshots are swept alongside, converted to a log on the way in: a
+    flat *.jsonl glob leaves them behind, and each is the only copy of something
+    the JSONL never says.
 
     A missing root is normal, not an error — not every machine runs codex.
     """
@@ -268,7 +280,7 @@ def archive_tree(src_root: Path, label: str) -> list[ArchiveResult]:
         if not src.is_file():
             continue
         results.append(archive_file(src, dest_for(src, src_root, label)))
-    for src in sorted(src_root.glob("jobs/*/state.json")):
+    for src in sorted(src_root.glob(snapshot_glob)):
         if not src.is_file():
             continue
         dest = dest_for(src, src_root, label).with_name(STATE_HISTORY_NAME)
@@ -287,10 +299,12 @@ def archive_run(run_id: str) -> list[ArchiveResult]:
 
 
 def archive_all() -> list[ArchiveResult]:
-    """Sweep every root: host Claude, host codex, and each scad run."""
+    """Sweep every root: host Claude, host codex, host kimi, and each scad run."""
     home = Path.home()
     results = archive_tree(home / ".claude", "claude")
     results += archive_tree(home / ".codex" / "sessions", "codex")
+    results += archive_tree(
+        home / ".kimi-code" / "sessions", "kimi", snapshot_glob=SNAPSHOT_GLOB_KIMI)
     runs = get_scad_home() / "runs"
     if runs.is_dir():
         for entry in sorted(runs.iterdir()):

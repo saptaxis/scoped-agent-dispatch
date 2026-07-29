@@ -25,6 +25,7 @@ from scad.readers import (
     read_claude_history,
     read_codex_rollout,
     read_job_state,
+    read_kimi_wire,
     read_notes,
 )
 from scad.records import (
@@ -41,7 +42,8 @@ SCHEMA_VERSION = 2
 EXTRACTOR_VERSION = 1
 
 # A real `source` value, alongside claude-transcript / claude-subagent /
-# claude-history / codex-rollout: some sessions exist only as job state.
+# claude-history / codex-rollout / kimi-wire: some sessions exist only as job
+# state.
 SOURCE_JOBSTATE = "claude-jobstate"
 
 # ...and some exist only as a note. See index_notes for why that is a row.
@@ -437,15 +439,16 @@ def _run_id_for(rel_parts: tuple) -> str | None:
     return rel_parts[1] if len(rel_parts) > 1 and rel_parts[0] == "runs" else None
 
 
-def _peek_session_id(conn, path: Path) -> str | None:
+def _peek_session_id(conn, path: Path, *, kimi: bool = False) -> str | None:
     """The row id a file maps to, without parsing it.
 
-    Identity is path-derived for Claude (see readers.identity_from_path); codex
-    rollouts key on session_meta, so fall back to the archive path already stored.
+    Identity is path-derived for Claude (see readers.identity_from_path) and for
+    kimi (readers.kimi_identity_from_path); codex rollouts key on session_meta,
+    so fall back to the archive path already stored.
     """
-    from scad.readers import identity_from_path
+    from scad.readers import identity_from_path, kimi_identity_from_path
 
-    ident = identity_from_path(path)
+    ident = kimi_identity_from_path(path) if kimi else identity_from_path(path)
     if ident["kind"] != "main":
         return ident["id"]
     row = conn.execute(
@@ -532,11 +535,19 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
                 stats["sessions"] += 1
             continue
 
-        reader = read_codex_rollout if rel[0] == "codex" else read_claude_any
+        # The archive mirrors each root under its own label, so the label is what
+        # says which format a file is in.
+        kimi = rel[0] == "kimi"
+        if rel[0] == "codex":
+            reader = read_codex_rollout
+        elif kimi:
+            reader = read_kimi_wire
+        else:
+            reader = read_claude_any
 
         # Incremental: resolve the row this file maps to without parsing it, and
         # skip entirely when nothing has been appended since the last pass.
-        probe_id = _peek_session_id(conn, path)
+        probe_id = _peek_session_id(conn, path, kimi=kimi)
         row = session_row(conn, probe_id) if probe_id else None
         if row is not None and row["parsed_offset"] >= stat.st_size:
             continue

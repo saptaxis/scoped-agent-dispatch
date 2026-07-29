@@ -1925,7 +1925,7 @@ def reindex(rebuild, force, no_archive):
 
 @session.command("ls")
 @click.option("--project", default=None, help="Filter by resolved project.")
-@click.option("--agent", default=None, help="Filter by agent (claude, codex).")
+@click.option("--agent", default=None, help="Filter by agent (claude, codex, kimi).")
 @click.option("--kind", default=None, help="Filter by kind (main, subagent, workflow-agent).")
 @click.option("--machine", default=None, help="Filter by machine.")
 @click.option("--grade", default=None, type=click.Choice(["full", "skeleton"]),

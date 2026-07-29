@@ -511,3 +511,264 @@ def read_codex_rollout(
         # last_stop_reason has no codex analogue; NULL beats an invented one.
     )
     return session, turns, end_offset
+
+
+# --- kimi ---------------------------------------------------------------------
+
+# The agent directory that is the session itself. Anything else under `agents/`
+# is a subagent it spawned.
+KIMI_MAIN_AGENT = "main"
+
+# Where a session's state.json lands after the archiver has been over it. It is a
+# mutable object, not a log, so `archive_json_snapshot` appends each distinct
+# version as one line under the job-state name; the newest line is the current
+# state. Reading either shape means the reader works on the live tree and on the
+# archive without knowing which it was handed.
+KIMI_STATE_NAMES = ("state.json", "state-history.jsonl")
+
+
+def _kimi_location(path: Path) -> tuple[Path | None, str | None]:
+    """(session directory, agent name) for a wire.jsonl. (None, None) if neither.
+
+    ~/.kimi-code/sessions/wd_<name>_<hash>/session_<uuid>/agents/<name>/wire.jsonl
+    """
+    for parent in path.parents:
+        if parent.name == "agents":
+            return parent.parent, path.relative_to(parent).parts[0]
+    for parent in path.parents:                 # a session dir with no agents/ level
+        if parent.name.startswith("session_"):
+            return parent, None
+    return None, None
+
+
+def kimi_identity_from_path(path: Path) -> dict:
+    """Derive row identity from where a wire sits, not from its contents.
+
+    Same rule as `identity_from_path`, and for the same reason: nothing inside a
+    kimi wire names its session, and the agent names that DO appear (`agent-0`,
+    `agent-1`) are per-session labels rather than ids — keying on one would merge
+    every session's `agent-0` into a single row. So the session uuid comes from
+    the `session_<uuid>` directory and a subagent's id is that uuid qualified by
+    its agent name.
+    """
+    session_dir, agent = _kimi_location(path)
+    if session_dir is None:
+        return {"kind": KIND_MAIN, "id": None, "parent_session_id": None,
+                "agent_id": None, "session_dir": None}
+
+    name = session_dir.name
+    sid = name[len("session_"):] if name.startswith("session_") else name
+
+    if agent is None or agent == KIMI_MAIN_AGENT:
+        return {"kind": KIND_MAIN, "id": sid, "parent_session_id": None,
+                "agent_id": None, "session_dir": session_dir}
+    return {"kind": KIND_SUBAGENT, "id": f"{sid}:{agent}", "parent_session_id": sid,
+            "agent_id": agent, "session_dir": session_dir}
+
+
+def _kimi_state(session_dir: Path | None) -> dict:
+    """The session's state.json, live or archived. `{}` when there is none.
+
+    Never raises: a session whose state.json is missing, half-written or gone is
+    still a session, and losing its cwd is a smaller loss than losing the wire.
+    """
+    if session_dir is None:
+        return {}
+    for name in KIMI_STATE_NAMES:
+        candidate = session_dir / name
+        if not candidate.is_file():
+            continue
+        try:
+            raw = candidate.read_bytes()
+        except OSError:
+            continue
+        if name.endswith(".jsonl"):
+            lines = [ln for ln in raw.splitlines() if ln.strip()]
+            raw = lines[-1] if lines else b""    # newest version wins
+        try:
+            obj = json.loads(raw)
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return {}
+
+
+def _kimi_text(content) -> str:
+    """Kimi message content is a list of blocks with a `text` field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "".join(b.get("text") or "" for b in content if isinstance(b, dict))
+    return _as_text(content)
+
+
+def _kimi_result_text(result) -> str:
+    """The tool's output, without the harness's annotation.
+
+    `result.note` is a `<system>…lines read from file…</system>` remark the
+    harness adds about paging; it is not what the tool returned, so it is not
+    stored as if it were.
+    """
+    if isinstance(result, dict):
+        output = result.get("output")
+        if isinstance(output, str):
+            return output
+        if output is not None:
+            return _as_text(output)
+    return _as_text(result)
+
+
+def read_kimi_wire(
+    path: Path, start_offset: int = 0
+) -> tuple[SessionRecord | None, list[TurnRecord], int]:
+    """Read one kimi agent's wire.jsonl. Returns (session, turns, end_offset).
+
+    CANONICAL SOURCE — the trap this reader exists to avoid. A kimi wire records
+    every user turn TWICE: once as `turn.prompt` (or `turn.steer` for a mid-turn
+    interjection) and once, verbatim, as a `context.append_message` with
+    `role: "user"`. Verified across the whole corpus: not one prompt appears
+    without its matching message. Reading both would double every user turn,
+    exactly as reading codex's `event_msg` alongside `response_item` would double
+    that corpus.
+
+    `context.append_message` is canonical, for two reasons:
+
+    1. It is a strict superset. Beyond the prompts and steers it also carries the
+       injections — `<system-reminder>` blocks, `local-command-stdout` — that
+       `turn.prompt` never sees, and those are real context the model read.
+    2. It is what the model was actually given. `turn.prompt` is the UI event;
+       `context.append_message` is the context edit that followed it.
+
+    Assistant output is not in either stream: it arrives as
+    `context.append_loop_event`, whose `content.part` blocks carry text and
+    thinking and whose `tool.call` / `tool.result` pairs carry the tools. Those
+    events appear once, so no de-duplication is needed there. `llm.request` is
+    skipped for the same reason `event_msg` is — it is the request built from the
+    context we already read.
+
+    Tolerances match the other readers: unknown record and event types are
+    ignored, malformed lines are skipped rather than raised on, and the parse
+    resumes from `start_offset`.
+    """
+    ident = kimi_identity_from_path(path)
+    state = _kimi_state(ident["session_dir"])
+
+    turns: list[TurnRecord] = []
+    started = ended = None
+    saw_any = False
+    tail: dict = {}
+    open_calls: set = set()          # toolCallIds still awaiting their result
+    last_stop = None
+    denials = 0
+
+    for offset, rec in _iter_lines(path, start_offset):
+        if not isinstance(rec, dict):
+            continue
+        saw_any = True
+        ts = _epoch_ms(rec.get("time"))
+        if ts:                        # span covers every record, turn-bearing or not
+            started = ts if started is None else min(started, ts)
+            ended = ts if ended is None else max(ended, ts)
+        rtype = rec.get("type")
+
+        if rtype == "context.append_message":
+            message = rec.get("message")
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role") or "user"
+            tail.update(last_role=role, last_was_tool_result=False,
+                        asked_question=False)
+            turns.append(TurnRecord(
+                ts, role, "text", _kimi_text(message.get("content")), raw_offset=offset))
+            continue
+
+        if rtype == "permission.record_approval_result":
+            result = rec.get("result")
+            decision = result.get("decision") if isinstance(result, dict) else None
+            # Only "approved" appears in the corpus. Treating anything else as a
+            # refusal over-counts if kimi ever grows a second approving word,
+            # which is the safe direction for a column that exists to surface
+            # friction — a missed denial is invisible, a spurious one is not.
+            if decision is not None and decision != "approved":
+                denials += 1
+            continue
+
+        if rtype != "context.append_loop_event":
+            continue                  # turn.prompt / turn.steer are the duplicate stream
+
+        event = rec.get("event")
+        if not isinstance(event, dict):
+            continue
+        etype = event.get("type")
+
+        if etype == "content.part":
+            part = event.get("part") if isinstance(event.get("part"), dict) else {}
+            ptype = part.get("type")
+            if ptype == "text":
+                kind, text = "text", part.get("text") or ""
+            elif ptype == "think":
+                kind, text = "thinking", part.get("think") or ""
+            else:
+                continue              # a future part shape we do not need to understand
+            tail.update(last_role="assistant", last_was_tool_result=False,
+                        asked_question=False)
+            turns.append(TurnRecord(ts, "assistant", kind, text, raw_offset=offset))
+
+        elif etype == "tool.call":
+            open_calls.add(event.get("toolCallId") or event.get("uuid"))
+            tail.update(last_role="assistant", last_was_tool_result=False,
+                        pending_tool_use=True,
+                        # True only while the ask is the LAST thing in the file:
+                        # any later record clears it, so a question that was
+                        # answered does not leave the session labelled as waiting.
+                        asked_question=event.get("name") == "AskUserQuestion")
+            body, truncated = _cap(_as_text(event.get("args")))
+            turns.append(TurnRecord(
+                ts, "assistant", "tool_use", body, tool_name=event.get("name"),
+                truncated=truncated, raw_offset=offset))
+
+        elif etype == "tool.result":
+            open_calls.discard(event.get("toolCallId") or event.get("parentUuid"))
+            tail.update(last_role="tool", last_was_tool_result=True,
+                        pending_tool_use=bool(open_calls), asked_question=False)
+            body, truncated = _cap(_kimi_result_text(event.get("result")))
+            turns.append(TurnRecord(
+                ts, "tool", "tool_result", body, truncated=truncated, raw_offset=offset))
+
+        elif etype == "step.end" and event.get("finishReason"):
+            last_stop = event["finishReason"]
+
+    end_offset = path.stat().st_size
+    if not saw_any or not ident["id"]:
+        return None, [], end_offset if saw_any else start_offset
+
+    is_main = ident["kind"] == KIND_MAIN
+    state_started = _epoch_ms(state.get("createdAt"))
+    state_ended = _epoch_ms(state.get("updatedAt"))
+    if is_main:
+        # main IS the session, so its own span is the session's span. A subagent's
+        # is not: state.json describes the whole session, and stretching a
+        # subagent that ran for a minute across nine hours would be a lie.
+        started = min(x for x in (started, state_started) if x is not None) \
+            if (started or state_started) else None
+        ended = max(x for x in (ended, state_ended) if x is not None) \
+            if (ended or state_ended) else None
+    else:
+        started = started if started is not None else state_started
+        ended = ended if ended is not None else state_ended
+
+    session = SessionRecord(
+        id=ident["id"], kind=ident["kind"], agent="kimi", source="kimi-wire",
+        parent_session_id=ident["parent_session_id"], agent_id=ident["agent_id"],
+        cwd=state.get("workDir"),
+        title=state.get("title") if is_main else None,   # the title names the session
+        started=started, ended=ended, grade=GRADE_FULL,
+        outcome=derive_outcome(tail), last_stop_reason=last_stop,
+        n_tool_denials=denials,
+        # n_interrupts and n_errors stay 0: a kimi wire has no abort marker and no
+        # error marker. `turn.steer` is a mid-turn interjection, not a stop — and
+        # it is part of the duplicate stream besides. A guessed count would be
+        # worse than an honest zero.
+    )
+    return session, turns, end_offset

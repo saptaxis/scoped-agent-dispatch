@@ -714,3 +714,269 @@ class TestReadNotes:
     def test_non_list_tags_are_coerced_rather_than_dropped(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [{**NOTE, "tags": "notes"}])
         assert read_notes(p)[0][0].tags == ["notes"]
+
+
+# --- kimi: one session directory, one wire per agent --------------------------
+
+from scad.readers import read_kimi_wire  # noqa: E402
+from scad.records import KIND_SUBAGENT  # noqa: E402
+
+KIMI_STATE = {
+    "createdAt": "2026-07-28T10:00:00.000Z",
+    "updatedAt": "2026-07-28T10:05:00.000Z",
+    "title": "Doing the thing",
+    "isCustomTitle": False,
+    "workDir": "/repo",
+    "agents": {
+        "main": {"homedir": "/h/main", "type": "main", "parentAgentId": None},
+        "agent-0": {"homedir": "/h/agent-0", "type": "sub", "parentAgentId": "main"},
+    },
+}
+
+# Deliberately includes BOTH halves of the duplicate pair: `turn.prompt` and the
+# `context.append_message` that repeats it verbatim.
+KIMI_MAIN = [
+    {"type": "metadata", "protocol_version": "1.4", "created_at": 1785232800000},
+    {"type": "config.update", "profileName": "agent", "systemPrompt": "You are Kimi"},
+    {"type": "tools.set_active_tools", "names": ["Bash"], "time": 1785232800001},
+    {"type": "turn.prompt", "input": [{"type": "text", "text": "do the thing"}],
+     "origin": {"kind": "user"}, "time": 1785232800002},
+    {"type": "context.append_message", "time": 1785232800003,
+     "message": {"role": "user", "content": [{"type": "text", "text": "do the thing"}],
+                 "toolCalls": [], "origin": {"kind": "user"}}},
+    {"type": "context.append_loop_event", "time": 1785232800004,
+     "event": {"type": "step.begin", "uuid": "st1", "turnId": "0", "step": 1}},
+    {"type": "llm.request", "kind": "loop", "model": "k3", "time": 1785232800005},
+    {"type": "context.append_loop_event", "time": 1785232800006,
+     "event": {"type": "content.part", "uuid": "p1", "stepUuid": "st1",
+               "part": {"type": "think", "think": "considering"}}},
+    {"type": "context.append_loop_event", "time": 1785232800007,
+     "event": {"type": "content.part", "uuid": "p2", "stepUuid": "st1",
+               "part": {"type": "text", "text": "on it"}}},
+    {"type": "context.append_loop_event", "time": 1785232800008,
+     "event": {"type": "tool.call", "uuid": "tool_a", "toolCallId": "tool_a",
+               "name": "Bash", "args": {"command": "ls"},
+               "description": "Running: ls"}},
+    {"type": "context.append_loop_event", "time": 1785232800009,
+     "event": {"type": "tool.result", "parentUuid": "tool_a", "toolCallId": "tool_a",
+               "result": {"output": "a.txt\nb.txt"}}},
+    {"type": "context.append_loop_event", "time": 1785232800010,
+     "event": {"type": "step.end", "uuid": "st1", "finishReason": "tool_use",
+               "usage": {"output": 12}}},
+    {"type": "usage.record", "model": "kimi-code/k3", "usage": {"output": 12},
+     "time": 1785232800011},
+    {"type": "permission.record_approval_result", "toolCallId": "tool_a",
+     "toolName": "Bash", "action": "Running: ls",
+     "result": {"decision": "approved"}, "time": 1785232800012},
+]
+
+KIMI_SUB = [
+    {"type": "metadata", "protocol_version": "1.4", "created_at": 1785232860000},
+    {"type": "turn.prompt", "input": [{"type": "text", "text": "sub brief"}],
+     "origin": {"kind": "system_trigger", "name": "subagent"}, "time": 1785232860001},
+    {"type": "context.append_message", "time": 1785232860002,
+     "message": {"role": "user", "content": [{"type": "text", "text": "sub brief"}],
+                 "toolCalls": [], "origin": {"kind": "system_trigger"}}},
+    {"type": "context.append_loop_event", "time": 1785232860003,
+     "event": {"type": "content.part", "uuid": "sp1",
+               "part": {"type": "text", "text": "sub answer"}}},
+    {"type": "context.append_loop_event", "time": 1785232860004,
+     "event": {"type": "step.end", "uuid": "sst1", "finishReason": "end_turn"}},
+]
+
+
+def kimi_tree(root: Path, uuid: str = "S-UUID", *, state: dict | None = KIMI_STATE,
+              agents: dict | None = None) -> Path:
+    """Build a real kimi session directory. Returns the session dir."""
+    agents = agents if agents is not None else {"main": KIMI_MAIN}
+    sess = root / f"wd_repo_ba77f0f5" / f"session_{uuid}"
+    sess.mkdir(parents=True, exist_ok=True)
+    if state is not None:
+        (sess / "state.json").write_text(json.dumps(state))
+    for name, lines in agents.items():
+        write_jsonl(sess / "agents" / name / "wire.jsonl", lines)
+    return sess
+
+
+class TestKimiWire:
+    def test_session_fields(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.id == "S-UUID"
+        assert session.kind == KIND_MAIN
+        assert session.agent == "kimi"
+        assert session.source == "kimi-wire"
+        assert session.cwd == "/repo"
+        assert session.title == "Doing the thing"
+        assert session.grade == GRADE_FULL
+        assert session.parent_session_id is None
+
+    def test_user_turns_are_not_doubled(self, tmp_path):
+        """The critical one: turn.prompt and context.append_message repeat
+        each other verbatim, exactly as codex's event_msg repeats response_item."""
+        sess = kimi_tree(tmp_path)
+        _, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert [t.text for t in turns if t.role == "user"] == ["do the thing"]
+
+    def test_content_blocks_become_typed_turns(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        _, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert [t.kind for t in turns] == [
+            "text", "thinking", "text", "tool_use", "tool_result"]
+
+    def test_tool_call_and_result(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        _, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        call = next(t for t in turns if t.kind == "tool_use")
+        result = next(t for t in turns if t.kind == "tool_result")
+        assert call.tool_name == "Bash"
+        assert "ls" in call.text
+        assert result.text == "a.txt\nb.txt"
+        assert result.role == "tool"
+
+    def test_timestamps_are_epoch_milliseconds(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        session, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert turns[0].ts == 1785232800003
+        assert session.started <= turns[0].ts <= session.ended
+
+    def test_last_stop_reason_comes_from_step_end(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.last_stop_reason == "tool_use"
+
+    def test_end_offset_is_the_file_size(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        p = sess / "agents" / "main" / "wire.jsonl"
+        _, _, end = read_kimi_wire(p)
+        assert end == p.stat().st_size
+
+    def test_resume_reads_only_what_was_appended(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        p = sess / "agents" / "main" / "wire.jsonl"
+        first_end = p.stat().st_size
+        with p.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "context.append_loop_event", "time": 1785232800020,
+                "event": {"type": "content.part", "uuid": "p9",
+                          "part": {"type": "text", "text": "later"}}}) + "\n")
+        _, turns, end = read_kimi_wire(p, first_end)
+        assert [t.text for t in turns] == ["later"]
+        assert end == p.stat().st_size
+
+    def test_unknown_record_types_are_ignored(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={
+            "main": KIMI_MAIN + [{"type": "some.future.thing", "time": 1785232800030}]})
+        _, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert len(turns) == 5
+
+    def test_malformed_lines_are_skipped_not_fatal(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        p = sess / "agents" / "main" / "wire.jsonl"
+        p.write_text("{not json\n" + p.read_text())
+        session, turns, _ = read_kimi_wire(p)
+        assert session.id == "S-UUID"
+        assert len(turns) == 5
+
+    def test_an_empty_wire_yields_no_session(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"main": []})
+        session, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session is None
+        assert turns == []
+
+    def test_denied_approvals_are_counted(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"main": KIMI_MAIN + [{
+            "type": "permission.record_approval_result", "toolName": "Bash",
+            "result": {"decision": "denied"}, "time": 1785232800040}]})
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.n_tool_denials == 1
+
+
+class TestKimiIdentity:
+    """Identity comes from the path. Nothing inside the file names the session."""
+
+    def test_subagent_is_keyed_on_session_and_agent_name(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"main": KIMI_MAIN, "agent-0": KIMI_SUB})
+        session, _, _ = read_kimi_wire(sess / "agents" / "agent-0" / "wire.jsonl")
+        assert session.kind == KIND_SUBAGENT
+        assert session.parent_session_id == "S-UUID"
+        assert session.agent_id == "agent-0"
+        assert session.id != "S-UUID"
+        assert "agent-0" in session.id
+
+    def test_two_subagents_of_one_session_do_not_collapse(self, tmp_path):
+        """agent-0/agent-1 are per-session names, not global ids: keying on the
+        name alone would merge every session's agent-0 into one row."""
+        a = kimi_tree(tmp_path, "S-A", agents={"agent-0": KIMI_SUB, "agent-1": KIMI_SUB})
+        b = kimi_tree(tmp_path / "other", "S-B", agents={"agent-0": KIMI_SUB})
+        ids = {
+            read_kimi_wire(a / "agents" / "agent-0" / "wire.jsonl")[0].id,
+            read_kimi_wire(a / "agents" / "agent-1" / "wire.jsonl")[0].id,
+            read_kimi_wire(b / "agents" / "agent-0" / "wire.jsonl")[0].id,
+        }
+        assert len(ids) == 3
+
+    def test_main_and_its_subagent_are_separate_rows(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"main": KIMI_MAIN, "agent-0": KIMI_SUB})
+        main = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")[0]
+        sub = read_kimi_wire(sess / "agents" / "agent-0" / "wire.jsonl")[0]
+        assert main.id != sub.id
+        assert sub.parent_session_id == main.id
+
+
+class TestKimiState:
+    def test_a_missing_state_json_degrades_rather_than_raising(self, tmp_path):
+        sess = kimi_tree(tmp_path, state=None)
+        session, turns, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.id == "S-UUID"
+        assert session.cwd is None
+        assert session.title is None
+        assert len(turns) == 5
+        # Still known, from the wire's own `time` fields — which every record
+        # carries, including the ones that produce no turn.
+        assert session.started == 1785232800001
+
+    def test_a_corrupt_state_json_degrades_rather_than_raising(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        (sess / "state.json").write_text("{not json")
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.cwd is None
+
+    def test_a_subagent_does_not_claim_the_session_title(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"agent-0": KIMI_SUB})
+        session, _, _ = read_kimi_wire(sess / "agents" / "agent-0" / "wire.jsonl")
+        assert session.title is None
+        assert session.cwd == "/repo"        # cwd is the session's, and is shared
+
+
+class TestKimiOutcome:
+    def test_a_returned_tool_result_with_no_reply_is_tool_result_last(self, tmp_path):
+        sess = kimi_tree(tmp_path)
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.outcome == OUTCOME_TOOL_RESULT_LAST
+
+    def test_a_call_with_no_result_is_in_flight(self, tmp_path):
+        lines = [r for r in KIMI_MAIN
+                 if (r.get("event") or {}).get("type") != "tool.result"]
+        sess = kimi_tree(tmp_path, agents={"main": lines})
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.outcome == OUTCOME_IN_FLIGHT
+
+    def test_a_trailing_prompt_with_no_answer_is_user_last(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"main": KIMI_MAIN[:5]})
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.outcome == OUTCOME_USER_LAST
+
+    def test_the_model_speaking_last_is_awaiting_user(self, tmp_path):
+        sess = kimi_tree(tmp_path, agents={"agent-0": KIMI_SUB})
+        session, _, _ = read_kimi_wire(sess / "agents" / "agent-0" / "wire.jsonl")
+        assert session.outcome == OUTCOME_AWAITING_USER
+
+    def test_ask_user_question_is_awaiting_question(self, tmp_path):
+        lines = KIMI_MAIN[:9] + [{
+            "type": "context.append_loop_event", "time": 1785232800050,
+            "event": {"type": "tool.call", "uuid": "t9", "toolCallId": "t9",
+                      "name": "AskUserQuestion", "args": {"questions": []}}}]
+        sess = kimi_tree(tmp_path, agents={"main": lines})
+        session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
+        assert session.outcome == OUTCOME_AWAITING_QUESTION

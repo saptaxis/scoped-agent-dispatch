@@ -265,7 +265,7 @@ class TestSweeps:
         (tmp_path / ".scad" / "runs" / "empty").mkdir(parents=True)
         assert archive_run("empty") == []
 
-    def test_all_covers_the_three_root_kinds(self, tmp_path, monkeypatch):
+    def test_all_covers_every_root_kind(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
@@ -274,6 +274,8 @@ class TestSweeps:
 
         write(home / ".claude" / "history.jsonl", LINES)
         write(home / ".codex" / "sessions" / "2026" / "07" / "28" / "roll.jsonl", LINES)
+        write(home / ".kimi-code" / "sessions" / "wd_repo_ab" / "session_S1"
+              / "agents" / "main" / "wire.jsonl", LINES)
         write(home / ".scad" / "runs" / "r1" / "claude" / "history.jsonl", LINES)
 
         archive_all()
@@ -281,7 +283,40 @@ class TestSweeps:
         arc = tmp_path / "arc"
         assert (arc / "claude" / "history.jsonl").is_file()
         assert (arc / "codex" / "2026" / "07" / "28" / "roll.jsonl").is_file()
+        assert (arc / "kimi" / "wd_repo_ab" / "session_S1" / "agents" / "main"
+                / "wire.jsonl").is_file()
         assert (arc / "runs" / "r1" / "history.jsonl").is_file()
+
+    def test_a_missing_kimi_root_is_not_an_error(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        write(home / ".claude" / "history.jsonl", LINES)
+
+        archive_all()                     # no ~/.kimi-code anywhere
+
+        assert not (tmp_path / "arc" / "kimi").exists()
+
+    def test_kimi_state_json_is_archived_beside_its_agents(self, tmp_path, monkeypatch):
+        """The wire says nothing about where the session ran; state.json does.
+        Leaving it behind would strand every kimi row without a cwd."""
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+        monkeypatch.setenv("SCAD_HOME", str(home / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        sess = home / ".kimi-code" / "sessions" / "wd_repo_ab" / "session_S1"
+        write(sess / "agents" / "main" / "wire.jsonl", LINES)
+        write(sess / "state.json",
+              json.dumps({"workDir": "/repo", "updatedAt": "2026-07-28T10:00:00.000Z"}
+                         ).encode())
+
+        archive_all()
+
+        dest = tmp_path / "arc" / "kimi" / "wd_repo_ab" / "session_S1" / STATE_HISTORY_NAME
+        assert json.loads(dest.read_text())["workDir"] == "/repo"
 
 
 class TestNeverDeletes:
