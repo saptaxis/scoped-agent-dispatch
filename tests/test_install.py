@@ -687,3 +687,285 @@ class TestTranscriptRetention:
         home = self._home(tmp_path, {})
         set_transcript_retention(home, ask=lambda _: False)
         assert set_transcript_retention(home, ask=lambda _: True) == "set"
+
+
+REPO = Path(__file__).parent.parent
+SHIPPED_SKILLS = tuple(sorted(p.name for p in (REPO / "skills").iterdir() if p.is_dir()))
+# A PATH with no npx (and no `claude`) on it, so the fallback tests exercise the
+# fallback on every machine rather than only on ones without Node installed.
+BARE_PATH = "/usr/bin:/bin:/usr/sbin:/sbin"
+
+
+def _skills_helpers() -> str:
+    """The skill install/removal helper section of the live install.sh.
+
+    Extracted and sourced rather than reimplemented, so an edit that regresses
+    the real script fails these tests. Same trick as
+    TestDescribeDockerCheckFailure, scaled to a section: Step 5 sits behind a
+    venv build and a pip install, which no unit test should be paying for.
+    """
+    content = (REPO / "install.sh").read_text()
+    section = content.split("# --- Skills: where they go", 1)[1]
+    section = section.split("# --- Uninstall flow ---", 1)[0]
+    assert "install_skills()" in section and "remove_installed_skills()" in section
+    return "# --- Skills: where they go" + section
+
+
+def _run_helper(home: Path, command: str, env_extra=None, path=BARE_PATH):
+    """Source the helper section against a throwaway HOME and run `command`."""
+    helpers = home / "_install-helpers.sh"
+    helpers.parent.mkdir(parents=True, exist_ok=True)
+    helpers.write_text(_skills_helpers())
+    env = os.environ.copy()
+    env["HOME"] = str(home)
+    env["PATH"] = path
+    env["VENV_DIR"] = str(home / "venv")
+    env.update(env_extra or {})
+    return subprocess.run(
+        ["bash", "-c",
+         'set -euo pipefail; VENV_DIR="${VENV_DIR}"; source "$1"; shift; eval "$@"',
+         "install-sh-test", str(helpers), command],
+        capture_output=True, text=True, env=env, timeout=60,
+    )
+
+
+class TestSkillInstallation:
+    """Step 5: getting scad's skills in front of every agent on the machine."""
+
+    def test_npx_is_genuinely_absent_from_the_fallback_path(self):
+        """Guard for the tests below: they must exercise the fallback because
+        npx is missing, not because this machine happens to lack Node."""
+        import shutil
+        assert shutil.which("npx", path=BARE_PATH) is None
+
+    def test_no_skills_flag_skips_installation_entirely(self, tmp_path):
+        """--no-skills must not create the shared skill directories at all."""
+        env = os.environ.copy()
+        env["HOME"] = str(tmp_path)
+        env["SCAD_INSTALL_VENV"] = str(tmp_path / "venv")
+        result = subprocess.run(
+            [str(REPO / "install.sh"), "--dry-run", "--no-skills"],
+            capture_output=True, text=True, env=env, timeout=30,
+        )
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "Skipping skill installation (--no-skills)" in result.stdout
+        assert not (tmp_path / ".agents").exists()
+        assert not (tmp_path / ".claude" / "skills").exists()
+
+    def test_no_skills_guards_the_whole_of_step_5(self):
+        """The skip is structural, not a message: nothing in Step 5 — not the
+        install, not the plugin deregistration it depends on — may run when
+        --no-skills was passed."""
+        content = (REPO / "install.sh").read_text()
+        step_5 = content.split("# --- Step 5:", 1)[1].split("\n# ---", 1)[0]
+        skip_arm, run_arm = step_5.split("\nelse\n", 1)
+        assert "install_skills" not in skip_arm, \
+            f"--no-skills arm must not install skills:\n{skip_arm}"
+        assert "install_skills" in run_arm
+
+    def test_fallback_links_into_both_agent_directories(self, tmp_path):
+        """~/.agents/skills reaches Codex and Kimi; Claude reads only
+        ~/.claude/skills. Missing either leaves an agent without scad."""
+        result = _run_helper(tmp_path, f'install_skills "{REPO}"')
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "npx not found" in result.stdout
+
+        for target in (tmp_path / ".agents/skills", tmp_path / ".claude/skills"):
+            installed = sorted(p.name for p in target.iterdir())
+            assert installed == list(SHIPPED_SKILLS), f"{target}: {installed}"
+
+    def test_fallback_installs_symlinks_not_copies(self, tmp_path):
+        """Symlinks are why editing a SKILL.md in the checkout takes effect at
+        once; a copy would need a reinstall after every edit."""
+        result = _run_helper(tmp_path, f'install_skills "{REPO}"')
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        for target in (tmp_path / ".agents/skills", tmp_path / ".claude/skills"):
+            for name in SHIPPED_SKILLS:
+                entry = target / name
+                assert entry.is_symlink(), f"{entry} is not a symlink"
+                assert Path(os.path.realpath(entry)) == \
+                    Path(os.path.realpath(REPO / "skills" / name))
+
+    def test_deregistration_happens_before_skills_are_installed(self, tmp_path):
+        """Ordering is the point. Plugin skills and ~/.claude/skills entries
+        stack rather than override, so installing while the old plugin is still
+        registered offers every scad skill twice. The plugin must be gone
+        first."""
+        import sys
+
+        claude = tmp_path / ".claude"
+        claude.mkdir(parents=True)
+        (claude / "settings.json").write_text(json.dumps({
+            "enabledPlugins": {"scad@scad": True, "other-plugin": True},
+        }))
+
+        # A stand-in for the venv's python: it records whether any skill was
+        # already installed at the moment deregistration ran, then does the
+        # real deregistration.
+        witness = tmp_path / "witness"
+        venv_bin = tmp_path / "venv" / "bin"
+        venv_bin.mkdir(parents=True)
+        stub = venv_bin / "python"
+        stub.write_text(
+            "#!/bin/bash\n"
+            f'if [ -e "$HOME/.claude/skills/scad" ] || [ -e "$HOME/.agents/skills/scad" ]; then\n'
+            f'  echo present > "{witness}"\n'
+            "else\n"
+            f'  echo absent > "{witness}"\n'
+            "fi\n"
+            f'exec "{sys.executable}" "$@"\n'
+        )
+        stub.chmod(0o755)
+
+        result = _run_helper(tmp_path, f'install_skills "{REPO}"')
+        assert result.returncode == 0, result.stdout + result.stderr
+
+        assert witness.read_text().strip() == "absent", \
+            "skills were already installed when deregistration ran — wrong order"
+        # And both halves actually happened.
+        settings = json.loads((claude / "settings.json").read_text())
+        assert "scad@scad" not in settings.get("enabledPlugins", {})
+        assert settings["enabledPlugins"]["other-plugin"] is True
+        assert (tmp_path / ".claude/skills/scad").is_symlink()
+
+
+class TestUninstallSkillRemoval:
+    """--uninstall must remove scad's skills from the shared skill directories
+    and nothing else.
+
+    ~/.agents/skills and ~/.claude/skills are flat and global: every skill on
+    the machine, from every source, lands in the same two directories. scad
+    ships a skill called `remember` — about as generic a name as exists — so
+    deleting by name alone means uninstalling scad can take a stranger's work
+    with it.
+    """
+
+    def _uninstall(self, home: Path):
+        env = os.environ.copy()
+        env["HOME"] = str(home)
+        env["SCAD_INSTALL_VENV"] = str(home / "venv")
+        return subprocess.run(
+            [str(REPO / "install.sh"), "--uninstall"],
+            capture_output=True, text=True, env=env, timeout=60,
+        )
+
+    def _link_ours(self, home: Path):
+        """Reproduce what the symlink fallback installs."""
+        for target in (home / ".agents/skills", home / ".claude/skills"):
+            target.mkdir(parents=True, exist_ok=True)
+            for name in SHIPPED_SKILLS:
+                (target / name).symlink_to(REPO / "skills" / name)
+
+    def _copy_ours(self, home: Path):
+        """Reproduce what the skills CLI installs — it copies, not links."""
+        import shutil
+        for target in (home / ".agents/skills", home / ".claude/skills"):
+            target.mkdir(parents=True, exist_ok=True)
+            for name in SHIPPED_SKILLS:
+                shutil.copytree(REPO / "skills" / name, target / name)
+
+    def test_uninstall_removes_our_linked_skills_from_both_directories(self, tmp_path):
+        self._link_ours(tmp_path)
+
+        result = self._uninstall(tmp_path)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        for target in (tmp_path / ".agents/skills", tmp_path / ".claude/skills"):
+            for name in SHIPPED_SKILLS:
+                entry = target / name
+                assert not entry.exists() and not entry.is_symlink(), f"{entry} survived"
+        assert f"Removed {2 * len(SHIPPED_SKILLS)} installed skill(s)" in result.stdout
+
+    def test_uninstall_removes_our_skills_when_they_were_copied(self, tmp_path):
+        """The skills CLI copies rather than links, so a copy of a skill we ship
+        — byte-identical SKILL.md — is still ours to remove."""
+        self._copy_ours(tmp_path)
+
+        result = self._uninstall(tmp_path)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        for target in (tmp_path / ".agents/skills", tmp_path / ".claude/skills"):
+            for name in SHIPPED_SKILLS:
+                assert not (target / name).exists(), f"{target / name} survived"
+
+    def test_uninstall_does_not_remove_a_same_named_foreign_skill(self, tmp_path):
+        """Someone else's `remember` must survive scad's uninstall.
+
+        Regression: removal matched on directory name only, so any third-party
+        skill that happened to share a name with one of ours was deleted.
+        """
+        foreign = tmp_path / ".agents/skills/remember"
+        foreign.mkdir(parents=True)
+        (foreign / "SKILL.md").write_text(
+            "---\nname: remember\n---\nSomebody else's remember skill.\n"
+        )
+
+        result = self._uninstall(tmp_path)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert foreign.is_dir(), "uninstall deleted a foreign skill that shared a name"
+        assert "Somebody else's" in (foreign / "SKILL.md").read_text()
+        assert "Left remember" in result.stdout, \
+            f"uninstall should report what it left behind:\n{result.stdout}"
+
+    def test_uninstall_leaves_a_foreign_skill_with_an_unrelated_name(self, tmp_path):
+        """The shared directories are not scad's to tidy."""
+        self._link_ours(tmp_path)
+        stranger = tmp_path / ".claude/skills/somebody-elses-skill"
+        stranger.mkdir(parents=True)
+        (stranger / "SKILL.md").write_text("---\nname: somebody-elses-skill\n---\n")
+
+        result = self._uninstall(tmp_path)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (stranger / "SKILL.md").is_file()
+        # Untouched names are not reported either — nothing to say about them.
+        assert "somebody-elses-skill" not in result.stdout
+
+    def test_uninstall_leaves_a_same_named_link_that_points_elsewhere(self, tmp_path):
+        """A `scad` skill symlinked in from another checkout resolves outside
+        this repo's skills/, so it is not ours to delete."""
+        other = tmp_path / "someone-else/skills/scad"
+        other.mkdir(parents=True)
+        (other / "SKILL.md").write_text("---\nname: scad\n---\nNot our scad.\n")
+        target = tmp_path / ".agents/skills"
+        target.mkdir(parents=True)
+        (target / "scad").symlink_to(other)
+
+        result = self._uninstall(tmp_path)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (target / "scad").is_symlink()
+        assert (other / "SKILL.md").read_text().endswith("Not our scad.\n")
+        assert "Left scad in" in result.stdout
+
+    def test_uninstall_leaves_an_empty_shared_directory_only_if_it_emptied_it(self, tmp_path):
+        """A directory scad emptied is scad's to clean up; one still holding
+        somebody else's skill stays."""
+        self._link_ours(tmp_path)
+        keeper = tmp_path / ".claude/skills/somebody-elses-skill"
+        keeper.mkdir(parents=True)
+
+        result = self._uninstall(tmp_path)
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert not (tmp_path / ".agents/skills").exists()
+        assert (tmp_path / ".claude/skills").is_dir()
+
+    def test_removal_removes_nothing_when_it_cannot_resolve_our_skills(self, tmp_path):
+        """If the source path cannot be canonicalised there is nothing to match
+        against, and "inside our skills/" would collapse to "any absolute path"
+        — every link in a shared directory. Refuse rather than guess."""
+        target = tmp_path / ".agents/skills"
+        target.mkdir(parents=True)
+        (target / "remember").symlink_to(REPO / "skills" / "remember")
+
+        result = _run_helper(
+            tmp_path,
+            f'realpath_of() {{ echo ""; }}; remove_installed_skills "{REPO}"',
+        )
+
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert (target / "remember").is_symlink()
+        assert "Skipped skill removal" in result.stdout

@@ -100,6 +100,134 @@ if [[ -f "$SCRIPT_DIR/pyproject.toml" ]] && grep -q "scoped-agent-dispatch" "$SC
     REPO_DIR="$SCRIPT_DIR"
 fi
 
+# --- Skills: where they go, how they get in, how they come back out ---
+#
+# ~/.agents/skills (Codex, Kimi, the shared convention) and ~/.claude/skills
+# (Claude, which does not read the shared one) are flat and GLOBAL: every skill
+# on the machine, from every source, lands in these two directories. So install
+# may write only names we ship, and uninstall may delete only entries it can
+# prove are ours -- scad ships a skill called `remember`, and a name that
+# generic will collide.
+SKILL_TARGETS=("$HOME/.agents/skills" "$HOME/.claude/skills")
+
+# realpath_of PATH -- canonical absolute path. `readlink -f` and `realpath` are
+# GNU; macOS ships neither reliably. python3 is already a hard dependency here.
+realpath_of() {
+    python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$1" 2>/dev/null
+}
+
+# link_skills SRC -- symlink every skill in SRC/skills/ into both directories.
+# Symlinks, not copies, so edits to the checkout take effect with no reinstall.
+link_skills() {
+    local src="$1" target skill_dir
+    for target in "${SKILL_TARGETS[@]}"; do
+        mkdir -p "$target"
+        for skill_dir in "$src"/skills/*/; do
+            [[ -d "$skill_dir" ]] || continue
+            ln -sfn "${skill_dir%/}" "$target/$(basename "$skill_dir")"
+        done
+    done
+}
+
+# install_skills SRC -- deregister the old plugin, then install the skills.
+install_skills() {
+    local src="$1"
+
+    # Migration, and it must run BEFORE the install. Earlier versions registered
+    # a Claude Code plugin that supplied these same skills. Plugin skills and
+    # ~/.claude/skills entries STACK rather than override -- the plugin's arrive
+    # namespaced (`scad:scad`), the directory's arrive bare (`scad`) -- so a
+    # machine with both offers every skill twice, with identical descriptions
+    # competing for the same trigger. Removing the plugin is what makes the
+    # skills install safe, not merely tidy.
+    if [[ -d "$HOME/.claude" ]] && [[ -x "$VENV_DIR/bin/python" ]]; then
+        "$VENV_DIR/bin/python" -c "
+from pathlib import Path
+try:
+    from scad.install import deregister_claude_plugin
+except ImportError:
+    raise SystemExit(0)
+if deregister_claude_plugin(claude_home=Path('$HOME/.claude')):
+    print('[scad] Removed the old Claude Code plugin registration (skills replace it)')
+" 2>/dev/null || true
+    fi
+
+    if [[ -z "$src" ]]; then
+        echo "[scad] Skipped skill installation (skills/ not found)"
+    elif command -v npx &>/dev/null; then
+        # The skills CLI owns the per-agent path table -- ~/.agents/skills for
+        # Codex and Kimi, ~/.claude/skills for Claude, and dozens more. Letting
+        # it route is the whole point: scad does not want to track where every
+        # agent keeps its skills, and getting one wrong fails silently, with the
+        # files present but never loaded.
+        echo "[scad] Installing skills into detected agents..."
+        npx --yes skills@latest add "$src" -g -a '*' -y \
+            || echo "[scad] Warning: skill installation failed — run manually: npx skills add $src -g -a '*'"
+    else
+        # No npx. Fall back to the two directories that were verified by probe
+        # to be read directly. Symlinks, so edits to the checkout take effect
+        # with no reinstall -- which the skills CLI itself does not do, as it
+        # copies.
+        echo "[scad] npx not found — symlinking skills into the standard directories"
+        link_skills "$src"
+        echo "[scad] Linked $(find "$src/skills" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') skills"
+    fi
+}
+
+# skill_is_ours INSTALLED OURS SKILLS_ROOT -- true only when the installed entry
+# is demonstrably the skill scad ships under that name:
+#   - a symlink resolving inside SKILLS_ROOT (how link_skills installs), or
+#   - a real directory whose SKILL.md is byte-identical to ours (how the skills
+#     CLI installs -- it copies).
+# A same-named directory that is neither belongs to somebody else.
+skill_is_ours() {
+    local installed="$1" ours="$2" skills_root="$3" resolved
+    if [[ -L "$installed" ]]; then
+        resolved="$(realpath_of "$installed")"
+        [[ -n "$resolved" ]] || return 1
+        case "$resolved" in
+            "$skills_root"/*) return 0 ;;
+            *) return 1 ;;
+        esac
+    fi
+    [[ -d "$installed" ]] || return 1
+    [[ -f "$installed/SKILL.md" ]] || return 1
+    cmp -s "$installed/SKILL.md" "$ours/SKILL.md"
+}
+
+# remove_installed_skills SRC -- uninstall counterpart of link_skills. The names
+# are read from the checkout rather than assumed, and every candidate must pass
+# skill_is_ours before it is deleted; anything else is left where it is and
+# reported, because a blanket delete by name takes someone else's work with it.
+remove_installed_skills() {
+    local src="$1" skills_root target skill_dir name installed
+    local removed=0
+    skills_root="$(realpath_of "$src/skills")"
+    # Without a root to match against, "inside our skills/" would degrade to
+    # "any absolute path" and match every link in the directory. Do nothing.
+    if [[ -z "$skills_root" ]]; then
+        echo "[scad] Skipped skill removal (could not resolve $src/skills)"
+        return 0
+    fi
+    for target in "${SKILL_TARGETS[@]}"; do
+        [[ -d "$target" ]] || continue
+        for skill_dir in "$src"/skills/*/; do
+            [[ -d "$skill_dir" ]] || continue
+            name="$(basename "$skill_dir")"
+            installed="$target/$name"
+            [[ -e "$installed" ]] || [[ -L "$installed" ]] || continue
+            if skill_is_ours "$installed" "${skill_dir%/}" "$skills_root"; then
+                rm -rf "$installed"
+                removed=$((removed + 1))
+            else
+                echo "[scad] Left $name in $target — not ours"
+            fi
+        done
+        rmdir "$target" 2>/dev/null || true   # only if we left it empty
+    done
+    echo "[scad] Removed $removed installed skill(s)"
+}
+
 # --- Uninstall flow ---
 if $UNINSTALL; then
     echo "[scad] Uninstaller"
@@ -146,30 +274,14 @@ if $UNINSTALL; then
         fi
     done
 
-    # Remove installed skills. Only scad's own are touched: the names are read
-    # from the checkout rather than assumed, and only entries that resolve back
-    # into this repo (or are plain copies of a skill we ship) are removed --
-    # these directories are shared with every other skill on the machine, so a
-    # blanket delete would take someone else's work with it.
+    # Remove installed skills. Only scad's own are touched -- see
+    # remove_installed_skills, which proves ownership before deleting anything.
     SKILLS_SRC=""
     if [[ -n "$REPO_DIR" ]] && [[ -d "$REPO_DIR/skills" ]]; then
         SKILLS_SRC="$REPO_DIR"
     fi
     if [[ -n "$SKILLS_SRC" ]]; then
-        REMOVED=0
-        for TARGET in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
-            [[ -d "$TARGET" ]] || continue
-            for SKILL_DIR in "$SKILLS_SRC"/skills/*/; do
-                [[ -d "$SKILL_DIR" ]] || continue
-                NAME="$(basename "$SKILL_DIR")"
-                if [[ -e "$TARGET/$NAME" ]] || [[ -L "$TARGET/$NAME" ]]; then
-                    rm -rf "$TARGET/$NAME"
-                    REMOVED=$((REMOVED + 1))
-                fi
-            done
-            rmdir "$TARGET" 2>/dev/null || true   # only if we left it empty
-        done
-        echo "[scad] Removed $REMOVED installed skill(s)"
+        remove_installed_skills "$SKILLS_SRC"
     else
         echo "[scad] Skipped skill removal (skills/ not found — remove by hand from ~/.agents/skills)"
     fi
@@ -439,52 +551,7 @@ else
         fi
     fi
 
-    # Migration, and it must run BEFORE the install. Earlier versions registered
-    # a Claude Code plugin that supplied these same skills. Plugin skills and
-    # ~/.claude/skills entries STACK rather than override -- the plugin's arrive
-    # namespaced (`scad:scad`), the directory's arrive bare (`scad`) -- so a
-    # machine with both offers every skill twice, with identical descriptions
-    # competing for the same trigger. Removing the plugin is what makes the
-    # skills install safe, not merely tidy.
-    if [[ -d "$HOME/.claude" ]] && [[ -x "$VENV_DIR/bin/python" ]]; then
-        "$VENV_DIR/bin/python" -c "
-from pathlib import Path
-try:
-    from scad.install import deregister_claude_plugin
-except ImportError:
-    raise SystemExit(0)
-if deregister_claude_plugin(claude_home=Path('$HOME/.claude')):
-    print('[scad] Removed the old Claude Code plugin registration (skills replace it)')
-" 2>/dev/null || true
-    fi
-
-    if [[ -z "$SKILLS_SRC" ]]; then
-        echo "[scad] Skipped skill installation (skills/ not found)"
-    elif command -v npx &>/dev/null; then
-        # The skills CLI owns the per-agent path table -- ~/.agents/skills for
-        # Codex and Kimi, ~/.claude/skills for Claude, and dozens more. Letting
-        # it route is the whole point: scad does not want to track where every
-        # agent keeps its skills, and getting one wrong fails silently, with the
-        # files present but never loaded.
-        echo "[scad] Installing skills into detected agents..."
-        npx --yes skills@latest add "$SKILLS_SRC" -g -a '*' -y \
-            || echo "[scad] Warning: skill installation failed — run manually: npx skills add $SKILLS_SRC -g -a '*'"
-    else
-        # No npx. Fall back to the two directories that were verified by probe
-        # to be read directly: ~/.agents/skills (Codex, Kimi, and the shared
-        # convention) and ~/.claude/skills (Claude, which does NOT read the
-        # shared one). Symlinks, so edits to the checkout take effect with no
-        # reinstall -- which the skills CLI itself does not do, as it copies.
-        echo "[scad] npx not found — symlinking skills into the standard directories"
-        for TARGET in "$HOME/.agents/skills" "$HOME/.claude/skills"; do
-            mkdir -p "$TARGET"
-            for SKILL_DIR in "$SKILLS_SRC"/skills/*/; do
-                [[ -d "$SKILL_DIR" ]] || continue
-                ln -sfn "${SKILL_DIR%/}" "$TARGET/$(basename "$SKILL_DIR")"
-            done
-        done
-        echo "[scad] Linked $(find "$SKILLS_SRC/skills" -maxdepth 1 -mindepth 1 -type d | wc -l | tr -d ' ') skills"
-    fi
+    install_skills "$SKILLS_SRC"
 fi
 
 # --- Transcript retention (asks; never decides for you) ---
