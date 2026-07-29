@@ -24,6 +24,7 @@ from scad.records import (
     OUTCOME_USER_LAST,
     TOOL_RESULT_CAP,
     JobStateRecord,
+    NoteRecord,
     SessionRecord,
     TurnRecord,
 )
@@ -348,6 +349,53 @@ def read_job_state(path: Path, start_offset: int = 0) -> tuple[list[JobStateReco
         )
 
     return list(latest.values()), path.stat().st_size
+
+
+def _as_list(value) -> list:
+    """Coerce a scalar to a one-element list; drop nothing.
+
+    Notes are composed by a model, and `"tags": "notes"` instead of
+    `["notes"]` is a plausible slip. Dropping the value would quietly cost the
+    note its only search key.
+    """
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def read_notes(path: Path, start_offset: int = 0) -> tuple[list[NoteRecord], int]:
+    """Read a `/remember` note file into indexable records.
+
+    The one reader whose source is not a trace. Everything else here parses
+    something an agent emitted as a by-product; this parses something an agent
+    was asked to write, which is why it is the tier that can never be
+    re-derived. Same append-only shape though, so the same resume-from-offset
+    mechanism works unchanged — `notes_offset` is `parsed_offset` on a different
+    file.
+
+    Tolerant for the usual reason and one extra: these records come straight
+    from a model, so absent fields are ordinary rather than corrupt. A note with
+    nothing but a title still gets a row.
+    """
+    notes: list[NoteRecord] = []
+
+    for _, rec in _iter_lines(path, start_offset):
+        if not isinstance(rec, dict):
+            continue                      # None from a malformed line, or a bare scalar
+        notes.append(NoteRecord(
+            ts=_epoch_ms(rec.get("ts")),
+            topic=rec.get("topic"),
+            relation=rec.get("relation"),
+            parent=rec.get("parent"),
+            title=rec.get("title"),
+            tags=_as_list(rec.get("tags")),
+            entities=_as_list(rec.get("entities")),
+            cwd_at_write=rec.get("cwd_at_write"),
+        ))
+
+    return notes, path.stat().st_size
 
 
 def _codex_message_text(content) -> str:

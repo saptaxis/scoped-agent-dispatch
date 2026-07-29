@@ -98,6 +98,32 @@ class JobStateRecord:
 
 
 @dataclass(frozen=True)
+class NoteRecord:
+    """One row of `notes` — the indexed projection of a `/remember` capture.
+
+    Deliberately NOT the whole record. The note file is truth; this carries only
+    what makes a note *findable* (`sessions tagged X` as a query rather than a
+    grep), so `text` and `span` are read off disk when someone actually wants
+    them. That asymmetry is the point: losing this table costs a reindex, while
+    losing the file costs the note, and a schema that copied everything would
+    blur which of the two is the artifact.
+
+    `cwd_at_write` is the exception, and the reason it exists at all: it is not
+    a `notes` column but the note's only statement of where it happened, so the
+    project stays derivable after the transcript that knew the cwd is pruned.
+    """
+
+    ts: int | None = None
+    topic: str | None = None
+    relation: str | None = None       # continue | shift | branch | return
+    parent: str | None = None
+    title: str | None = None
+    tags: tuple | list = ()
+    entities: tuple | list = ()
+    cwd_at_write: str | None = None
+
+
+@dataclass(frozen=True)
 class TurnRecord:
     """One row of `turns`. `idx` is assigned by the index, not the reader, so a
     resumed parse can continue numbering without the reader tracking state."""
