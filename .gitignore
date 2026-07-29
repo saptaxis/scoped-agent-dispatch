@@ -9,3 +9,6 @@ build/
 .venv/
 .env
 scad-scad.yml
+
+# Local tool/editor config — machine-specific paths, never shared
+.kimi-code/
