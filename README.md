@@ -178,6 +178,7 @@ scad session read <id> [--kind text]               # print a session's turns
 scad search <query> [--kind thinking]              # full-text search across every turn
 scad project ls | scad project show <name>         # sessions grouped by resolved project
 scad where                                         # which project scad resolves for a directory
+scad view [--days N] [--no-open] [--output PATH]   # render the index to a page and open it
 ```
 
 ## Quick start
@@ -331,6 +332,26 @@ unlabelled rather than guessed at.
 **`reindex` never deletes.** Only `--rebuild` drops rows, and it refuses outright
 when any session's raw is no longer in the archive, because those turns are then the
 only surviving copy. `--force` overrides it, and should be treated as destructive.
+
+### `scad view`
+
+Render the session index to a self-contained HTML page and open it.
+
+```bash
+scad view                 # waiting list, live sessions, everything, then open
+scad view --days 30       # widen the waiting window
+scad view --no-open       # just write ~/.scad/view.html
+```
+
+Answers two questions: who is waiting on you, and how to get back to them. Each row
+carries a command — `tmux select-window … \; select-pane …` for a live pane,
+`scad run attach` for a container, or `cd <cwd> && claude --resume <id>` for a session
+that has been closed. Read-only; reply in the session itself.
+
+Live panes are matched by working directory, which is approximate — several panes can
+share one. Only panes actually running an agent count, and where more than one matches
+every candidate is listed rather than one being guessed at. tmux and docker are queried
+at render time and degrade to empty if either is unavailable, so the page still renders.
 
 ## Config reference
 
