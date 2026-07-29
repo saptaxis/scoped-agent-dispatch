@@ -9,6 +9,7 @@ and `--rebuild` refuses when any raw is missing.
 """
 
 import collections
+import json
 import platform
 import sqlite3
 from pathlib import Path
@@ -17,18 +18,21 @@ import click
 
 from scad.archive import STATE_HISTORY_NAME, archive_root
 from scad.config import get_scad_home
+from scad.notes import notes_root
 from scad.project import resolve_project
 from scad.readers import (
     read_claude_any,
     read_claude_history,
     read_codex_rollout,
     read_job_state,
+    read_notes,
 )
 from scad.records import (
     GRADE_FULL,
     GRADE_SKELETON,
     KIND_MAIN,
     JobStateRecord,
+    NoteRecord,
     SessionRecord,
     TurnRecord,
 )
@@ -39,6 +43,9 @@ EXTRACTOR_VERSION = 1
 # A real `source` value, alongside claude-transcript / claude-subagent /
 # claude-history / codex-rollout: some sessions exist only as job state.
 SOURCE_JOBSTATE = "claude-jobstate"
+
+# ...and some exist only as a note. See index_notes for why that is a row.
+SOURCE_NOTE = "scad-note"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -291,6 +298,130 @@ def apply_job_state(conn, job: JobStateRecord) -> bool:
     return True
 
 
+def append_notes(
+    conn, session_id: str, notes: list[NoteRecord], note_path: str
+) -> int:
+    """Append note rows, continuing idx from whatever is already stored.
+
+    The same append-only shape as `append_turns`, and for a stronger reason:
+    turns can be re-extracted while raw survives, but a note is self-report with
+    no second copy anywhere. Rewriting a row here would be the one destructive
+    act in the whole index.
+    """
+    if not notes:
+        return 0
+    start = conn.execute(
+        "SELECT COALESCE(MAX(idx) + 1, 0) FROM notes WHERE session_id = ?", (session_id,)
+    ).fetchone()[0]
+    conn.executemany(
+        "INSERT OR IGNORE INTO notes "
+        "(session_id, idx, ts, topic, relation, parent, title, tags, entities, note_path) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        [
+            (session_id, start + i, n.ts, n.topic, n.relation, n.parent, n.title,
+             json.dumps(list(n.tags)), json.dumps(list(n.entities)), note_path)
+            for i, n in enumerate(notes)
+        ],
+    )
+    conn.commit()
+    return len(notes)
+
+
+def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> None:
+    """Make sure a note has a session row to hang off, without disturbing one.
+
+    A note can arrive for a session the index has never seen: the transcript may
+    have been pruned before the first scan, or may never have been archived.
+    The note is still stored on disk either way — that is the file-is-truth rule
+    and it is not negotiable — and the question is only whether it also gets a
+    row.
+
+    It does. The reasoning is the one this index already accepted twice, for
+    history.jsonl and then for job state: a source that outlives transcripts
+    earns a row, because otherwise real work is invisible. Notes outlive
+    transcripts by construction — the spec's own words are that a note "can
+    arrive when the transcript no longer exists" — and this is the tier that
+    can never be re-derived from anything. The tier that is least replaceable
+    must not be the tier that is unfindable.
+
+    So: `grade='skeleton'` (no turns were ever extracted), `source='scad-note'`,
+    `cwd` from the note's own `cwd_at_write` so `project` still resolves, and
+    `raw_present=1` — its source file exists, is never pruned, and the row is
+    wholly re-derivable from it, so a 0 here would make `--rebuild` refuse
+    forever over a row with nothing to lose.
+    """
+    if session_row(conn, session_id) is not None:
+        return                            # never downgrade a row a transcript filled
+    conn.execute(
+        """
+        INSERT INTO sessions (
+            id, kind, agent, machine, cwd, project, grade, source,
+            parsed_offset, raw_present, extractor_version
+        ) VALUES (?,?,?,?,?,?,?,?,0,1,?)
+        """,
+        (session_id, KIND_MAIN, agent, platform.node(), cwd,
+         resolve_project(cwd), GRADE_SKELETON, SOURCE_NOTE, EXTRACTOR_VERSION),
+    )
+    conn.commit()
+
+
+def index_notes(conn) -> collections.Counter:
+    """Scan `~/.scad/notes/<agent>/*.jsonl` into the `notes` table.
+
+    `notes_offset` is `parsed_offset` on a different file, and works identically:
+    a note file whose size already equals the offset is skipped without being
+    opened, and a resumed read appends rows whose idx continues from the maximum.
+
+    This pass deliberately does NOT read the archive. Every other source obeys
+    "nothing enters the index that is not in the archive first", because the
+    archive is what makes those rows rebuildable. The notes store is already the
+    durable home of its own content — copying it into the archive would make a
+    second copy of the one thing that has no original elsewhere, and leave two
+    files to keep honest instead of one.
+    """
+    stats = collections.Counter()
+    root = notes_root()
+    if not root.is_dir():
+        return stats
+
+    for shard in sorted(p for p in root.iterdir() if p.is_dir()):
+        agent = shard.name
+        for path in sorted(shard.glob("*.jsonl")):
+            session_id = path.stem
+            row = session_row(conn, session_id)
+            size = path.stat().st_size
+            if row is not None and row["notes_offset"] >= size:
+                continue
+
+            start = row["notes_offset"] if row is not None else 0
+            try:
+                notes, end = read_notes(path, start)
+            except Exception as exc:      # a note we cannot read must not stop the pass
+                click.echo(f"[scad] skipped note {path.name}: {exc}")
+                stats["skipped_files"] += 1
+                continue
+
+            if row is None:
+                cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
+                _ensure_note_session(conn, session_id, agent, cwd)
+
+            stats["notes"] += append_notes(conn, session_id, notes, str(path))
+            conn.execute(
+                "UPDATE sessions SET notes_offset = ? WHERE id = ?", (end, session_id))
+            conn.commit()
+
+    return stats
+
+
+def session_notes(conn, session_id: str):
+    """A session's note rows, oldest first — the order they were captured in."""
+    return conn.execute(
+        "SELECT idx, ts, topic, relation, parent, title, tags, entities, note_path "
+        "FROM notes WHERE session_id = ? ORDER BY idx",
+        (session_id,),
+    ).fetchall()
+
+
 def session_row(conn, session_id: str):
     return conn.execute("SELECT * FROM sessions WHERE id = ?", (session_id,)).fetchone()
 
@@ -337,10 +468,15 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[st
                 f"{missing} session(s) have no raw left in the archive; --rebuild would "
                 "destroy the only copy of their turns. Re-run with --force to override."
             )
-        conn.executescript("DELETE FROM turns; DELETE FROM sessions;")
+        # Notes rows go too, and safely: the note FILES are truth, are never
+        # deleted, and index_notes below reads every one of them back from
+        # offset 0. Leaving them would strand rows whose session no longer
+        # exists and break the idx continuation on the next append.
+        conn.executescript("DELETE FROM notes; DELETE FROM turns; DELETE FROM sessions;")
         conn.commit()
 
     if not root.is_dir():
+        stats.update(index_notes(conn))   # a note does not need an archive to exist
         return stats
 
     job_states: list[JobStateRecord] = []
@@ -411,6 +547,10 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[st
     for job in job_states:
         if apply_job_state(conn, job):
             stats["named"] += 1
+
+    # Last, for the same reason: a note only inserts a session row when the scan
+    # has already had its chance to produce a better one.
+    stats.update(index_notes(conn))
 
     # A Counter, not a plain dict: callers ask for counts that a quiet pass never
     # incremented ("how many sessions?" after a no-op scan), and 0 is the honest

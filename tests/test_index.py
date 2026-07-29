@@ -605,3 +605,164 @@ class TestReindexJoinsJobState:
         assert row["grade"] == GRADE_SKELETON
         assert row["source"] == "claude-jobstate"
         assert row["started"] is not None
+
+
+# --- notes: the tier that is never rederivable --------------------------------
+
+from scad.index import SOURCE_NOTE, append_notes, index_notes, session_notes  # noqa: E402
+from scad.notes import append_note  # noqa: E402
+from scad.readers import read_notes  # noqa: E402
+
+
+@pytest.fixture
+def noted(tmp_path, monkeypatch):
+    """A SCAD_HOME with a notes store and an archive, both empty."""
+    monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+    monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+    return tmp_path
+
+
+NOTE = {"topic": "notes-store", "relation": "continue", "title": "first",
+        "text": "body", "tags": ["notes", "jsonl"], "entities": ["session-index.md"],
+        "cwd_at_write": "/repo"}
+
+
+class TestAppendNotes:
+    def test_rows_land_with_the_note_path(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(NOTE, session_id="S1")
+        n = append_notes(conn, "S1", read_notes(p)[0], str(p))
+        assert n == 1
+        row = conn.execute("SELECT * FROM notes").fetchone()
+        assert row["session_id"] == "S1"
+        assert row["idx"] == 0
+        assert row["note_path"] == str(p)
+
+    def test_tags_and_entities_are_stored_as_json_arrays(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(NOTE, session_id="S1")
+        append_notes(conn, "S1", read_notes(p)[0], str(p))
+        row = conn.execute("SELECT tags, entities FROM notes").fetchone()
+        assert json.loads(row["tags"]) == ["notes", "jsonl"]
+        assert json.loads(row["entities"]) == ["session-index.md"]
+
+    def test_idx_continues_and_existing_rows_are_untouched(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(NOTE, session_id="S1")
+        append_notes(conn, "S1", read_notes(p)[0], str(p))
+        end = p.stat().st_size
+        append_note({**NOTE, "title": "second"}, session_id="S1")
+        append_notes(conn, "S1", read_notes(p, end)[0], str(p))
+        rows = conn.execute("SELECT idx, title FROM notes ORDER BY idx").fetchall()
+        assert [(r["idx"], r["title"]) for r in rows] == [(0, "first"), (1, "second")]
+
+
+class TestIndexNotes:
+    def test_a_note_becomes_a_row_and_advances_notes_offset(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(NOTE, session_id="S1")
+        stats = index_notes(conn)
+        assert stats["notes"] == 1
+        assert session_row(conn, "S1")["notes_offset"] == p.stat().st_size
+
+    def test_a_second_pass_with_no_new_note_writes_nothing(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        append_note(NOTE, session_id="S1")
+        index_notes(conn)
+        assert index_notes(conn)["notes"] == 0
+        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
+
+    def test_a_note_appended_between_two_passes_produces_exactly_one_new_row(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        append_note(NOTE, session_id="S1")
+        index_notes(conn)
+        append_note({**NOTE, "title": "second"}, session_id="S1")
+        assert index_notes(conn)["notes"] == 1
+        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 2
+
+    def test_the_agent_shard_names_the_agent_column(self, noted):
+        conn = connect(noted / "i.sqlite")
+        append_note(NOTE, session_id="X1", agent="codex")
+        index_notes(conn)
+        assert session_row(conn, "X1")["agent"] == "codex"
+
+    def test_a_note_for_an_unindexed_session_creates_a_skeleton_row(self, noted):
+        # DECISION: yes, it creates a row. Notes outlive traces by design — the
+        # spec says one can arrive when the transcript no longer exists — and a
+        # tier that is never rederivable must never be the tier that is
+        # unfindable. Same standing history.jsonl and job state already have.
+        conn = connect(noted / "i.sqlite")
+        with patch("scad.index.resolve_project", return_value="repo"):
+            append_note(NOTE, session_id="GHOST")
+            assert index_notes(conn)["notes"] == 1
+        row = session_row(conn, "GHOST")
+        assert row["grade"] == "skeleton"
+        assert row["source"] == SOURCE_NOTE
+        assert row["kind"] == "main"
+
+    def test_that_row_resolves_its_project_from_cwd_at_write(self, noted):
+        # The whole reason cwd_at_write exists: nothing else here knows where
+        # this happened once the trace is gone.
+        conn = connect(noted / "i.sqlite")
+        append_note(NOTE, session_id="GHOST")
+        with patch("scad.index.resolve_project", return_value="from-the-note") as rp:
+            index_notes(conn)
+        assert rp.call_args[0][0] == "/repo"
+        assert session_row(conn, "GHOST")["project"] == "from-the-note"
+
+    def test_an_existing_full_row_is_never_downgraded_by_its_note(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1", title="real session"))
+        append_note(NOTE, session_id="S1")
+        index_notes(conn)
+        row = session_row(conn, "S1")
+        assert row["grade"] == GRADE_FULL
+        assert row["source"] == "claude-transcript"
+        assert row["title"] == "real session"
+
+    def test_a_note_arriving_after_the_trace_was_pruned_still_indexes(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        conn.execute("UPDATE sessions SET raw_present = 0 WHERE id = 'S1'")
+        conn.commit()
+        append_note(NOTE, session_id="S1")
+        assert index_notes(conn)["notes"] == 1
+        assert session_row(conn, "S1")["raw_present"] == 0
+
+    def test_an_empty_store_is_not_an_error(self, noted):
+        conn = connect(noted / "i.sqlite")
+        assert index_notes(conn)["notes"] == 0
+
+    def test_reindex_runs_the_notes_pass(self, noted):
+        conn = connect(noted / "i.sqlite")
+        arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        append_note(NOTE, session_id="S1")
+        stats = reindex(conn)
+        assert stats["notes"] == 1
+        assert conn.execute(
+            "SELECT count(*) FROM notes n JOIN sessions s ON s.id = n.session_id "
+            "WHERE s.id = 'S1'").fetchone()[0] == 1
+
+    def test_rebuild_reindexes_notes_from_the_files(self, noted):
+        # The files are truth and are never deleted, so a rebuild of the notes
+        # index is always safe — unlike turns, which is what --rebuild guards.
+        conn = connect(noted / "i.sqlite")
+        arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        append_note(NOTE, session_id="S1")
+        reindex(conn)
+        reindex(conn, rebuild=True)
+        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
+
+    def test_session_notes_reads_back_in_order(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        append_note(NOTE, session_id="S1")
+        append_note({**NOTE, "title": "second"}, session_id="S1")
+        index_notes(conn)
+        assert [r["title"] for r in session_notes(conn, "S1")] == ["first", "second"]
