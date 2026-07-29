@@ -370,7 +370,7 @@ class TestUninstall:
             "enabledPlugins": {"scad": True, "other-plugin": True}
         }))
 
-        deregister_claude_plugin(claude_home=tmp_path / ".claude")
+        deregister_claude_plugin(claude_home=tmp_path / ".claude", use_cli=False)
 
         data = json.loads(plugins_file.read_text())
         assert "scad" not in data["plugins"]
@@ -824,3 +824,142 @@ class TestRegistrationIsDurable:
 
         assert self._settings(home)["enabledPlugins"]["scad@scad"] is True
         assert "scad" in self._settings(home)["extraKnownMarketplaces"]
+
+
+class TestDeregistrationIsTheExactInverse:
+    """Uninstall must undo registration completely.
+
+    Registration now writes into settings.json, so uninstall has to clean there
+    too. Leaving `extraKnownMarketplaces["scad"]` behind points a marketplace at
+    a directory that no longer exists, and the user gets errors from a tool they
+    removed.
+    """
+
+    def _repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".claude-plugin").mkdir(parents=True)
+        (repo / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "scad", "version": "0.3.0"}))
+        return repo
+
+    def _home(self, tmp_path, settings):
+        home = tmp_path / ".claude"
+        (home / "plugins").mkdir(parents=True)
+        (home / "settings.json").write_text(json.dumps(settings, indent=4) + "\n")
+        return home
+
+    def _settings(self, home):
+        return json.loads((home / "settings.json").read_text())
+
+    def test_round_trip_leaves_settings_byte_identical(self, tmp_path):
+        # The cleanest proof both directions are exact: anything registration
+        # adds on the way in and forgets on the way out shows up here.
+        from scad.install import register_claude_plugin, deregister_claude_plugin
+
+        original = {
+            "cleanupPeriodDays": 3650,
+            "model": "opus[1m]",
+            "attribution": {"commit": "", "pr": ""},
+            "enabledPlugins": {"humanizer@humanizer": True},
+            "extraKnownMarketplaces": {
+                "humanizer": {"source": {"source": "github", "repo": "blader/humanizer"}}
+            },
+            "env": {"CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"},
+        }
+        repo = self._repo(tmp_path)
+        home = self._home(tmp_path, original)
+        before = (home / "settings.json").read_text()
+
+        register_claude_plugin(home, repo, use_cli=False)
+        assert (home / "settings.json").read_text() != before  # registration did something
+
+        deregister_claude_plugin(home, use_cli=False)
+        assert (home / "settings.json").read_text() == before
+
+    def test_it_removes_our_marketplace(self, tmp_path):
+        from scad.install import deregister_claude_plugin
+
+        home = self._home(tmp_path, {
+            "extraKnownMarketplaces": {
+                "scad": {"source": {"source": "directory", "path": "/gone"}},
+                "humanizer": {"source": {"source": "github", "repo": "blader/humanizer"}},
+            },
+        })
+        deregister_claude_plugin(home, use_cli=False)
+
+        mkts = self._settings(home)["extraKnownMarketplaces"]
+        assert "scad" not in mkts
+        assert mkts["humanizer"]["source"]["repo"] == "blader/humanizer"
+
+    def test_it_leaves_a_scad_marketplace_that_is_not_ours_alone(self, tmp_path):
+        # Only a directory source is ours. A github "scad" belongs to someone
+        # else and removing it would be destroying config we never created.
+        from scad.install import deregister_claude_plugin
+
+        foreign = {"source": {"source": "github", "repo": "someone/scad"}}
+        home = self._home(tmp_path, {"extraKnownMarketplaces": {"scad": foreign}})
+        deregister_claude_plugin(home, use_cli=False)
+
+        assert self._settings(home)["extraKnownMarketplaces"]["scad"] == foreign
+
+    def test_it_removes_both_the_qualified_and_the_stale_bare_key(self, tmp_path):
+        from scad.install import deregister_claude_plugin
+
+        home = self._home(tmp_path, {
+            "enabledPlugins": {
+                "scad@scad": True, "scad": True, "humanizer@humanizer": True,
+            },
+        })
+        deregister_claude_plugin(home, use_cli=False)
+
+        enabled = self._settings(home)["enabledPlugins"]
+        assert "scad@scad" not in enabled
+        assert "scad" not in enabled
+        assert enabled["humanizer@humanizer"] is True
+
+    def test_it_clears_the_materialised_install_entry(self, tmp_path):
+        from scad.install import deregister_claude_plugin
+
+        home = self._home(tmp_path, {})
+        (home / "plugins" / "installed_plugins.json").write_text(json.dumps({
+            "version": 2,
+            "plugins": {
+                "scad@scad": [{"scope": "user", "installPath": "/gone"}],
+                "scad": [{"scope": "user", "installPath": "/gone"}],
+                "humanizer@humanizer": [{"scope": "user", "installPath": "/x"}],
+            },
+        }))
+        deregister_claude_plugin(home, use_cli=False)
+
+        data = json.loads((home / "plugins" / "installed_plugins.json").read_text())
+        assert set(data["plugins"]) == {"humanizer@humanizer"}
+
+    def test_it_is_idempotent(self, tmp_path):
+        from scad.install import deregister_claude_plugin
+
+        home = self._home(tmp_path, {"enabledPlugins": {"scad@scad": True}})
+        deregister_claude_plugin(home, use_cli=False)
+        first = (home / "settings.json").read_text()
+        deregister_claude_plugin(home, use_cli=False)
+        assert (home / "settings.json").read_text() == first
+
+    def test_it_prefers_the_cli_and_scopes_it_to_the_given_home(self, tmp_path):
+        from scad.install import deregister_claude_plugin
+
+        home = self._home(tmp_path, {"enabledPlugins": {"scad@scad": True}})
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("env", {}).get("CLAUDE_CONFIG_DIR")))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            deregister_claude_plugin(home, use_cli=True)
+
+        assert any("marketplace" in c and "remove" in c for c, _ in calls)
+        assert all(config_dir == str(home) for _, config_dir in calls)
+
+    def test_no_claude_home_skips(self, tmp_path):
+        from scad.install import deregister_claude_plugin
+
+        assert deregister_claude_plugin(tmp_path / ".claude", use_cli=False) is False

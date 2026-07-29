@@ -130,13 +130,25 @@ def register_claude_plugin(
     return True
 
 
-def deregister_claude_plugin(claude_home: Path) -> bool:
-    """Remove scad from Claude Code plugin registration.
+def deregister_claude_plugin(claude_home: Path, use_cli: bool = True) -> bool:
+    """Remove scad's Claude Code plugin registration — the exact inverse.
 
-    Removes from installed_plugins.json and disables in settings.json.
+    Undoes everything `register_claude_plugin` writes: the marketplace
+    declaration, the enabled entry under both the qualified and the stale bare
+    key, and whatever install the harness materialised from them. Leaving the
+    marketplace behind would point it at a directory uninstall just deleted, and
+    the user would get errors from a tool they removed.
+
+    Only a *directory*-source `scad` marketplace is ours. A `scad` entry from
+    some other source belongs to someone else and is left alone.
+
+    A container emptied by our own removal is pruned, so a register/deregister
+    round trip restores settings.json byte for byte. A container that was
+    already empty is left as it was found — it was never ours to touch.
 
     Args:
         claude_home: Path to ~/.claude directory.
+        use_cli: Try the `claude plugin` CLI first. Off in unit tests.
 
     Returns:
         True if deregistration succeeded, False if skipped.
@@ -144,20 +156,39 @@ def deregister_claude_plugin(claude_home: Path) -> bool:
     if not claude_home.exists():
         return False
 
-    plugins_file = claude_home / "plugins" / "installed_plugins.json"
-    settings_file = claude_home / "settings.json"
+    name = "scad"
+    plugin_id = f"{name}@{name}"
 
-    # --- installed_plugins.json ---
+    if use_cli:
+        _run_plugin_cli(["uninstall", plugin_id], claude_home)
+        _run_plugin_cli(["marketplace", "remove", name], claude_home)
+
+    settings_file = claude_home / "settings.json"
+    if settings_file.exists():
+        settings = _read_settings(settings_file)
+
+        marketplaces = settings.get("extraKnownMarketplaces")
+        if isinstance(marketplaces, dict):
+            entry = marketplaces.get(name)
+            if isinstance(entry, dict) and \
+                    entry.get("source", {}).get("source") == "directory":
+                marketplaces.pop(name)
+                if not marketplaces:
+                    settings.pop("extraKnownMarketplaces")
+
+        enabled = settings.get("enabledPlugins")
+        if isinstance(enabled, dict):
+            removed = [enabled.pop(key, None) for key in (plugin_id, name)]
+            if any(v is not None for v in removed) and not enabled:
+                settings.pop("enabledPlugins")
+
+        _write_settings(settings_file, settings)
+
+    plugins_file = claude_home / "plugins" / "installed_plugins.json"
     if plugins_file.exists():
         data = json.loads(plugins_file.read_text())
-        data["plugins"].pop("scad", None)
+        for key in (plugin_id, name):
+            data.get("plugins", {}).pop(key, None)
         plugins_file.write_text(json.dumps(data, indent=4) + "\n")
-
-    # --- settings.json ---
-    if settings_file.exists():
-        settings = json.loads(settings_file.read_text())
-        if "enabledPlugins" in settings:
-            settings["enabledPlugins"].pop("scad", None)
-        settings_file.write_text(json.dumps(settings, indent=4) + "\n")
 
     return True
