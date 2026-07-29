@@ -5,7 +5,7 @@ the plugin registration helper that install.sh calls via Python.
 """
 
 import json
-from datetime import datetime, timezone
+import subprocess
 from pathlib import Path
 
 
@@ -35,20 +35,69 @@ def _read_manifest(root: Path) -> dict:
     raise FileNotFoundError(f"no plugin.json under {root}")
 
 
-def register_claude_plugin(claude_home: Path, plugin_path: Path) -> bool:
-    """Register scad as a Claude Code plugin.
+def _read_settings(settings_file: Path) -> dict:
+    if settings_file.exists():
+        return json.loads(settings_file.read_text())
+    return {}
 
-    Adds scad to installed_plugins.json and enables it in settings.json.
-    Idempotent — safe to run multiple times.
 
-    Read-modify-write on both files, preserving every other entry: an official
-    plugin update once overwrote installed_plugins.json and took scad's entry
-    with it, and returning the favour would break six working plugins to fix one.
+def _write_settings(settings_file: Path, settings: dict) -> None:
+    settings_file.parent.mkdir(parents=True, exist_ok=True)
+    settings_file.write_text(json.dumps(settings, indent=4) + "\n")
+
+
+def _run_plugin_cli(args: list, claude_home: Path) -> bool:
+    """Run `claude plugin ...` scoped to `claude_home`. True if it succeeded.
+
+    CLAUDE_CONFIG_DIR is non-negotiable: without it the CLI edits the real
+    ~/.claude, which would make every test a live mutation of the user's config.
+    """
+    import os
+
+    env = os.environ.copy()
+    env["CLAUDE_CONFIG_DIR"] = str(claude_home)
+    try:
+        result = subprocess.run(
+            ["claude", "plugin"] + args,
+            capture_output=True, text=True, env=env, timeout=120,
+        )
+        return result.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def register_claude_plugin(
+    claude_home: Path, plugin_path: Path, use_cli: bool = True
+) -> bool:
+    """Register scad as a Claude Code plugin, durably.
+
+    The declaration goes in settings.json, not installed_plugins.json:
+
+    - `extraKnownMarketplaces["scad"]` points at the repo as a directory-source
+      marketplace, so `scad@scad` resolves. scad used to register as a bare
+      `scad`, which names no marketplace at all — that is the "Marketplace
+      'inline' not found" symptom, and why `/remember` never loaded even though
+      `claude --plugin-dir <repo>` loads it fine.
+    - `enabledPlugins["scad@scad"]` enables it under the qualified id every
+      working plugin uses. Any stale bare `"scad"` key is removed.
+
+    installed_plugins.json is deliberately not written. It is not durable — an
+    official-plugin update was observed rewriting it wholesale mid-session,
+    resetting all six entries and dropping scad. settings.json survived that
+    wipe, and the harness re-materialises the install from it on next start.
+    Measured against a sandbox CLAUDE_CONFIG_DIR: delete scad's entry, restart,
+    and it is rebuilt with `/remember` available.
+
+    Prefers the `claude plugin` CLI, which makes exactly these settings writes
+    and also materialises the marketplace cache; falls back to editing
+    settings.json directly when the CLI is missing or fails. Both paths are
+    idempotent and preserve every other key in the file.
 
     Args:
         claude_home: Path to ~/.claude directory.
         plugin_path: The plugin root, or its `.claude-plugin/` manifest
-            directory — either is accepted, and the root is what gets recorded.
+            directory — either is accepted, and the root is what gets declared.
+        use_cli: Try the `claude plugin` CLI first. Off in unit tests.
 
     Returns:
         True if registration succeeded, False if skipped (no claude home).
@@ -56,46 +105,28 @@ def register_claude_plugin(claude_home: Path, plugin_path: Path) -> bool:
     if not claude_home.exists():
         return False
 
-    plugins_dir = claude_home / "plugins"
-    plugins_file = plugins_dir / "installed_plugins.json"
+    root = _plugin_root(plugin_path)
+    name = _read_manifest(root)["name"]
+    plugin_id = f"{name}@{name}"
+
+    if use_cli:
+        # `marketplace add` is idempotent; `install` is a no-op once installed.
+        if _run_plugin_cli(["marketplace", "add", str(root)], claude_home):
+            _run_plugin_cli(["install", plugin_id], claude_home)
+
+    # Always assert the durable declaration, whether or not the CLI ran. This
+    # is the part that has to be true, and re-stating it costs nothing.
     settings_file = claude_home / "settings.json"
+    settings = _read_settings(settings_file)
 
-    plugin_path = _plugin_root(plugin_path)
-    manifest = _read_manifest(plugin_path)
-    name = manifest["name"]
-    version = manifest.get("version", "0.0.0")
+    marketplaces = settings.setdefault("extraKnownMarketplaces", {})
+    marketplaces[name] = {"source": {"source": "directory", "path": str(root)}}
 
-    # --- installed_plugins.json ---
-    if plugins_file.exists():
-        data = json.loads(plugins_file.read_text())
-    else:
-        plugins_dir.mkdir(parents=True, exist_ok=True)
-        data = {"version": 2, "plugins": {}}
+    enabled = settings.setdefault("enabledPlugins", {})
+    enabled.pop(name, None)  # stale bare key resolves to no marketplace
+    enabled[plugin_id] = True
 
-    now = datetime.now(timezone.utc).isoformat()
-    entry = {
-        "scope": "user",
-        "installPath": str(plugin_path),
-        "version": version,
-        "installedAt": now,
-        "lastUpdated": now,
-    }
-
-    # Replace existing or add new — always exactly one entry
-    data["plugins"][name] = [entry]
-    plugins_file.write_text(json.dumps(data, indent=4) + "\n")
-
-    # --- settings.json ---
-    if settings_file.exists():
-        settings = json.loads(settings_file.read_text())
-    else:
-        settings = {}
-
-    if "enabledPlugins" not in settings:
-        settings["enabledPlugins"] = {}
-    settings["enabledPlugins"][name] = True
-    settings_file.write_text(json.dumps(settings, indent=4) + "\n")
-
+    _write_settings(settings_file, settings)
     return True
 
 

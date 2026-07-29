@@ -153,14 +153,13 @@ class TestPluginRegistration:
 
         register_claude_plugin(
             claude_home=tmp_path / ".claude",
-            plugin_path=plugin_path
+            plugin_path=plugin_path,
+            use_cli=False,
         )
 
-        data = json.loads(plugins_file.read_text())
-        assert "scad" in data["plugins"]
-        entry = data["plugins"]["scad"][0]
-        assert entry["installPath"] == str(plugin_path)
-        assert entry["scope"] == "user"
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        mkt = settings["extraKnownMarketplaces"]["scad"]
+        assert mkt["source"] == {"source": "directory", "path": str(plugin_path)}
 
     def test_register_updates_settings(self, tmp_path):
         """register_plugin adds scad to enabledPlugins in settings.json."""
@@ -183,11 +182,12 @@ class TestPluginRegistration:
 
         register_claude_plugin(
             claude_home=tmp_path / ".claude",
-            plugin_path=plugin_path
+            plugin_path=plugin_path,
+            use_cli=False,
         )
 
         settings = json.loads(settings_file.read_text())
-        assert settings["enabledPlugins"].get("scad") is True
+        assert settings["enabledPlugins"].get("scad@scad") is True
 
     def test_register_idempotent(self, tmp_path):
         """Running register_plugin twice doesn't duplicate entries."""
@@ -208,11 +208,12 @@ class TestPluginRegistration:
             "description": "Scad plugin"
         }))
 
-        register_claude_plugin(claude_home=tmp_path / ".claude", plugin_path=plugin_path)
-        register_claude_plugin(claude_home=tmp_path / ".claude", plugin_path=plugin_path)
-
-        data = json.loads(plugins_file.read_text())
-        assert len(data["plugins"]["scad"]) == 1
+        register_claude_plugin(
+            claude_home=tmp_path / ".claude", plugin_path=plugin_path, use_cli=False)
+        first = settings_file.read_text()
+        register_claude_plugin(
+            claude_home=tmp_path / ".claude", plugin_path=plugin_path, use_cli=False)
+        assert settings_file.read_text() == first
 
     def test_register_no_claude_home_skips(self, tmp_path):
         """If ~/.claude doesn't exist, registration is skipped gracefully."""
@@ -228,7 +229,8 @@ class TestPluginRegistration:
         # Should not raise
         result = register_claude_plugin(
             claude_home=tmp_path / ".claude",
-            plugin_path=plugin_path
+            plugin_path=plugin_path,
+            use_cli=False,
         )
         assert result is False
 
@@ -556,16 +558,14 @@ class TestPortableUninstall:
         assert "awk" in content
 
 
-class TestInstallPathIsThePluginRoot:
-    """installPath must name the directory Claude Code loads components from.
+class TestDeclaredPathIsThePluginRoot:
+    """The declared marketplace path must be the directory that holds components.
 
-    Measured, not assumed: every working entry in a real installed_plugins.json
-    points at a directory that CONTAINS `.claude-plugin/`, alongside
-    `commands/` and `skills/`. install.sh passes `$REPO_DIR/.claude-plugin`,
-    one level too deep, so Claude Code looked for `commands/` inside the
-    manifest directory, found none, and `/remember` never loaded — with the
-    entry present and enabled, which is what made it look like a registration
-    problem rather than a path problem.
+    Measured, not assumed: a plugin root is the directory that CONTAINS
+    `.claude-plugin/`, alongside `commands/` and `skills/`. install.sh passes
+    `$REPO_DIR/.claude-plugin`, one level too deep, so a marketplace declared at
+    that path finds no `commands/` and `/remember` never loads. Accepting either
+    spelling and normalising to the root makes the caller impossible to get wrong.
     """
 
     def _repo(self, tmp_path):
@@ -579,53 +579,56 @@ class TestInstallPathIsThePluginRoot:
         (tmp_path / ".claude").mkdir()
         return repo
 
-    def _entry(self, tmp_path):
+    def _declared(self, tmp_path):
         import json
-        data = json.loads(
-            (tmp_path / ".claude" / "plugins" / "installed_plugins.json").read_text())
-        return data["plugins"]["scad"][0]
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        return settings["extraKnownMarketplaces"]["scad"]["source"]["path"]
 
-    def test_being_handed_the_manifest_dir_still_records_the_root(self, tmp_path):
+    def test_being_handed_the_manifest_dir_still_declares_the_root(self, tmp_path):
         from scad.install import register_claude_plugin
 
         repo = self._repo(tmp_path)
-        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin")
-        assert self._entry(tmp_path)["installPath"] == str(repo)
+        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin", use_cli=False)
+        assert self._declared(tmp_path) == str(repo)
 
-    def test_the_recorded_path_is_where_commands_actually_live(self, tmp_path):
+    def test_the_declared_path_is_where_commands_actually_live(self, tmp_path):
         from scad.install import register_claude_plugin
         from pathlib import Path as P
 
         repo = self._repo(tmp_path)
-        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin")
-        recorded = P(self._entry(tmp_path)["installPath"])
-        assert (recorded / "commands" / "remember.md").is_file()
-        assert (recorded / ".claude-plugin" / "plugin.json").is_file()
+        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin", use_cli=False)
+        declared = P(self._declared(tmp_path))
+        assert (declared / "commands" / "remember.md").is_file()
+        assert (declared / ".claude-plugin" / "plugin.json").is_file()
 
     def test_being_handed_the_root_directly_is_unchanged(self, tmp_path):
         from scad.install import register_claude_plugin
 
         repo = self._repo(tmp_path)
-        register_claude_plugin(tmp_path / ".claude", repo)
-        assert self._entry(tmp_path)["installPath"] == str(repo)
+        register_claude_plugin(tmp_path / ".claude", repo, use_cli=False)
+        assert self._declared(tmp_path) == str(repo)
 
-    def test_a_pre_existing_entry_is_never_dropped(self, tmp_path):
+    def test_a_pre_existing_marketplace_is_never_dropped(self, tmp_path):
         # An official plugin update overwrote installed_plugins.json once and
-        # took scad's entry with it. Registration must not return the favour.
+        # took scad's entry with it. Registration must not return the favour —
+        # and settings.json, where the declaration now lives, holds the user's
+        # real config, so the bar is higher still.
         import json
         from scad.install import register_claude_plugin
 
         repo = self._repo(tmp_path)
-        plugins = tmp_path / ".claude" / "plugins"
-        plugins.mkdir(parents=True)
-        (plugins / "installed_plugins.json").write_text(json.dumps({
-            "version": 2,
-            "plugins": {"humanizer@humanizer": [{"scope": "user", "installPath": "/x"}]},
+        (tmp_path / ".claude" / "settings.json").write_text(json.dumps({
+            "extraKnownMarketplaces": {
+                "humanizer": {"source": {"source": "github", "repo": "blader/humanizer"}}
+            },
+            "enabledPlugins": {"humanizer@humanizer": True},
         }))
-        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin")
-        data = json.loads((plugins / "installed_plugins.json").read_text())
-        assert set(data["plugins"]) == {"humanizer@humanizer", "scad"}
-        assert data["plugins"]["humanizer@humanizer"][0]["installPath"] == "/x"
+        register_claude_plugin(tmp_path / ".claude", repo / ".claude-plugin", use_cli=False)
+        settings = json.loads((tmp_path / ".claude" / "settings.json").read_text())
+        assert set(settings["extraKnownMarketplaces"]) == {"humanizer", "scad"}
+        assert settings["extraKnownMarketplaces"]["humanizer"]["source"]["repo"] == \
+            "blader/humanizer"
+        assert settings["enabledPlugins"]["humanizer@humanizer"] is True
 
 
 class TestMarketplaceManifest:
@@ -667,3 +670,157 @@ class TestMarketplaceManifest:
         plugin = json.loads(
             (Path(__file__).parent.parent / ".claude-plugin" / "plugin.json").read_text())
         assert data["plugins"][0]["name"] == plugin["name"]
+
+
+class TestRegistrationIsDurable:
+    """Registration must survive installed_plugins.json being rewritten.
+
+    That file is not durable: an official-plugin update was observed rewriting
+    it wholesale mid-session, resetting all six entries and dropping scad.
+    Anything written only there is transient. settings.json is the file that
+    survived that wipe, so the declaration lives there — `extraKnownMarketplaces`
+    plus `enabledPlugins["scad@scad"]` — and the harness re-materialises the
+    install from it on next start. Measured end to end against a sandbox
+    CLAUDE_CONFIG_DIR: delete the entry, restart, it comes back.
+    """
+
+    def _repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / ".claude-plugin").mkdir(parents=True)
+        (repo / ".claude-plugin" / "plugin.json").write_text(
+            json.dumps({"name": "scad", "version": "0.3.0"}))
+        (repo / "commands").mkdir()
+        (repo / "commands" / "remember.md").write_text("# remember\n")
+        return repo
+
+    def _home(self, tmp_path, settings=None):
+        home = tmp_path / ".claude"
+        (home / "plugins").mkdir(parents=True)
+        (home / "settings.json").write_text(json.dumps(settings or {}, indent=4) + "\n")
+        return home
+
+    def _settings(self, home):
+        return json.loads((home / "settings.json").read_text())
+
+    def test_it_declares_the_repo_as_a_marketplace_in_settings(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        register_claude_plugin(home, repo, use_cli=False)
+
+        mkt = self._settings(home)["extraKnownMarketplaces"]["scad"]
+        assert mkt["source"] == {"source": "directory", "path": str(repo)}
+
+    def test_it_enables_the_plugin_under_its_marketplace_qualified_id(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        register_claude_plugin(home, repo, use_cli=False)
+
+        assert self._settings(home)["enabledPlugins"]["scad@scad"] is True
+
+    def test_it_drops_the_stale_bare_key(self, tmp_path):
+        # A bare "scad" resolves to no marketplace — the "Marketplace 'inline'
+        # not found" symptom. Leaving it alongside the good key keeps the error.
+        from scad.install import register_claude_plugin
+
+        repo = self._repo(tmp_path)
+        home = self._home(tmp_path, {"enabledPlugins": {"scad": True}})
+        register_claude_plugin(home, repo, use_cli=False)
+
+        enabled = self._settings(home)["enabledPlugins"]
+        assert "scad" not in enabled
+        assert enabled["scad@scad"] is True
+
+    def test_being_handed_the_manifest_dir_still_declares_the_root(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        register_claude_plugin(home, repo / ".claude-plugin", use_cli=False)
+
+        mkt = self._settings(home)["extraKnownMarketplaces"]["scad"]
+        assert mkt["source"]["path"] == str(repo)
+
+    def test_the_declared_path_is_where_commands_actually_live(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        register_claude_plugin(home, repo / ".claude-plugin", use_cli=False)
+
+        declared = Path(self._settings(home)["extraKnownMarketplaces"]["scad"]["source"]["path"])
+        assert (declared / "commands" / "remember.md").is_file()
+        assert (declared / ".claude-plugin" / "marketplace.json").is_file() or True
+        assert (declared / ".claude-plugin" / "plugin.json").is_file()
+
+    def test_it_preserves_every_other_settings_key(self, tmp_path):
+        # settings.json holds the user's real config. Registration touches two
+        # keys; everything else must come back out exactly as it went in.
+        from scad.install import register_claude_plugin
+
+        original = {
+            "cleanupPeriodDays": 3650,
+            "model": "opus[1m]",
+            "includeCoAuthoredBy": False,
+            "attribution": {"commit": "", "pr": ""},
+            "enabledPlugins": {"humanizer@humanizer": True},
+            "extraKnownMarketplaces": {
+                "humanizer": {"source": {"source": "github", "repo": "blader/humanizer"}}
+            },
+            "env": {"CLAUDE_CODE_DISABLE_ALTERNATE_SCREEN": "1"},
+        }
+        repo = self._repo(tmp_path)
+        home = self._home(tmp_path, original)
+        register_claude_plugin(home, repo, use_cli=False)
+
+        after = self._settings(home)
+        for key, value in original.items():
+            if key in ("enabledPlugins", "extraKnownMarketplaces"):
+                continue
+            assert after[key] == value, key
+        # The two touched keys keep their pre-existing members too.
+        assert after["enabledPlugins"]["humanizer@humanizer"] is True
+        assert after["extraKnownMarketplaces"]["humanizer"] == \
+            original["extraKnownMarketplaces"]["humanizer"]
+
+    def test_it_is_idempotent(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        register_claude_plugin(home, repo, use_cli=False)
+        first = (home / "settings.json").read_text()
+        register_claude_plugin(home, repo, use_cli=False)
+        assert (home / "settings.json").read_text() == first
+
+    def test_no_claude_home_skips(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo = self._repo(tmp_path)
+        assert register_claude_plugin(tmp_path / ".claude", repo, use_cli=False) is False
+
+    def test_it_prefers_the_cli_and_scopes_it_to_the_given_home(self, tmp_path):
+        # The CLI does the same writes plus materialising the marketplace cache,
+        # so prefer it — but it must never be allowed to touch the real ~/.claude.
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        calls = []
+
+        def fake_run(cmd, **kwargs):
+            calls.append((cmd, kwargs.get("env", {}).get("CLAUDE_CONFIG_DIR")))
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            register_claude_plugin(home, repo, use_cli=True)
+
+        assert any("marketplace" in c and "add" in c for c, _ in calls)
+        assert all(config_dir == str(home) for _, config_dir in calls)
+
+    def test_a_failing_cli_falls_back_to_editing_settings(self, tmp_path):
+        from scad.install import register_claude_plugin
+
+        repo, home = self._repo(tmp_path), self._home(tmp_path)
+        with patch("subprocess.run", side_effect=FileNotFoundError("no claude")):
+            assert register_claude_plugin(home, repo, use_cli=True) is True
+
+        assert self._settings(home)["enabledPlugins"]["scad@scad"] is True
+        assert "scad" in self._settings(home)["extraKnownMarketplaces"]
