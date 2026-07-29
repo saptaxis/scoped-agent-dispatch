@@ -106,6 +106,20 @@ class TestUpsert:
         assert session_row(conn, "S1")["parsed_offset"] == 99
         assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
 
+    def test_cumulative_counters_add_rather_than_overwrite(self, tmp_path):
+        """The unit-level statement of the same rule: a later upsert carries the
+        tail's counts, so the column must accumulate. Fields the tail *does*
+        know in full (title, outcome) still overwrite — see the test above."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(n_interrupts=3, n_tool_denials=1, n_errors=2))
+        store(conn, rec(n_interrupts=0, n_tool_denials=0, n_errors=1),
+              parsed_offset=99)
+
+        row = session_row(conn, "S1")
+        assert row["n_interrupts"] == 3      # nothing new; the 3 must survive
+        assert row["n_tool_denials"] == 1
+        assert row["n_errors"] == 3          # 2 seen before + 1 in the tail
+
     def test_skeleton_upgrades_to_full(self, tmp_path):
         """history.jsonl is read first; a transcript upgrades the row in place."""
         conn = connect(tmp_path / "i.sqlite")
@@ -249,6 +263,35 @@ class TestReindex:
         reindex(conn)
         rows = conn.execute("SELECT idx, text FROM turns ORDER BY idx").fetchall()
         assert [r["text"] for r in rows] == ["hello", "more"]
+
+    def test_growth_keeps_counts_from_earlier_passes(self, tmp_path, monkeypatch):
+        """Interrupts/denials/errors are cumulative over a session's whole life.
+
+        An incremental pass reads only the tail, so its counts describe the tail
+        alone. Overwriting the column would erase everything earlier passes saw:
+        a session that was interrupted, then grew quietly, would report zero —
+        and once raw is pruned that wrong count is the only copy left.
+        """
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        interrupted = dict(MAIN[0], interruptedMessageId="m1")
+        p = arc_write(arc, "claude/projects/-repo/S1.jsonl", [interrupted])
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert session_row(conn, "S1")["n_interrupts"] == 1
+
+        # Grow the session with a clean turn — nothing to count in this tail.
+        with p.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "sessionId": "S1",
+                "timestamp": "2026-07-28T11:00:00.000Z",
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "more"}]},
+            }) + "\n")
+        reindex(conn)
+
+        assert session_row(conn, "S1")["n_interrupts"] == 1
 
     def test_project_is_computed(self, tmp_path, monkeypatch):
         arc = tmp_path / "arc"

@@ -200,9 +200,15 @@ def upsert_session(
             source           = CASE WHEN sessions.grade = ? THEN sessions.source ELSE excluded.source END,
             outcome          = excluded.outcome,
             last_stop_reason = excluded.last_stop_reason,
-            n_interrupts     = excluded.n_interrupts,
-            n_tool_denials   = excluded.n_tool_denials,
-            n_errors         = excluded.n_errors,
+            -- Cumulative over the session's life, so these ADD. An incremental
+            -- pass parses only the tail (from parsed_offset), so `excluded`
+            -- carries the tail's counts alone; overwriting would erase every
+            -- interrupt and error the earlier passes saw. A session that was
+            -- interrupted and then grew quietly would read as clean, and once
+            -- raw is pruned that wrong count is the only copy left.
+            n_interrupts     = sessions.n_interrupts + excluded.n_interrupts,
+            n_tool_denials   = sessions.n_tool_denials + excluded.n_tool_denials,
+            n_errors         = sessions.n_errors + excluded.n_errors,
             archive_path     = excluded.archive_path,
             source_mtime     = excluded.source_mtime,
             source_size      = excluded.source_size,
