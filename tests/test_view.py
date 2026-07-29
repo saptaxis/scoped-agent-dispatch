@@ -256,3 +256,33 @@ class TestModuleSeparation:
 
         src = open(scad.view.__file__).read()
         assert "subprocess" not in src
+
+
+class TestLiveIsOnePerPlace:
+    def test_one_row_per_pane_not_per_session_sharing_a_cwd(self, tmp_path):
+        """Matching is by cwd, so every session that ever ran in a live pane's
+        directory matches it — 36 rows for 8 panes on the real machine."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD", "tool-result-last", ended_days_ago=9, cwd="/repo")
+        _store(conn, "NEW", "tool-result-last", ended_days_ago=1, cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+
+        live = gather(conn, panes, set())["live"]
+
+        assert [r["id"] for r in live] == ["NEW"]
+
+    def test_distinct_panes_each_keep_a_row(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "A", "tool-result-last", cwd="/one")
+        _store(conn, "B", "tool-result-last", cwd="/two")
+        panes = [TmuxPane("main:1.0", "/one", "2.1.219"),
+                 TmuxPane("main:2.0", "/two", "2.1.219")]
+
+        assert len(gather(conn, panes, set())["live"]) == 2
+
+    def test_the_older_sessions_are_still_in_all(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD", "tool-result-last", ended_days_ago=9, cwd="/repo")
+        _store(conn, "NEW", "tool-result-last", ended_days_ago=1, cwd="/repo")
+        data = gather(conn, [TmuxPane("main:1.0", "/repo", "2.1.219")], set())
+        assert {r["id"] for r in data["all"]} == {"OLD", "NEW"}

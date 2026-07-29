@@ -43,6 +43,23 @@ def _goto(target: str) -> str:
     return f"tmux select-window -t {window} \\; select-pane -t {target}"
 
 
+def _one_per_place(rows) -> list[dict]:
+    """Collapse live rows to one per pane or container — the newest in each.
+
+    Panes are matched by cwd, so *every* session that ever ran in a live pane's
+    directory matches it: on this machine 36 rows resolved to 8 actual panes.
+    "Live now" then reads as far busier than reality, and the older rows are not
+    live at all — they merely share a directory with something that is.
+
+    Only the most recent session per place can plausibly be the one running
+    there, so that is the one kept. The rest remain findable in "All sessions".
+    """
+    newest: dict[str, dict] = {}
+    for row in rows:                       # all_rows is already ordered ended DESC
+        newest.setdefault(row["reentry"]["command"], row)
+    return list(newest.values())
+
+
 def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
     """How to get back into this session.
 
@@ -122,7 +139,7 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14) -> di
         conn.execute(f"SELECT {_COLUMNS} FROM sessions ORDER BY ended DESC").fetchall(),
         panes, running,
     )
-    live = [r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container")]
+    live = _one_per_place(r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container"))
 
     return {
         "waiting": waiting,
