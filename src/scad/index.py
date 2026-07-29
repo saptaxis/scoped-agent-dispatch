@@ -24,10 +24,21 @@ from scad.readers import (
     read_codex_rollout,
     read_job_state,
 )
-from scad.records import GRADE_FULL, JobStateRecord, SessionRecord, TurnRecord
+from scad.records import (
+    GRADE_FULL,
+    GRADE_SKELETON,
+    KIND_MAIN,
+    JobStateRecord,
+    SessionRecord,
+    TurnRecord,
+)
 
 SCHEMA_VERSION = 2
 EXTRACTOR_VERSION = 1
+
+# A real `source` value, alongside claude-transcript / claude-subagent /
+# claude-history / codex-rollout: some sessions exist only as job state.
+SOURCE_JOBSTATE = "claude-jobstate"
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
@@ -236,23 +247,48 @@ def append_turns(conn, session_id: str, turns: list[TurnRecord]) -> int:
 
 
 def apply_job_state(conn, job: JobStateRecord) -> bool:
-    """Attach one harness job state to the session it names. Did a row match?
+    """Attach one harness job state to a session, creating the row if need be.
 
     Assignment, not COALESCE: the newest snapshot is authoritative for its
     session, so a job that has since unblocked must be able to clear `needs`
     rather than keep advertising a resolved one.
 
-    An id with no session is ignored rather than inserted. The harness outlives
-    transcripts, and a name with nothing to hang it on is not an error — it is a
-    job whose trace has been pruned, which no phantom row would improve.
+    An id with no session INSERTS rather than being ignored. The harness outlives
+    transcripts: nd-3 has no transcript and no history.jsonl line on the live
+    roots or anywhere in the archive, so its state.json is the only surviving
+    record that it ever ran. That is exactly the argument this index already
+    accepts for history.jsonl, so job state gets the same standing — otherwise
+    the one case where a session HAS a human name is the one case it is
+    unfindable.
+
+    The inserted row is `grade='skeleton'` (no turns were ever extracted) and
+    `raw_present=1` (its source, state-history.jsonl, IS in the archive and the
+    row is fully re-derivable from it — a 0 here would make `--rebuild` refuse
+    forever over a row that has nothing to lose).
     """
     cursor = conn.execute(
         "UPDATE sessions SET name = ?, harness_state = ?, needs = ?, needs_detail = ? "
         "WHERE id = ?",
         (job.name, job.state, job.needs, job.detail, job.session_id),
     )
+    if cursor.rowcount == 0:
+        conn.execute(
+            """
+            INSERT INTO sessions (
+                id, kind, agent, machine, cwd, project, started, ended,
+                grade, source, name, harness_state, needs, needs_detail,
+                parsed_offset, raw_present, extractor_version
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,1,?)
+            """,
+            (
+                job.session_id, KIND_MAIN, "claude", platform.node(), job.cwd,
+                resolve_project(job.cwd), job.created_at, job.updated_at,
+                GRADE_SKELETON, SOURCE_JOBSTATE, job.name, job.state, job.needs,
+                job.detail, EXTRACTOR_VERSION,
+            ),
+        )
     conn.commit()
-    return cursor.rowcount > 0
+    return True
 
 
 def session_row(conn, session_id: str):

@@ -73,6 +73,11 @@ class JobStateRecord:
 
     `name` is the reason this source exists at all: it is the only place a
     session's human name (nd-5) is recorded anywhere on the machine.
+
+    `cwd`, `created_at` and `updated_at` are carried because this source can be
+    the ONLY surviving record of a session — nd-3 has no transcript and no
+    history.jsonl line anywhere — in which case the snapshot has to be enough to
+    build a session row on its own: where it ran and when.
     """
 
     session_id: str
@@ -80,6 +85,8 @@ class JobStateRecord:
     state: str | None = None
     needs: str | None = None
     detail: str | None = None
+    cwd: str | None = None
+    created_at: int | None = None
     updated_at: int | None = None
 
 

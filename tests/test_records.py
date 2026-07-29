@@ -9,6 +9,7 @@ from scad.records import (
     KIND_SUBAGENT,
     KIND_WORKFLOW,
     TOOL_RESULT_CAP,
+    JobStateRecord,
     SessionRecord,
     TurnRecord,
 )
@@ -38,6 +39,20 @@ class TestSessionRecord:
     def test_kind_constants_are_the_public_vocabulary(self):
         assert (KIND_MAIN, KIND_SUBAGENT, KIND_WORKFLOW) == ("main", "subagent", "workflow-agent")
         assert (GRADE_FULL, GRADE_SKELETON) == ("full", "skeleton")
+
+
+class TestJobStateRecord:
+    def test_carries_cwd_and_created_at(self):
+        """A job state that names no surviving session becomes the session row
+        itself, so it has to carry enough to build one: where it ran and when."""
+        j = JobStateRecord(session_id="S1", name="nd-3", state="failed",
+                           cwd="/repo", created_at=1, updated_at=2)
+        assert (j.cwd, j.created_at, j.updated_at) == ("/repo", 1, 2)
+
+    def test_those_fields_are_optional(self):
+        j = JobStateRecord(session_id="S1")
+        assert j.cwd is None
+        assert j.created_at is None
 
 
 class TestTurnRecord:

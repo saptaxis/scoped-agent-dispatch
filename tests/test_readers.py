@@ -465,6 +465,16 @@ class TestJobState:
         assert s.updated_at == 1785261403450
         assert end == p.stat().st_size
 
+    def test_carries_cwd_and_created_at(self, tmp_path):
+        """When no transcript survives, this snapshot is the whole session row —
+        so where it ran and when it started have to come from here."""
+        p = write_jsonl(tmp_path / "state-history.jsonl", [
+            {**SNAP, "cwd": "/repo/nd", "createdAt": "2026-07-28T17:00:00.000Z"},
+        ])
+        states, _ = read_job_state(p)
+        assert states[0].cwd == "/repo/nd"
+        assert states[0].created_at == 1785258000000
+
     def test_latest_snapshot_wins(self, tmp_path):
         p = write_jsonl(tmp_path / "state-history.jsonl", [
             SNAP,

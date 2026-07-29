@@ -333,6 +333,8 @@ def read_job_state(path: Path, start_offset: int = 0) -> tuple[list[JobStateReco
             state=rec.get("state"),
             needs=rec.get("needs"),
             detail=rec.get("detail"),
+            cwd=rec.get("cwd"),
+            created_at=_epoch_ms(rec.get("createdAt")),
             updated_at=_epoch_ms(rec.get("updatedAt")),
         )
 

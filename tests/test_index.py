@@ -430,12 +430,51 @@ class TestApplyJobState:
         assert row["needs"].startswith("drop the bioRxiv")
         assert row["needs_detail"].startswith("workflow salvaged")
 
-    def test_an_id_with_no_session_is_ignored(self, tmp_path):
-        """The harness outlives transcripts; a name with nothing to hang it on is
-        not an error and must not create a phantom row."""
+    def test_an_id_with_no_session_becomes_a_skeleton_row(self, tmp_path):
+        """The harness outlives transcripts. nd-3 has no transcript and no
+        history.jsonl line anywhere — its state.json is the only record it ran,
+        so without this the one session that HAS a human name is unfindable."""
         conn = connect(tmp_path / "i.sqlite")
-        assert apply_job_state(conn, job(session_id="GHOST")) is False
-        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+        assert apply_job_state(conn, job(session_id="GHOST", name="nd-3",
+                                         state="failed", cwd="/repo/nd",
+                                         created_at=1000, updated_at=2000)) is True
+        row = session_row(conn, "GHOST")
+        assert row["grade"] == GRADE_SKELETON
+        assert row["source"] == "claude-jobstate"
+        assert row["kind"] == KIND_MAIN
+        assert row["agent"] == "claude"
+        assert row["name"] == "nd-3"
+        assert row["harness_state"] == "failed"
+        assert row["cwd"] == "/repo/nd"
+
+    def test_an_inserted_row_is_datable_so_it_sorts_into_session_ls(self, tmp_path):
+        """`session ls` orders by started DESC with a limit; a NULL start would
+        sink the row below every dated session and defeat the whole point."""
+        conn = connect(tmp_path / "i.sqlite")
+        apply_job_state(conn, job(session_id="GHOST", created_at=1000, updated_at=2000))
+        row = session_row(conn, "GHOST")
+        assert row["started"] == 1000
+        assert row["ended"] == 2000
+
+    def test_an_inserted_row_resolves_a_project_from_its_cwd(self, tmp_path):
+        repo = tmp_path / "nd"
+        (repo / ".git").mkdir(parents=True)
+        conn = connect(tmp_path / "i.sqlite")
+        apply_job_state(conn, job(session_id="GHOST", cwd=str(repo)))
+        assert session_row(conn, "GHOST")["project"] == "nd"
+
+    def test_inserting_never_clobbers_a_real_row(self, tmp_path):
+        """Insert only when the UPDATE matched nothing — a transcript row keeps
+        its grade, source, and turns."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(title="real"))
+        assert apply_job_state(conn, job(name="nd-5")) is True
+        row = session_row(conn, "S1")
+        assert row["grade"] == GRADE_FULL
+        assert row["source"] == "claude-transcript"
+        assert row["title"] == "real"
+        assert row["name"] == "nd-5"
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
 
     def test_a_newer_snapshot_clears_a_resolved_need(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
@@ -467,15 +506,20 @@ class TestReindexJoinsJobState:
         assert row["needs"] == "drop the bioRxiv PDF"
         assert stats["named"] == 1
 
-    def test_state_history_is_never_indexed_as_a_session(self, tmp_path, monkeypatch):
+    def test_state_history_is_never_read_by_the_transcript_reader(self, tmp_path, monkeypatch):
         """state.json carries a sessionId and a cwd — read as a transcript it would
-        forge a turnless row over the real one."""
+        forge a `grade='full'` row claiming a trace that does not exist. The
+        job-state pass may create a row; it must be an honest skeleton."""
         arc = tmp_path / "arc"
         monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
         arc_write(arc, "claude/jobs/0829ef1a/state-history.jsonl", self.STATE)
         conn = connect(tmp_path / "i.sqlite")
-        reindex(conn)
-        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+        stats = reindex(conn)
+        assert stats["files"] == 0                   # no file went to a reader
+        row = session_row(conn, "S1")
+        assert row["grade"] == GRADE_SKELETON
+        assert row["source"] == "claude-jobstate"
+        assert row["n_turns"] == 0
 
     def test_job_state_read_before_its_session_still_lands(self, tmp_path, monkeypatch):
         """'jobs' sorts before 'projects', so the row does not exist yet when the
@@ -488,12 +532,19 @@ class TestReindexJoinsJobState:
         reindex(conn)
         assert session_row(conn, "S1")["name"] == "nd-5"
 
-    def test_unknown_session_id_is_skipped_quietly(self, tmp_path, monkeypatch):
+    def test_a_job_with_no_surviving_trace_still_gets_a_row(self, tmp_path, monkeypatch):
+        """The real nd-3: state-history.jsonl and nothing else, anywhere."""
         arc = tmp_path / "arc"
         monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
         arc_write(arc, "claude/jobs/j/state-history.jsonl",
-                  [{"sessionId": "NOSUCH", "name": "nd-9"}])
+                  [{"sessionId": "NOSUCH", "name": "nd-9", "state": "failed",
+                    "cwd": "/repo/nd", "createdAt": "2026-07-08T14:28:25.019Z",
+                    "updatedAt": "2026-07-12T19:48:48.238Z"}])
         conn = connect(tmp_path / "i.sqlite")
         stats = reindex(conn)
-        assert stats["named"] == 0
-        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 0
+        assert stats["named"] == 1
+        row = session_row(conn, "NOSUCH")
+        assert row["name"] == "nd-9"
+        assert row["grade"] == GRADE_SKELETON
+        assert row["source"] == "claude-jobstate"
+        assert row["started"] is not None
