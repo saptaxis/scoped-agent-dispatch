@@ -66,3 +66,45 @@ class TestTmuxPanes:
             panes = tmux_panes()
         assert panes[0].command == "zsh"
         assert panes[0].path == "/we|rd"
+
+
+from scad.live import running_run_ids
+
+
+class TestRunningContainers:
+    def test_strips_the_scad_prefix(self):
+        out = "scad-demo-Jul28-1200\nscad-other-Jul29-0900\n"
+        with patch("scad.live.subprocess.run", return_value=fake_run(out)):
+            assert running_run_ids() == {"demo-Jul28-1200", "other-Jul29-0900"}
+
+    def test_ignores_containers_that_are_not_scad(self):
+        with patch("scad.live.subprocess.run", return_value=fake_run("postgres\nscad-x-Jul1-0000\n")):
+            assert running_run_ids() == {"x-Jul1-0000"}
+
+    def test_docker_missing_yields_empty(self):
+        with patch("scad.live.subprocess.run", side_effect=FileNotFoundError):
+            assert running_run_ids() == set()
+
+    def test_docker_error_yields_empty(self):
+        with patch("scad.live.subprocess.run", return_value=fake_run("cannot connect", 1)):
+            assert running_run_ids() == set()
+
+    def test_timeout_yields_empty(self):
+        with patch("scad.live.subprocess.run", side_effect=subprocess.TimeoutExpired("docker", 5)):
+            assert running_run_ids() == set()
+
+    def test_uses_scads_docker_env_not_the_ambient_one(self):
+        """On macOS the bare docker CLI reaches the wrong daemon and finds nothing —
+        indistinguishable from 'no containers running'. Verified on this machine."""
+        with patch("scad.live.subprocess.run", return_value=fake_run("")) as run:
+            with patch("scad.live._docker_env", return_value={"DOCKER_HOST": "unix:///x.sock"}):
+                running_run_ids()
+        assert run.call_args.kwargs["env"] == {"DOCKER_HOST": "unix:///x.sock"}
+
+    def test_a_broken_vm_module_does_not_break_discovery(self):
+        with patch("scad.live._docker_env", side_effect=Exception("boom")):
+            with patch("scad.live.subprocess.run", return_value=fake_run("")):
+                try:
+                    running_run_ids()
+                except Exception:
+                    raise AssertionError("discovery must never raise")

@@ -56,3 +56,43 @@ def tmux_panes() -> list[TmuxPane]:
             continue
         panes.append(TmuxPane(target=head, path=path, command=command))
     return panes
+
+
+def _docker_env() -> dict | None:
+    """Environment that points the docker CLI at the daemon scad actually uses.
+
+    REQUIRED on macOS. scad runs a dedicated colima profile, so the bare `docker`
+    CLI talks to /var/run/docker.sock and finds nothing — verified on this
+    machine: `docker info` fails with "no such file or directory" while
+    `scad vm status` reports the VM running. Without this the container column
+    would silently be empty forever, which looks identical to "nothing running".
+
+    Imported lazily so a missing/broken scad.vm degrades like everything else here.
+    """
+    try:
+        from scad.vm import docker_cli_env
+
+        return docker_cli_env()
+    except Exception:
+        return None
+
+
+def running_run_ids() -> set[str]:
+    """Run ids with a live container."""
+    # Broad except by design: this module's contract is that discovery never
+    # raises, and the failure modes are open-ended (a docker CLI that is really
+    # a shell wrapper, a vm module that blows up importing). See module docstring.
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=scad-", "--format", "{{.Names}}"],
+            capture_output=True, text=True, timeout=_TIMEOUT, env=_docker_env(),
+        )
+    except Exception:
+        return set()
+    if result.returncode != 0:
+        return set()
+    return {
+        name[len("scad-"):]
+        for name in (n.strip() for n in result.stdout.splitlines())
+        if name.startswith("scad-")
+    }
