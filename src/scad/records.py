@@ -53,6 +53,13 @@ class SessionRecord:
     scad_run_id: str | None = None
     cwd: str | None = None
     title: str | None = None
+    # Two labels, deliberately not one column. `title` is DERIVED — the agent's
+    # own summary (aiTitle), or on a skeleton row the first prompt verbatim.
+    # `name` is CHOSEN — what the human typed at `/rename`, or the name the
+    # harness gave the job. A session nobody named has none, and that blank is
+    # the honest answer: filling it from `title` is what made a renamed session
+    # display as the literal string "/rename writing-wm-evals-research".
+    name: str | None = None
     git_branch: str | None = None
     started: int | None = None
     ended: int | None = None
@@ -78,8 +85,10 @@ class JobStateRecord:
       tier — self-report — not to trace evidence, and should be read as claims
       rather than as measurements.
 
-    `name` is the reason this source exists at all: it is the only place a
-    session's human name (nd-5) is recorded anywhere on the machine.
+    `name` is a large part of why this source exists: a dispatched job is named
+    (nd-5) where a transcript may not be. It is not the only such source —
+    `/rename` writes a `custom-title` record the transcript reader picks up —
+    but it is the only one for a job with no surviving trace.
 
     `cwd`, `created_at` and `updated_at` are carried because this source can be
     the ONLY surviving record of a session — nd-3 has no transcript and no

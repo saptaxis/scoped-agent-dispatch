@@ -147,7 +147,7 @@ def read_claude_transcript(
 ) -> tuple[SessionRecord | None, list[TurnRecord], int]:
     """Read a main Claude transcript. Returns (session, turns, end_offset)."""
     turns: list[TurnRecord] = []
-    session_id = cwd = branch = title = None
+    session_id = cwd = branch = title = name = None
     started = ended = None
     saw_any = False
     tail: dict = {}
@@ -163,6 +163,11 @@ def read_claude_transcript(
         branch = branch or rec.get("gitBranch")
         if rec.get("aiTitle"):
             title = rec["aiTitle"]          # the agent rewrites this as a session develops
+        if rec.get("customTitle"):
+            # `/rename <name>`. Kept apart from `title` because it is a different
+            # kind of fact: the human chose it. Renaming again APPENDS another
+            # record rather than rewriting the first, so the last one wins.
+            name = rec["customTitle"]
         ts = _epoch_ms(rec.get("timestamp"))
         if ts:
             started = ts if started is None else min(started, ts)
@@ -207,7 +212,7 @@ def read_claude_transcript(
 
     session = SessionRecord(
         id=session_id, kind=KIND_MAIN, agent="claude", source="claude-transcript",
-        cwd=cwd, title=title, git_branch=branch,
+        cwd=cwd, title=title, name=name, git_branch=branch,
         started=started, ended=ended, grade=GRADE_FULL,
         outcome=derive_outcome(tail), last_stop_reason=last_stop,
         n_interrupts=interrupts, n_tool_denials=denials, n_errors=errors,
@@ -276,7 +281,8 @@ def read_claude_any(
         parent_session_id=ident["parent_session_id"],
         agent_id=ident["agent_id"],
         workflow_id=ident["workflow_id"],
-        title=None,          # only main sessions carry aiTitle
+        title=None,          # only main sessions carry aiTitle…
+        name=None,           # …and only a session can be renamed
     )
     return session, turns, end
 

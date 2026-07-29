@@ -135,6 +135,50 @@ class TestClaudeTranscript:
         assert turns[0].raw_offset == 0     # full content still reachable
 
 
+class TestCustomTitle:
+    """`/rename <name>` — the one label a human chose for a session.
+
+    Claude Code appends `{"type": "custom-title", "customTitle": …}` when the
+    user runs /rename. 17 sessions in the real archive carry one, and until this
+    was read the viewer showed the literal first message instead — the string
+    "/rename writing-wm-evals-research" presented as if it were a title.
+    """
+
+    def _read(self, tmp_path, extra):
+        p = write_jsonl(tmp_path / "S1.jsonl", CLAUDE_LINES + extra)
+        session, _, _ = read_claude_transcript(p)
+        return session
+
+    def test_a_rename_becomes_the_session_name(self, tmp_path):
+        session = self._read(tmp_path, [
+            {"type": "custom-title", "sessionId": "S1",
+             "customTitle": "writing-wm-evals-research"}])
+        assert session.name == "writing-wm-evals-research"
+
+    def test_the_name_is_not_the_title(self, tmp_path):
+        """Two different facts. `title` is the agent's own summary of the work;
+        `name` is what the human called it. Both are worth keeping, and one must
+        never be shown in the other's place."""
+        session = self._read(tmp_path, [
+            {"type": "custom-title", "sessionId": "S1", "customTitle": "jul29-session-cli"}])
+        assert session.name == "jul29-session-cli"
+        assert session.title == "Doing the thing"
+
+    def test_the_last_rename_wins(self, tmp_path):
+        """Renaming again appends another record rather than rewriting the first."""
+        session = self._read(tmp_path, [
+            {"type": "custom-title", "sessionId": "S1", "customTitle": "first-name"},
+            {"type": "custom-title", "sessionId": "S1", "customTitle": "second-name"},
+        ])
+        assert session.name == "second-name"
+
+    def test_a_session_nobody_renamed_has_no_name(self, tmp_path):
+        """Blank is the honest answer. A derived stand-in is what caused the bug."""
+        session = self._read(tmp_path, [])
+        assert session.name is None
+        assert session.title == "Doing the thing"
+
+
 from scad.readers import identity_from_path, read_claude_any  # noqa: E402
 from scad.records import KIND_SUBAGENT, KIND_WORKFLOW  # noqa: E402
 
@@ -190,6 +234,7 @@ class TestReadClaudeAny:
         assert session.kind == KIND_SUBAGENT
         assert session.source == "claude-subagent"
         assert session.title is None          # only main sessions get aiTitle
+        assert session.name is None           # …and only a session can be renamed
         assert [t.text for t in turns] == ["subagent work"]
 
     def test_two_subagents_of_one_parent_are_two_rows(self, tmp_path):
