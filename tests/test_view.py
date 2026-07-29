@@ -478,3 +478,47 @@ class TestResumeCwd:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "C4", "awaiting-user", cwd="/Users/vsr/.config/nvim")
         assert "cd /Users/vsr/.config/nvim" in gather(conn, [], set())["waiting"][0]["reentry"]["command"]
+
+
+class TestPresentation:
+    def _full(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "W1", "awaiting-user", cwd="/open")
+        _store(conn, "C1", "awaiting-question", cwd="/closed")
+        panes = [TmuxPane("main:3.0", "/open", "2.1.205", window="scad")]
+        return render(gather(conn, panes, set()))
+
+    def test_no_section_builds_its_own_table(self, tmp_path):
+        """Separate tables each sized their own columns, so nothing lined up.
+        One shared grid row makes drift impossible."""
+        html = self._full(tmp_path)
+        assert "<table" not in html
+        assert 'class="row' in html
+
+    def test_sections_share_the_same_row_markup(self, tmp_path):
+        html = self._full(tmp_path)
+        # panes, waiting-at-hand and closed all render through _row.
+        assert html.count('class="who"') == html.count('class="go"')
+
+    def test_status_pills_are_colour_coded(self, tmp_path):
+        html = self._full(tmp_path)
+        assert 'class="pill maybe-open"' in html
+        for token in ("--open:", "--maybe:", "--shut:"):
+            assert token in html
+
+    def test_dark_mode_is_defined_for_the_palette(self, tmp_path):
+        html = self._full(tmp_path)
+        assert "prefers-color-scheme: dark" in html
+        assert "--card:#181b21" in html
+
+    def test_a_question_row_is_flagged(self, tmp_path):
+        assert 'class="row q"' in self._full(tmp_path)
+
+    def test_agents_are_visually_distinguished(self, tmp_path):
+        html = self._full(tmp_path)
+        assert "--claude:" in html and "--codex:" in html
+
+    def test_still_self_contained(self, tmp_path):
+        html = self._full(tmp_path)
+        for bad in ("http://", "https://", "<script src", '<link rel="stylesheet"'):
+            assert bad not in html

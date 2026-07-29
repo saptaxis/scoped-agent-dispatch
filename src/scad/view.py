@@ -346,123 +346,124 @@ _PAGE = """<!doctype html>
 <meta charset="utf-8">
 <title>scad — sessions</title>
 <style>
- body {{ font: 14px/1.5 -apple-system, system-ui, sans-serif; margin: 2rem auto; max-width: 78rem;
-        padding: 0 1rem; color: #1a1a1a; background: #fff; }}
- h1 {{ font-size: 1.3rem; margin: 0 0 .25rem; }}
- h2 {{ font-size: 1rem; margin: 2rem 0 .5rem; padding-bottom: .25rem; border-bottom: 1px solid #e3e3e3; }}
- .sub {{ color: #666; font-size: .85rem; margin-bottom: 1.5rem; }}
- table {{ border-collapse: collapse; width: 100%; }}
- td, th {{ text-align: left; padding: .4rem .6rem; border-bottom: 1px solid #eee; vertical-align: top; }}
- th {{ font-weight: 600; font-size: .8rem; color: #555; text-transform: uppercase; letter-spacing: .03em; }}
- code {{ font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; background: #f5f5f5;
-         padding: .15rem .35rem; border-radius: 3px; cursor: pointer; }}
- code:hover {{ background: #e8e8e8; }}
- .q {{ border-left: 3px solid #b45309; }}
- .snippet {{ color: #555; font-size: .85rem; max-width: 34rem; }}
- .needs {{ color: #b45309; font-size: .85rem; }}
- .muted {{ color: #999; }}
- h3 {{ font-size: .9rem; margin: 1.2rem 0 .3rem; font-weight: 600; }}
- .win {{ margin: .6rem 0 .2rem; font-size: .88rem; }}
- .st {{ font-size: .72rem; padding: .1rem .4rem; border-radius: 3px; text-transform: uppercase;
-        letter-spacing: .04em; }}
- .st.open {{ background: #d1fae5; color: #065f46; }}
- .st.maybe-open {{ background: #fef3c7; color: #92400e; }}
- .st.closed {{ background: #eee; color: #666; }}
- input {{ font: inherit; padding: .35rem .5rem; width: 22rem; margin-bottom: .75rem;
-          border: 1px solid #ccc; border-radius: 4px; }}
- @media (prefers-color-scheme: dark) {{
-   body {{ background: #16181c; color: #e6e6e6; }}
-   td, th {{ border-color: #2a2d33; }} h2 {{ border-color: #2a2d33; }}
-   code {{ background: #24272e; }} code:hover {{ background: #2e323a; }}
-   .snippet, .sub, th {{ color: #9aa0aa; }} input {{ background: #1d2026; color: #e6e6e6; border-color: #343841; }}
+ :root {{
+   --bg:#f6f7f9; --card:#fff; --ink:#1c1f24; --dim:#6b7280; --faint:#9ca3af;
+   --line:#e5e7eb; --chip:#f3f4f6; --chip-h:#e5e7eb;
+   --open:#059669; --open-bg:#d1fae5; --maybe:#b45309; --maybe-bg:#fef3c7;
+   --shut:#6b7280; --shut-bg:#f3f4f6; --ask:#b45309; --claude:#4f46e5; --codex:#0891b2;
  }}
+ @media (prefers-color-scheme: dark) {{
+   :root {{
+     --bg:#0f1115; --card:#181b21; --ink:#e5e7eb; --dim:#9199a6; --faint:#6b7280;
+     --line:#262b33; --chip:#22262e; --chip-h:#2c313a;
+     --open:#34d399; --open-bg:#064e3b; --maybe:#fbbf24; --maybe-bg:#4a3208;
+     --shut:#9199a6; --shut-bg:#22262e; --ask:#fbbf24; --claude:#818cf8; --codex:#22d3ee;
+   }}
+ }}
+ * {{ box-sizing: border-box; }}
+ body {{ font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+        margin: 0; padding: 2.5rem 1.5rem 5rem; background: var(--bg); color: var(--ink); }}
+ .wrap {{ max-width: 68rem; margin: 0 auto; }}
+ header {{ margin-bottom: 2rem; }}
+ h1 {{ font-size: 1.05rem; font-weight: 650; margin: 0; letter-spacing: -.01em; }}
+ .sub {{ color: var(--dim); font-size: .82rem; margin-top: .3rem; }}
+ h2 {{ font-size: .74rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em;
+       color: var(--dim); margin: 2.4rem 0 .9rem; }}
+ h2 .n {{ color: var(--faint); font-weight: 500; }}
+ .card {{ background: var(--card); border: 1px solid var(--line); border-radius: 10px;
+          margin-bottom: .8rem; overflow: hidden; }}
+ .card > .head {{ display: flex; align-items: baseline; gap: .6rem; padding: .7rem .9rem;
+                  border-bottom: 1px solid var(--line); }}
+ .card > .head b {{ font-weight: 620; font-size: .93rem; }}
+ .card > .head .meta {{ color: var(--faint); font-size: .78rem; margin-left: auto; }}
+ .row {{ display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: start;
+         padding: .65rem .9rem; border-top: 1px solid var(--line); }}
+ .row:first-of-type {{ border-top: 0; }}
+ .row .who {{ min-width: 0; }}
+ .row .t {{ font-weight: 550; overflow-wrap: anywhere; }}
+ .row .m {{ color: var(--faint); font-size: .78rem; margin-top: .15rem; }}
+ .go {{ display: flex; flex-direction: column; gap: .3rem; align-items: flex-end; }}
+ code {{ font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: var(--chip); border: 1px solid var(--line); color: var(--ink);
+         padding: .22rem .45rem; border-radius: 5px; cursor: pointer; white-space: nowrap;
+         max-width: 30rem; overflow: hidden; text-overflow: ellipsis; display: inline-block; }}
+ code:hover {{ background: var(--chip-h); }}
+ code.ghost {{ background: transparent; border-color: transparent; color: var(--faint); }}
+ .pill {{ font-size: .68rem; font-weight: 600; padding: .12rem .4rem; border-radius: 4px;
+          text-transform: uppercase; letter-spacing: .04em; }}
+ .open {{ color: var(--open); background: var(--open-bg); }}
+ .maybe-open {{ color: var(--maybe); background: var(--maybe-bg); }}
+ .closed {{ color: var(--shut); background: var(--shut-bg); }}
+ .ag {{ font-size: .72rem; font-weight: 600; }}
+ .ag.claude {{ color: var(--claude); }}
+ .ag.codex {{ color: var(--codex); }}
+ .q {{ box-shadow: inset 3px 0 0 var(--ask); }}
+ .needs {{ color: var(--ask); font-size: .82rem; margin-top: .2rem; }}
+ .snip {{ color: var(--dim); font-size: .82rem; margin-top: .25rem;
+          display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
+ .empty {{ color: var(--faint); font-size: .85rem; padding: .9rem; background: var(--card);
+           border: 1px dashed var(--line); border-radius: 10px; }}
+ input {{ font: inherit; padding: .5rem .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
+          border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); }}
+ input:focus {{ outline: 2px solid var(--claude); outline-offset: -1px; }}
 </style>
-<h1>scad sessions</h1>
-<div class="sub">generated {generated} · {n_all} sessions · click any command to copy</div>
+<div class="wrap">
+<header>
+ <h1>scad sessions</h1>
+ <div class="sub">{generated} · {n_panes} panes open · {n_at_hand} waiting at hand ·
+   {n_closed} waiting closed · {n_all} sessions · click any command to copy</div>
+</header>
 
-<h2>Open now — {n_panes} agent panes</h2>
+<h2>Open now <span class="n">{n_panes}</span></h2>
 {grouped_panes}
 
-<h2>Waiting, with a pane open ({n_at_hand})</h2>
+<h2>Waiting — a pane is open for it <span class="n">{n_at_hand}</span></h2>
 {waiting}
 
-<h2>Waiting, closed ({n_closed})</h2>
+<h2>Waiting — closed <span class="n">{n_closed}</span></h2>
 {grouped_closed}
 
-<h2>All sessions</h2>
+<h2>All sessions <span class="n">{n_all}</span></h2>
 <input id="f" placeholder="filter by name, project, cwd, title…" autocomplete="off">
 <div id="all"></div>
+</div>
 
 <script>
 const DATA = {data};
 const esc = s => (s ?? "").toString().replace(/[&<>"]/g, c =>
-  ({{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}})[c]);
+  ({{"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}})[c]);
 const when = ms => ms ? new Date(ms).toLocaleString() : "";
 const label = r => r.name || r.title || r.id.slice(0, 12);
 
-function table(rows) {{
-  if (!rows.length) return '<p class="muted">None.</p>';
-  return '<table><tr><th>session</th><th>project</th><th>last</th><th>go</th></tr>' +
-    rows.map(r => '<tr><td>' + esc(label(r)) + '<br><span class="muted">' + esc(r.agent) +
-      ' · ' + r.n_turns + ' turns</span></td><td>' + esc(r.project) + '</td><td>' +
-      esc(when(r.ended)) + '</td><td>' + (r.reentry.command
-        ? '<code onclick="copy(this)">' + esc(r.reentry.command) + '</code>' : '') +
-      '</td></tr>').join('') + '</table>';
+function rows(list) {{
+  if (!list.length) return '<div class="empty">Nothing here.</div>';
+  return '<div class="card">' + list.map(r =>
+    '<div class="row"><div class="who"><div class="t">' + esc(label(r)) +
+    '</div><div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
+    esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
+    (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
+    '</div></div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
+    '</span>' + (r.reentry.command ? '<code onclick="copy(this)">' + esc(r.reentry.command) +
+    '</code>' : '') + '</div></div>').join('') + '</div>';
 }}
 
 function copy(el) {{
   navigator.clipboard.writeText(el.textContent);
-  const was = el.textContent; el.textContent = "copied"; setTimeout(() => el.textContent = was, 700);
+  const was = el.textContent; el.textContent = "copied ✓";
+  setTimeout(() => el.textContent = was, 800);
 }}
 
 const f = document.getElementById("f");
-const render = () => {{
+const draw = () => {{
   const q = f.value.toLowerCase();
-  document.getElementById("all").innerHTML = table(DATA.all.filter(r => !q ||
+  document.getElementById("all").innerHTML = rows(DATA.all.filter(r => !q ||
     [r.name, r.project, r.cwd, r.title, r.id].some(v => (v ?? "").toLowerCase().includes(q))));
 }};
-f.addEventListener("input", render);
-render();
+f.addEventListener("input", draw);
+draw();
 </script>
 </html>
 """
-
-
-def _rows_html(rows: list[dict], waiting: bool = False) -> str:
-    """Server-render the two priority sections so they are readable with JS off."""
-    if not rows:
-        return '<p class="muted">Nothing waiting.</p>' if waiting else '<p class="muted">None.</p>'
-    out = ['<table><tr><th>session</th><th>project</th><th>waiting since</th><th>go</th></tr>']
-    for r in rows:
-        e = _html.escape
-        cls = ' class="q"' if r.get("outcome") == "awaiting-question" else ""
-        name = e(str(r.get("name") or r.get("title") or (r.get("id") or "")[:12]))
-        since = datetime.fromtimestamp(r["ended"] / 1000).strftime("%Y-%m-%d %H:%M") if r.get("ended") else ""
-        cmd = r["reentry"]["command"]
-        note = f'<br><span class="muted">{e(r["reentry"]["note"])}</span>' if r["reentry"]["note"] else ""
-        extra = ""
-        if r.get("needs"):
-            extra += f'<br><span class="needs">needs: {e(str(r["needs"]))}</span>'
-        if waiting and r.get("last_text"):
-            extra += f'<br><span class="snippet">{e(" ".join(str(r["last_text"]).split())[:220])}</span>'
-        # Built outside the f-string so the attribute keeps its quotes.
-        # Lead with the resume command: tmux targets are ambiguous when the same
-        # project always opens in the same window, which is the normal case here.
-        resume = _resume_command(r)
-        status = r.get("status", "")
-        badge = f'<span class="st {status}">{status}</span>' if status else ""
-        cmd_html = f'<code onclick="copy(this)">{e(resume)}</code>' if resume else ""
-        if cmd and r["reentry"]["kind"] == "tmux":
-            cmd_html += f'<br><span class="muted">{e(cmd)}{e(" · " + r["reentry"]["note"]) if r["reentry"]["note"] else ""}</span>"'.rstrip('"')
-        out.append(
-            f'<tr{cls}><td>{name}<br><span class="muted">{e(str(r.get("agent") or ""))} · '
-            f'{r.get("n_turns") or 0} turns</span>{extra}</td>'
-            f'<td>{e(str(r.get("project") or ""))}<br><span class="muted">{e(str(r.get("cwd") or ""))}</span></td>'
-            f'<td>{since}<br>{badge}</td>'
-            f'<td>{cmd_html}</td></tr>'
-        )
-    out.append("</table>")
-    return "".join(out)
 
 
 def _embed(data: dict) -> str:
@@ -477,31 +478,6 @@ def _embed(data: dict) -> str:
             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
 
-def _panes_html(rows: list[dict]) -> str:
-    """The live-panes table. Pane-first, with the session shown only as a guess."""
-    if not rows:
-        return '<p class="muted">No agent panes open.</p>'
-    e = _html.escape
-    out = ['<table><tr><th>pane</th><th>window</th><th>agent</th>'
-           '<th>cwd</th><th>likely session</th><th>go</th></tr>']
-    for r in rows:
-        guess = ""
-        if r.get("likely_id"):
-            title = e(str(r.get("likely_title") or "")[:44])
-            guess = (f'<span class="muted">~ {e(r["likely_id"][:8])}</span> {title}'
-                     f'<br><span class="muted">best guess — a pane cannot be tied to a session</span>')
-        out.append(
-            f'<tr><td><code onclick="copy(this)">{e(r["target"])}</code></td>'
-            f'<td>{e(r.get("window") or "")}</td>'
-            f'<td>{e(r["agent"])} <span class="muted">{e(r.get("version") or "")}</span></td>'
-            f'<td>{e(r.get("project") or "")}<br><span class="muted">{e(r["cwd"])}</span></td>'
-            f'<td>{guess}</td>'
-            f'<td><code onclick="copy(this)">{e(r["goto"])}</code></td></tr>'
-        )
-    out.append("</table>")
-    return "".join(out)
-
-
 def _ago(ms) -> str:
     if not ms:
         return ""
@@ -513,60 +489,125 @@ def _ago(ms) -> str:
     return f"{mins // 1440}d ago"
 
 
-def _pane_line(r: dict) -> str:
-    e = _html.escape
-    likely = ""
-    if r.get("likely_id"):
-        likely = (f'<span class="muted">~{e(r["likely_id"][:8])}</span> '
-                  f'{e(str(r.get("likely_title") or "")[:52])}')
-    else:
-        likely = '<span class="muted">no indexed session in this cwd</span>'
-    resume = _resume_command({"id": r.get("likely_id"), "cwd": r.get("cwd"),
-                              "agent": r.get("agent"), "kind": "main"}) if r.get("likely_id") else ""
+def _chip(text: str, ghost: bool = False) -> str:
+    """A click-to-copy command chip."""
+    if not text:
+        return ""
+    cls = ' class="ghost"' if ghost else ""
+    return f'<code{cls} onclick="copy(this)">{_html.escape(text)}</code>'
+
+
+def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
+         extra: str = "", flag: bool = False) -> str:
+    """One row, identical in every section.
+
+    Every section previously built its own `<table>`, so each computed column
+    widths independently and nothing lined up down the page. One grid row shared
+    everywhere fixes that by construction — the columns cannot drift apart
+    because there is only one definition of them.
+    """
+    pill_html = f'<span class="pill {pill}">{_html.escape(pill)}</span>' if pill else ""
     return (
-        f'<tr><td><code onclick="copy(this)">{e(r["goto"])}</code>'
-        f'<br><span class="muted">{e(r["target"])} · {e(r["agent"])} {e(r.get("version") or "")}</span></td>'
-        f'<td>{likely}<br><span class="muted">{_ago(r.get("last_activity"))}</span></td>'
-        f'<td>{f"<code onclick=\"copy(this)\">{e(resume)}</code>" if resume else ""}</td></tr>'
+        f'<div class="row{" q" if flag else ""}">'
+        f'<div class="who"><div class="t">{title}</div>'
+        f'<div class="m">{meta}</div>{extra}</div>'
+        f'<div class="go">{pill_html}{"".join(chips)}</div>'
+        f'</div>'
     )
 
 
+def _card(head: str, meta: str, rows: list[str]) -> str:
+    return (f'<div class="card"><div class="head"><b>{head}</b>'
+            f'<span class="meta">{meta}</span></div>{"".join(rows)}</div>')
+
+
+def _empty(msg: str) -> str:
+    return f'<div class="empty">{_html.escape(msg)}</div>'
+
+
+def _agent_tag(agent: str) -> str:
+    a = _html.escape(agent or "")
+    return f'<span class="ag {a}">{a}</span>'
+
+
 def _grouped_panes_html(groups: list[dict]) -> str:
-    """Session -> window -> panes, newest first at every level."""
+    """tmux session -> window card -> one row per agent pane."""
     if not groups:
-        return '<p class="muted">No agent panes open.</p>'
+        return _empty("No agent panes open.")
     e = _html.escape
     out = []
     for g in groups:
-        out.append(f'<h3>tmux <code>{e(g["session"])}</code></h3>')
         for w in g["windows"]:
-            out.append(f'<div class="win"><b>{e(w["label"] or w["target"])}</b> '
-                       f'<span class="muted">{e(w["target"])} · {len(w["panes"])} agent'
-                       f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}</span></div>')
-            out.append('<table>' + "".join(_pane_line(r) for r in w["panes"]) + '</table>')
+            rows = []
+            for r in w["panes"]:
+                if r.get("likely_id"):
+                    title = e(str(r.get("likely_title") or r["likely_id"][:12])[:70])
+                    hint = f'~{e(r["likely_id"][:8])} · best guess'
+                else:
+                    title = '<span class="m">no indexed session here</span>'
+                    hint = "unmatched"
+                resume = _resume_command({"id": r.get("likely_id"), "cwd": r.get("cwd"),
+                                          "agent": r.get("agent"), "kind": "main"}) \
+                    if r.get("likely_id") else ""
+                rows.append(_row(
+                    title,
+                    f'{_agent_tag(r["agent"])} {e(r.get("version") or "")} · '
+                    f'{e(r["target"])} · {hint} · {_ago(r.get("last_activity"))}',
+                    [_chip(r["goto"]), _chip(resume, ghost=True)],
+                ))
+            out.append(_card(
+                e(w["label"] or w["target"]),
+                f'{e(g["session"])} · {e(w["target"])} · {len(w["panes"])} agent'
+                f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}',
+                rows,
+            ))
     return "".join(out)
 
 
+def _waiting_rows_html(rows: list[dict]) -> str:
+    """Sessions awaiting you that still have a pane open — go to the pane."""
+    if not rows:
+        return _empty("Nothing waiting with a pane open.")
+    e = _html.escape
+    out = []
+    for r in rows:
+        extra = ""
+        if r.get("needs"):
+            extra += f'<div class="needs">{e(str(r["needs"]))}</div>'
+        if r.get("last_text"):
+            extra += f'<div class="snip">{e(" ".join(str(r["last_text"]).split())[:240])}</div>'
+        chips = [_chip(_resume_command(r), ghost=True)]
+        if r["reentry"]["kind"] == "tmux":
+            chips.insert(0, _chip(r["reentry"]["command"]))
+        out.append(_row(
+            e(str(r.get("name") or r.get("title") or r["id"][:12])[:70]),
+            f'{_agent_tag(r.get("agent") or "")} · {e(r.get("project") or "")} · '
+            f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}',
+            chips, pill=r.get("status", ""), extra=extra,
+            flag=r.get("outcome") == "awaiting-question",
+        ))
+    return f'<div class="card">{"".join(out)}</div>'
+
+
 def _grouped_closed_html(groups: list[dict]) -> str:
-    """Closed sessions still awaiting you, by project, newest project first."""
+    """Closed sessions still awaiting you, one card per project."""
     if not groups:
-        return '<p class="muted">Nothing closed and waiting.</p>'
+        return _empty("Nothing closed and waiting.")
     e = _html.escape
     out = []
     for g in groups:
-        out.append(f'<h3>{e(g["project"])} <span class="muted">{len(g["rows"])} waiting · '
-                   f'{_ago(g["last_activity"])}</span></h3>')
         rows = []
         for r in g["rows"]:
-            cmd = _resume_command(r)
-            q = ' class="q"' if r.get("outcome") == "awaiting-question" else ""
-            label = e(str(r.get("name") or r.get("title") or r["id"][:12])[:64])
-            needs = f'<br><span class="needs">{e(str(r["needs"]))}</span>' if r.get("needs") else ""
-            rows.append(
-                f'<tr{q}><td>{label}{needs}<br><span class="muted">{_ago(r.get("ended"))}'
-                f' · {r.get("n_turns") or 0} turns</span></td>'
-                f'<td><code onclick="copy(this)">{e(cmd)}</code></td></tr>')
-        out.append("<table>" + "".join(rows) + "</table>")
+            extra = f'<div class="needs">{e(str(r["needs"]))}</div>' if r.get("needs") else ""
+            rows.append(_row(
+                e(str(r.get("name") or r.get("title") or r["id"][:12])[:70]),
+                f'{_agent_tag(r.get("agent") or "")} · {r.get("n_turns") or 0} turns · '
+                f'{_ago(r.get("ended"))}',
+                [_chip(_resume_command(r))], extra=extra,
+                flag=r.get("outcome") == "awaiting-question",
+            ))
+        out.append(_card(e(g["project"]),
+                         f'{len(g["rows"])} waiting · {_ago(g["last_activity"])}', rows))
     return "".join(out)
 
 
@@ -580,7 +621,7 @@ def render(data: dict) -> str:
         n_closed=len(data.get("waiting_closed") or []),
         grouped_panes=_grouped_panes_html(data.get("grouped_panes") or []),
         grouped_closed=_grouped_closed_html(data.get("grouped_closed") or []),
-        waiting=_rows_html(data.get("waiting_at_hand") or [], waiting=True),
+        waiting=_waiting_rows_html(data.get("waiting_at_hand") or []),
         data=_embed(data),
     )
 
