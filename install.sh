@@ -373,13 +373,17 @@ elif ! command -v claude &>/dev/null; then
     echo "[scad] Install Claude Code, then re-run: ./install.sh"
 else
     PLUGIN_DIR=""
+    # The plugin ROOT — the directory that contains .claude-plugin/, alongside
+    # commands/ and skills/. That root is what gets declared as the marketplace
+    # source, and it is where marketplace.json lives, so name it directly rather
+    # than the manifest subdirectory one level down.
     if [[ -n "$REPO_DIR" ]] && [[ -d "$REPO_DIR/.claude-plugin" ]]; then
-        PLUGIN_DIR="$REPO_DIR/.claude-plugin"
+        PLUGIN_DIR="$REPO_DIR"
     elif [[ -d "$VENV_DIR/lib" ]]; then
         # Find installed package location for non-editable installs
         SITE_PKG=$("$VENV_DIR/bin/python" -c "import scad; print(scad.__file__)" 2>/dev/null | xargs dirname)
         if [[ -n "$SITE_PKG" ]] && [[ -d "$(dirname "$SITE_PKG")/.claude-plugin" ]]; then
-            PLUGIN_DIR="$(dirname "$SITE_PKG")/.claude-plugin"
+            PLUGIN_DIR="$(dirname "$SITE_PKG")"
         fi
     fi
 

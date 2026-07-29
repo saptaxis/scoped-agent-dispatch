@@ -963,3 +963,30 @@ class TestDeregistrationIsTheExactInverse:
         from scad.install import deregister_claude_plugin
 
         assert deregister_claude_plugin(tmp_path / ".claude", use_cli=False) is False
+
+
+class TestInstallShellPassesThePluginRoot:
+    """install.sh should hand registration the directory it actually declares.
+
+    `_plugin_root` normalises either spelling, so passing the manifest dir works
+    — but the marketplace is declared on the repo root, and a script that names
+    the root is a script that cannot drift into being wrong.
+    """
+
+    def _script(self):
+        return (Path(__file__).parent.parent / "install.sh").read_text()
+
+    def test_it_no_longer_hands_over_the_manifest_subdirectory(self):
+        assert 'PLUGIN_DIR="$REPO_DIR/.claude-plugin"' not in self._script()
+
+    def test_it_passes_the_repo_root(self):
+        assert 'PLUGIN_DIR="$REPO_DIR"' in self._script()
+
+    def test_it_still_gates_on_the_manifest_existing(self):
+        # The root is only a plugin root if the manifest is under it.
+        assert '-d "$REPO_DIR/.claude-plugin"' in self._script()
+
+    def test_the_repo_root_is_where_the_marketplace_manifest_lives(self):
+        root = Path(__file__).parent.parent
+        assert (root / ".claude-plugin" / "marketplace.json").is_file()
+        assert (root / "commands" / "remember.md").is_file()
