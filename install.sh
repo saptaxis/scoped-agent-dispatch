@@ -407,6 +407,25 @@ else:
     fi
 fi
 
+# --- Transcript retention ---
+# Before the archive sweep, deliberately: the archive can only preserve what still
+# exists, and Claude Code prunes transcripts after 30 days by default. On a machine
+# that has been running a while that default has already destroyed history before
+# scad ever sees it. Raising it first means nothing further is lost from today on.
+# Never lowers a longer window the user chose themselves.
+if [ -d "$HOME/.claude" ]; then
+    RETENTION=$("$VENV_DIR/bin/python" -c "
+from pathlib import Path
+from scad.install import RETENTION_DAYS, set_transcript_retention
+print(set_transcript_retention(Path('$HOME/.claude')), RETENTION_DAYS)
+" 2>/dev/null) || RETENTION="failed"
+    case "$RETENTION" in
+        set*)    echo "[scad] Transcript retention raised to ${RETENTION#set } days (was Claude Code's 30-day default)." ;;
+        kept*)   echo "[scad] Transcript retention already long enough — left alone." ;;
+        *)       echo "[scad] Could not set transcript retention; set cleanupPeriodDays in ~/.claude/settings.json by hand." ;;
+    esac
+fi
+
 # --- Bootstrap the session index ---
 # Without this a fresh install has an empty index, so `scad view` shows nothing
 # and looks broken. Archiving first matters most here: on a machine with months

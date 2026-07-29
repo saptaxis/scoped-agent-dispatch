@@ -66,6 +66,40 @@ def _run_plugin_cli(args: list, claude_home: Path) -> bool:
         return False
 
 
+# Claude Code prunes transcripts after this many days (default 30). Ten years is
+# effectively "keep them": the archive can only preserve what still exists, so on
+# a machine that has been running a while the default has already destroyed the
+# history before scad ever sees it. On this machine that cost February to June —
+# 190 of 203 sessions on another survive only as a line in history.jsonl.
+RETENTION_DAYS = 3650
+
+
+def set_transcript_retention(claude_home: Path, days: int = RETENTION_DAYS) -> str:
+    """Raise Claude Code's transcript retention, unless the user set it higher.
+
+    Returns what happened: "set", "kept" (theirs is already >= ours), or "failed".
+
+    Never lowers an existing value — someone who chose 9999 meant it, and silently
+    shortening a retention window is the one mistake here that destroys data.
+    """
+    settings_file = claude_home / "settings.json"
+    try:
+        settings = _read_settings(settings_file)
+    except (OSError, ValueError):
+        return "failed"
+
+    current = settings.get("cleanupPeriodDays")
+    if isinstance(current, int) and current >= days:
+        return "kept"
+
+    settings["cleanupPeriodDays"] = days
+    try:
+        _write_settings(settings_file, settings)
+    except OSError:
+        return "failed"
+    return "set"
+
+
 def register_claude_plugin(
     claude_home: Path, plugin_path: Path, use_cli: bool = True
 ) -> bool:

@@ -990,3 +990,64 @@ class TestInstallShellPassesThePluginRoot:
         root = Path(__file__).parent.parent
         assert (root / ".claude-plugin" / "marketplace.json").is_file()
         assert (root / "commands" / "remember.md").is_file()
+
+
+class TestTranscriptRetention:
+    def _home(self, tmp_path, settings=None):
+        home = tmp_path / ".claude"
+        home.mkdir(parents=True, exist_ok=True)
+        if settings is not None:
+            (home / "settings.json").write_text(json.dumps(settings, indent=4) + "\n")
+        return home
+
+    def test_sets_retention_when_unset(self, tmp_path):
+        from scad.install import RETENTION_DAYS, set_transcript_retention
+        home = self._home(tmp_path, {"model": "opus"})
+        assert set_transcript_retention(home) == "set"
+        got = json.loads((home / "settings.json").read_text())
+        assert got["cleanupPeriodDays"] == RETENTION_DAYS
+        assert got["model"] == "opus"
+
+    def test_creates_settings_when_absent(self, tmp_path):
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path)
+        assert set_transcript_retention(home) == "set"
+        assert (home / "settings.json").is_file()
+
+    def test_raises_the_default_30(self, tmp_path):
+        from scad.install import RETENTION_DAYS, set_transcript_retention
+        home = self._home(tmp_path, {"cleanupPeriodDays": 30})
+        assert set_transcript_retention(home) == "set"
+        assert json.loads((home / "settings.json").read_text())["cleanupPeriodDays"] == RETENTION_DAYS
+
+    def test_never_lowers_a_longer_window(self, tmp_path):
+        """Someone who chose 9999 meant it — silently shortening retention is the
+        one mistake here that destroys data."""
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path, {"cleanupPeriodDays": 9999})
+        assert set_transcript_retention(home) == "kept"
+        assert json.loads((home / "settings.json").read_text())["cleanupPeriodDays"] == 9999
+
+    def test_is_idempotent(self, tmp_path):
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path, {})
+        set_transcript_retention(home)
+        before = (home / "settings.json").read_text()
+        assert set_transcript_retention(home) == "kept"
+        assert (home / "settings.json").read_text() == before
+
+    def test_every_other_key_survives(self, tmp_path):
+        from scad.install import set_transcript_retention
+        original = {"model": "opus[1m]", "env": {"X": "1"},
+                    "enabledPlugins": {"a@b": True}, "permissions": {"allow": ["Read"]}}
+        home = self._home(tmp_path, dict(original))
+        set_transcript_retention(home)
+        got = json.loads((home / "settings.json").read_text())
+        for k, v in original.items():
+            assert got[k] == v
+
+    def test_unreadable_settings_reports_failure_not_a_crash(self, tmp_path):
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path)
+        (home / "settings.json").write_text("{ not json")
+        assert set_transcript_retention(home) == "failed"
