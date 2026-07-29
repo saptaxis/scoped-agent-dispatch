@@ -2244,11 +2244,42 @@ del _verb
 @click.option("--days", default=14, help="How far back the waiting list looks.")
 @click.option("--output", default=None, type=click.Path(), help="Write the page here.")
 @click.option("--no-open", is_flag=True, help="Write the page without opening a browser.")
-def view(days, output, no_open):
-    """Render the session index to a page and open it."""
+@click.option("--refresh", is_flag=True,
+              help="Archive and index new traces before rendering.")
+def view(days, output, no_open, refresh):
+    """Render the session index to a page and open it.
+
+    Read-only by default: the page reflects whatever the last `scad reindex`
+    captured. `--refresh` is the opt-in exception, and it is opt-in on purpose —
+    the viewer's contract is that it never writes to the index, so the side
+    effect happens only when asked for.
+
+    Worth knowing what --refresh does *not* fix: live tmux and container state
+    is gathered at render time and is always current, so an unrefreshed page is
+    half fresh. That asymmetry is the reason to reach for this flag.
+    """
     from pathlib import Path as _Path
 
     from scad.config import get_scad_home
+
+    if refresh:
+        # Incremental, and archiving first. The index reads the archive rather
+        # than the live trace dirs, so a refresh that skipped the sweep would
+        # report success and render exactly the same stale page.
+        #
+        # Never rebuild: that is for derivation-rule changes, and on a viewer
+        # command it would be 11s of pointless work — and destructive if raw had
+        # been pruned.
+        try:
+            stats = run_reindex(archive_first=True)
+            click.echo(f"[scad] refreshed: {stats.get('sessions', 0)} new session(s), "
+                       f"{stats.get('turns', 0)} new turn(s)")
+        except Exception as exc:
+            # A refresh is a convenience wrapped around the thing actually asked
+            # for. Failing the render because the sweep hit a full disk would
+            # withhold the page over a problem it does not have; stale beats
+            # absent, as long as it is said out loud.
+            click.echo(f"[scad] Warning: refresh failed, rendering existing index: {exc}")
 
     conn = index_connect()
     data = gather(conn, tmux_panes(), running_run_ids(), days=days)

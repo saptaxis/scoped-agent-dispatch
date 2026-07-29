@@ -204,7 +204,7 @@ scad session read <id> [--kind text]               # print a session's turns
 scad search <query> [--kind thinking]              # full-text search across every turn
 scad project ls | scad project show <name>         # sessions grouped by resolved project
 scad where                                         # which project scad resolves for a directory
-scad view [--days N] [--no-open] [--output PATH]   # render the index to a page and open it
+scad view [--days N] [--no-open] [--refresh] [--output PATH]   # render the index to a page and open it
 
 # Notes — the authored tier
 scad session note --current                        # append a record (JSON on stdin); /remember calls this
@@ -372,12 +372,19 @@ Render the session index to a self-contained HTML page and open it.
 scad view                 # waiting list, live sessions, everything, then open
 scad view --days 30       # widen the waiting window
 scad view --no-open       # just write ~/.scad/view.html
+scad view --refresh       # archive and index new traces first
 ```
 
 Answers two questions: who is waiting on you, and how to get back to them. Each row
 carries a command — `tmux select-window … \; select-pane …` for a live pane,
 `scad run attach` for a container, or `cd <cwd> && claude --resume <id>` for a session
 that has been closed. Read-only; reply in the session itself.
+
+Live panes and containers are discovered at render time, so they are always current —
+but everything else reflects the last `scad reindex`, which makes an unrefreshed page
+*half* fresh. `--refresh` closes that gap with an incremental pass (~1s) before
+rendering; it is opt-in so that plain `scad view` stays a pure reader, and a refresh
+that fails warns and renders the existing index rather than withholding the page.
 
 Live panes are matched by working directory, which is approximate — several panes can
 share one. Only panes actually running an agent count, and where more than one matches

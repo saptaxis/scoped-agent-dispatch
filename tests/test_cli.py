@@ -2275,3 +2275,43 @@ class TestReindexSweepIsolation:
         with patch("scad.index.archive_all") as sweep:
             runner.invoke(main, ["reindex", "--no-archive"])
         sweep.assert_not_called()
+
+
+class TestViewRefresh:
+    """`scad view` is a read-only renderer by default — the viewer spec states it
+    three times, including the non-goal "the viewer never writes to the index."
+
+    `--refresh` is the opt-in exception. Keeping it opt-in is the whole point:
+    the default contract stays true, and the page only gains a side effect when
+    you ask for one.
+    """
+
+    def test_default_does_not_touch_the_index(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        with patch("scad.cli.run_reindex") as ri:
+            runner.invoke(main, ["view", "--no-open"])
+        ri.assert_not_called()
+
+    def test_refresh_runs_an_incremental_pass_before_rendering(
+        self, runner, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        with patch("scad.cli.run_reindex") as ri:
+            result = runner.invoke(main, ["view", "--refresh", "--no-open"])
+        ri.assert_called_once()
+        # Incremental, and sweeping: archiving is how new work enters the index
+        # at all, so a refresh that skipped it would render the same stale page.
+        assert ri.call_args.kwargs.get("archive_first") is True
+        assert ri.call_args.kwargs.get("rebuild", False) is False
+        assert result.exit_code == 0
+
+    def test_a_failed_refresh_still_renders(self, runner, tmp_path, monkeypatch):
+        """A refresh is a convenience. If archiving or indexing fails, the page
+        the user asked for must still appear — showing stale data beats showing
+        nothing, provided the failure is said out loud."""
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        with patch("scad.cli.run_reindex", side_effect=OSError("disk full")):
+            result = runner.invoke(main, ["view", "--refresh", "--no-open"])
+        assert result.exit_code == 0
+        assert "disk full" in result.output
+        assert str(tmp_path / ".scad") in result.output
