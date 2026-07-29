@@ -9,6 +9,7 @@ survives being copied off a remote box.
 
 import html as _html
 import json
+import shlex
 import time
 from dataclasses import dataclass
 from datetime import datetime
@@ -24,6 +25,22 @@ class Reentry:
     kind: str        # tmux | container | resume | none
     command: str
     note: str = ""
+
+
+def _goto(target: str) -> str:
+    """Shell command that lands the cursor on `target` (session:window.pane).
+
+    `tmux select-window -t main:3.0` looks like it selects pane 0 and does not:
+    select-window takes a target-WINDOW and discards the pane component, leaving
+    you on whichever pane was last active there. Verified on the real machine —
+    it landed on a zsh sitting beside the agent. So select the window, then the
+    pane. The `\\;` is escaped for the shell, which would otherwise eat the
+    separator before tmux sees it.
+    """
+    window, _, pane = target.rpartition(".")
+    if not window or not pane.isdigit():
+        return f"tmux select-window -t {target}"
+    return f"tmux select-window -t {window} \\; select-pane -t {target}"
 
 
 def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
@@ -48,7 +65,7 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
             if len(matches) > 1:
                 others = ", ".join(p.target for p in matches[1:])
                 note = f"ambiguous — same cwd also in {others}"
-            return Reentry("tmux", f"tmux select-window -t {matches[0].target}", note)
+            return Reentry("tmux", _goto(matches[0].target), note)
 
     run_id = row.get("scad_run_id")
     if run_id and run_id in running:
@@ -56,7 +73,9 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
 
     template = _RESUME.get(row.get("agent") or "claude", _RESUME["claude"])
     resume = template.format(id=row.get("id"))
-    return Reentry("resume", f"cd {cwd} && {resume}" if cwd else resume)
+    # shlex.quote leaves ordinary paths alone and quotes the 84 real cwds that
+    # contain spaces ("Saptarishi Apartments"), which `cd` would otherwise split.
+    return Reentry("resume", f"cd {shlex.quote(cwd)} && {resume}" if cwd else resume)
 
 
 _WAITING = ("awaiting-question", "awaiting-user")

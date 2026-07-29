@@ -16,7 +16,22 @@ class TestReentry:
         panes = [TmuxPane("main:1.2", "/Users/vsr/code/scad", "2.1.219")]
         r = reentry_for(row(), panes, set())
         assert r.kind == "tmux"
-        assert r.command == "tmux select-window -t main:1.2"
+        assert r.command == "tmux select-window -t main:1 \\; select-pane -t main:1.2"
+
+    def test_the_command_selects_the_pane_not_just_the_window(self):
+        """`select-window -t main:3.0` silently ignores the pane component.
+
+        Verified on the real machine: with window 3's active pane set to 3.1
+        (a zsh), `tmux select-window -t main:3.0` landed on main:3.1 running
+        zsh, not on the agent in 3.0. The window must be selected AND the pane
+        selected explicitly, or the command lands on whichever pane was last
+        active in that window.
+        """
+        panes = [TmuxPane("main:3.0", "/Users/vsr/code/scad", "2.1.205")]
+        r = reentry_for(row(), panes, set())
+        assert "select-pane -t main:3.0" in r.command
+        # The escaped semicolon survives a shell paste as a tmux command separator.
+        assert " \\; " in r.command
 
     def test_a_pane_in_the_same_cwd_that_is_not_an_agent_is_ignored(self):
         """Three panes share a directory on the real machine; only agent panes count."""
@@ -57,6 +72,20 @@ class TestReentry:
         """Recorded cwds outlive their directories; the command is still the best hint."""
         r = reentry_for(row(cwd="/gone/away"), [], set())
         assert "cd /gone/away" in r.command
+
+    def test_a_cwd_with_spaces_is_quoted_for_the_shell(self):
+        """84 real cwds contain spaces — "Saptarishi Apartments", "scad enc.test_dir-1".
+
+        Unquoted, `cd` takes the first word and the command silently fails or
+        lands somewhere else entirely.
+        """
+        r = reentry_for(row(cwd="/tmp/scad enc.test_dir-1"), [], set())
+        assert r.command == "cd '/tmp/scad enc.test_dir-1' && claude --resume S1"
+
+    def test_an_ordinary_cwd_is_left_unquoted(self):
+        """Quoting every path would make the common case ugly for no gain."""
+        r = reentry_for(row(), [], set())
+        assert r.command == "cd /Users/vsr/code/scad && claude --resume S1"
 
     def test_missing_cwd_resumes_without_a_cd(self):
         r = reentry_for(row(cwd=None), [], set())
