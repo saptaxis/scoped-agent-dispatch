@@ -8,6 +8,8 @@ set -euo pipefail
 #   ./install.sh --home ~/my-scad   # custom SCAD_HOME
 #   ./install.sh --dry-run          # show what would happen
 #   ./install.sh --no-plugin         # skip Claude Code plugin registration
+#   ./install.sh --no-retention      # never touch cleanupPeriodDays
+#   ./install.sh --yes               # accept prompts (scripted installs)
 #   ./install.sh --no-completions    # skip shell completion setup
 #   ./install.sh --uninstall         # remove scad (keeps SCAD_HOME data)
 #   ./install.sh --no-vm             # skip Docker provider provisioning (macOS: no Colima)
@@ -23,6 +25,8 @@ set -euo pipefail
 SCAD_HOME_DEFAULT="$HOME/.scad"
 SCAD_HOME="${SCAD_HOME_DEFAULT}"
 VENV_DIR="${SCAD_INSTALL_VENV:-$HOME/.local/share/scad/venv}"
+SET_RETENTION="${SET_RETENTION:-ask}"
+ASSUME_YES="${ASSUME_YES:-no}"
 LOCAL_BIN="$HOME/.local/bin"
 DRY_RUN=false
 UNINSTALL=false
@@ -48,6 +52,14 @@ while [[ $# -gt 0 ]]; do
             UNINSTALL=true
             shift
             ;;
+        --no-retention)
+            SET_RETENTION="no"
+            shift
+            ;;
+        -y|--yes)
+            ASSUME_YES="yes"
+            shift
+            ;;
         --no-plugin)
             SKIP_PLUGIN=true
             shift
@@ -62,7 +74,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Unknown option: $1"
-            echo "Usage: install.sh [--home PATH] [--dry-run] [--uninstall] [--no-plugin] [--no-completions] [--no-vm]"
+            echo "Usage: install.sh [--home PATH] [--dry-run] [--uninstall] [--no-plugin] [--no-completions] [--no-vm] [--no-retention] [-y|--yes]"
             exit 1
             ;;
     esac
@@ -407,22 +419,26 @@ else:
     fi
 fi
 
-# --- Transcript retention ---
-# Before the archive sweep, deliberately: the archive can only preserve what still
-# exists, and Claude Code prunes transcripts after 30 days by default. On a machine
-# that has been running a while that default has already destroyed history before
-# scad ever sees it. Raising it first means nothing further is lost from today on.
-# Never lowers a longer window the user chose themselves.
-if [ -d "$HOME/.claude" ]; then
-    RETENTION=$("$VENV_DIR/bin/python" -c "
+# --- Transcript retention (asks; never decides for you) ---
+# Claude Code prunes transcripts after 30 days by default and the archive can only
+# keep what still exists. But settings.json is Claude Code's file, not ours, so we
+# offer rather than assume — and only when the user has expressed no preference.
+# An existing value of any length is a decision and is left alone.
+if [ -d "$HOME/.claude" ] && [ "$SET_RETENTION" != "no" ]; then
+    RETENTION_ARGS=""
+    [ "$ASSUME_YES" = "yes" ] && RETENTION_ARGS="assume_yes=True"
+    RESULT=$("$VENV_DIR/bin/python" -c "
 from pathlib import Path
-from scad.install import RETENTION_DAYS, set_transcript_retention
-print(set_transcript_retention(Path('$HOME/.claude')), RETENTION_DAYS)
-" 2>/dev/null) || RETENTION="failed"
-    case "$RETENTION" in
-        set*)    echo "[scad] Transcript retention raised to ${RETENTION#set } days (was Claude Code's 30-day default)." ;;
-        kept*)   echo "[scad] Transcript retention already long enough — left alone." ;;
-        *)       echo "[scad] Could not set transcript retention; set cleanupPeriodDays in ~/.claude/settings.json by hand." ;;
+from scad.install import set_transcript_retention
+print(set_transcript_retention(Path('$HOME/.claude'), $RETENTION_ARGS))
+" </dev/tty 2>/dev/null) || RESULT="skipped"
+    case "$RESULT" in
+        set)      echo "[scad] Transcript retention raised — nothing further will be pruned." ;;
+        kept)     echo "[scad] cleanupPeriodDays already set; left as you had it." ;;
+        declined) echo "[scad] Left retention alone. Claude Code will keep pruning after 30 days." ;;
+        skipped)  echo "[scad] Retention unchanged (no prompt available)."
+                  echo "       To keep transcripts, set cleanupPeriodDays in ~/.claude/settings.json." ;;
+        *)        echo "[scad] Could not read ~/.claude/settings.json; retention unchanged." ;;
     esac
 fi
 

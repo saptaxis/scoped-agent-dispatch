@@ -6,6 +6,7 @@ the plugin registration helper that install.sh calls via Python.
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 
@@ -66,21 +67,52 @@ def _run_plugin_cli(args: list, claude_home: Path) -> bool:
         return False
 
 
-# Claude Code prunes transcripts after this many days (default 30). Ten years is
-# effectively "keep them": the archive can only preserve what still exists, so on
-# a machine that has been running a while the default has already destroyed the
-# history before scad ever sees it. On this machine that cost February to June —
-# 190 of 203 sessions on another survive only as a line in history.jsonl.
+# Claude Code prunes transcripts after 30 days by default. The archive can only
+# preserve what still exists, so on a machine that has been running a while the
+# default has already destroyed history before scad ever sees it — that is what
+# cost this machine February to June.
+#
+# But ~/.claude/settings.json belongs to Claude Code, not to us. Installing a
+# session indexer does not imply consent to rewrite the harness's retention
+# policy for a decade, and a long window is a real disk commitment (~400 MB per
+# three weeks here). So we ask, and we only ask when the user has expressed no
+# preference at all.
 RETENTION_DAYS = 3650
 
+RETENTION_PROMPT = """\
+[scad] Claude Code deletes agent transcripts after {current} days by default.
+       scad archives them, but it can only keep what still exists — anything
+       already pruned is gone for good.
 
-def set_transcript_retention(claude_home: Path, days: int = RETENTION_DAYS) -> str:
-    """Raise Claude Code's transcript retention, unless the user set it higher.
+       Raise the retention window to {days} days (~10 years)?
+       This edits cleanupPeriodDays in ~/.claude/settings.json. Transcripts
+       accumulate on disk: roughly 400 MB per three weeks of heavy use.
 
-    Returns what happened: "set", "kept" (theirs is already >= ours), or "failed".
+       [Y/n] """
 
-    Never lowers an existing value — someone who chose 9999 meant it, and silently
-    shortening a retention window is the one mistake here that destroys data.
+
+def set_transcript_retention(
+    claude_home: Path,
+    days: int = RETENTION_DAYS,
+    *,
+    assume_yes: bool = False,
+    ask=None,
+) -> str:
+    """Offer to raise Claude Code's transcript retention. Never decides silently.
+
+    Returns one of:
+      "kept"     the user already set a value — any value — so we leave it alone
+      "set"      it was unset and consent was given
+      "declined" it was unset and the user said no
+      "skipped"  it was unset and nobody could be asked (no tty, scripted install)
+      "failed"   settings.json could not be read or written
+
+    Only an ABSENT key counts as "no preference". A present value is a decision,
+    including a short one: someone who chose 60 days meant 60, and overriding
+    that upwards is as much an override as shortening it would be.
+
+    `ask` is injected for testing; by default it prompts on a tty and refuses to
+    guess when there is none.
     """
     settings_file = claude_home / "settings.json"
     try:
@@ -88,9 +120,16 @@ def set_transcript_retention(claude_home: Path, days: int = RETENTION_DAYS) -> s
     except (OSError, ValueError):
         return "failed"
 
-    current = settings.get("cleanupPeriodDays")
-    if isinstance(current, int) and current >= days:
+    if "cleanupPeriodDays" in settings:
         return "kept"
+
+    if not assume_yes:
+        if ask is None:
+            if not sys.stdin.isatty():
+                return "skipped"
+            ask = _prompt_yes
+        if not ask(RETENTION_PROMPT.format(current=30, days=days)):
+            return "declined"
 
     settings["cleanupPeriodDays"] = days
     try:
@@ -98,6 +137,14 @@ def set_transcript_retention(claude_home: Path, days: int = RETENTION_DAYS) -> s
     except OSError:
         return "failed"
     return "set"
+
+
+def _prompt_yes(text: str) -> bool:
+    try:
+        answer = input(text).strip().lower()
+    except (EOFError, KeyboardInterrupt):
+        return False
+    return answer in ("", "y", "yes")
 
 
 def register_claude_plugin(

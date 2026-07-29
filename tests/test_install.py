@@ -1000,48 +1000,69 @@ class TestTranscriptRetention:
             (home / "settings.json").write_text(json.dumps(settings, indent=4) + "\n")
         return home
 
-    def test_sets_retention_when_unset(self, tmp_path):
+    def test_an_existing_value_is_never_touched(self, tmp_path):
+        """A present key is a decision — including a short one. Someone who chose
+        60 days meant 60, and raising it is as much an override as lowering it."""
+        from scad.install import set_transcript_retention
+        for existing in (7, 30, 60, 9999):
+            home = self._home(tmp_path / str(existing), {"cleanupPeriodDays": existing})
+            assert set_transcript_retention(home, ask=lambda _: True) == "kept"
+            got = json.loads((home / "settings.json").read_text())
+            assert got["cleanupPeriodDays"] == existing
+
+    def test_sets_only_when_unset_and_consented(self, tmp_path):
         from scad.install import RETENTION_DAYS, set_transcript_retention
         home = self._home(tmp_path, {"model": "opus"})
-        assert set_transcript_retention(home) == "set"
+        assert set_transcript_retention(home, ask=lambda _: True) == "set"
         got = json.loads((home / "settings.json").read_text())
         assert got["cleanupPeriodDays"] == RETENTION_DAYS
         assert got["model"] == "opus"
 
+    def test_declining_changes_nothing(self, tmp_path):
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path, {"model": "opus"})
+        before = (home / "settings.json").read_text()
+        assert set_transcript_retention(home, ask=lambda _: False) == "declined"
+        assert (home / "settings.json").read_text() == before
+
+    def test_never_guesses_when_nobody_can_be_asked(self, tmp_path, monkeypatch):
+        """A scripted install must not silently rewrite the harness's config."""
+        from scad.install import set_transcript_retention
+        monkeypatch.setattr("scad.install.sys.stdin.isatty", lambda: False)
+        home = self._home(tmp_path, {})
+        assert set_transcript_retention(home) == "skipped"
+        assert "cleanupPeriodDays" not in json.loads((home / "settings.json").read_text())
+
+    def test_assume_yes_skips_the_prompt(self, tmp_path):
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path, {})
+        def explode(_):
+            raise AssertionError("must not prompt under --yes")
+        assert set_transcript_retention(home, assume_yes=True, ask=explode) == "set"
+
+    def test_the_prompt_states_the_disk_cost_and_what_it_edits(self, tmp_path):
+        from scad.install import set_transcript_retention
+        seen = {}
+        def capture(text):
+            seen["text"] = text
+            return False
+        set_transcript_retention(self._home(tmp_path, {}), ask=capture)
+        assert "settings.json" in seen["text"]
+        assert "MB" in seen["text"]
+        assert "3650" in seen["text"]
+
     def test_creates_settings_when_absent(self, tmp_path):
         from scad.install import set_transcript_retention
         home = self._home(tmp_path)
-        assert set_transcript_retention(home) == "set"
+        assert set_transcript_retention(home, ask=lambda _: True) == "set"
         assert (home / "settings.json").is_file()
-
-    def test_raises_the_default_30(self, tmp_path):
-        from scad.install import RETENTION_DAYS, set_transcript_retention
-        home = self._home(tmp_path, {"cleanupPeriodDays": 30})
-        assert set_transcript_retention(home) == "set"
-        assert json.loads((home / "settings.json").read_text())["cleanupPeriodDays"] == RETENTION_DAYS
-
-    def test_never_lowers_a_longer_window(self, tmp_path):
-        """Someone who chose 9999 meant it — silently shortening retention is the
-        one mistake here that destroys data."""
-        from scad.install import set_transcript_retention
-        home = self._home(tmp_path, {"cleanupPeriodDays": 9999})
-        assert set_transcript_retention(home) == "kept"
-        assert json.loads((home / "settings.json").read_text())["cleanupPeriodDays"] == 9999
-
-    def test_is_idempotent(self, tmp_path):
-        from scad.install import set_transcript_retention
-        home = self._home(tmp_path, {})
-        set_transcript_retention(home)
-        before = (home / "settings.json").read_text()
-        assert set_transcript_retention(home) == "kept"
-        assert (home / "settings.json").read_text() == before
 
     def test_every_other_key_survives(self, tmp_path):
         from scad.install import set_transcript_retention
         original = {"model": "opus[1m]", "env": {"X": "1"},
                     "enabledPlugins": {"a@b": True}, "permissions": {"allow": ["Read"]}}
         home = self._home(tmp_path, dict(original))
-        set_transcript_retention(home)
+        set_transcript_retention(home, ask=lambda _: True)
         got = json.loads((home / "settings.json").read_text())
         for k, v in original.items():
             assert got[k] == v
@@ -1050,4 +1071,12 @@ class TestTranscriptRetention:
         from scad.install import set_transcript_retention
         home = self._home(tmp_path)
         (home / "settings.json").write_text("{ not json")
-        assert set_transcript_retention(home) == "failed"
+        assert set_transcript_retention(home, ask=lambda _: True) == "failed"
+
+    def test_a_declined_answer_is_remembered_by_doing_nothing(self, tmp_path):
+        """Declining leaves the key absent, so a later install asks again rather
+        than treating silence as consent."""
+        from scad.install import set_transcript_retention
+        home = self._home(tmp_path, {})
+        set_transcript_retention(home, ask=lambda _: False)
+        assert set_transcript_retention(home, ask=lambda _: True) == "set"
