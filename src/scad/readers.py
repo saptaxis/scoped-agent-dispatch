@@ -375,10 +375,21 @@ def read_codex_rollout(
     2. Reasoning is summary-only. `response_item/reasoning` has `content: null`
        and ~1 KB of `encrypted_content` we cannot read; the plaintext is a short
        summary. We take that and never store the ciphertext.
+
+    The tail is tracked the same way the Claude reader tracks it, so the same
+    `derive_outcome` yields the same vocabulary from codex's differently-named
+    shapes. Only the pairing differs: codex gives every call a `call_id`, so an
+    unanswered call is identified by identity rather than by position, which
+    also gets the parallel-call case right — two calls and one output leaves the
+    session in-flight, not tool-result-last. `interrupted_at_end` and
+    `asked_question` never fire here: codex has no interrupt marker in the
+    rollout and no AskUserQuestion tool, so `awaiting-question` cannot occur.
     """
     turns: list[TurnRecord] = []
     session_id = cwd = None
     started = ended = None
+    tail: dict = {}
+    open_calls: set = set()      # call_ids still awaiting their output
 
     for offset, rec in _iter_lines(path, start_offset):
         if rec is None:
@@ -406,6 +417,8 @@ def read_codex_rollout(
 
         ptype = payload.get("type")
         if ptype == "message":
+            tail["last_role"] = payload.get("role")
+            tail["last_was_tool_result"] = False
             turns.append(TurnRecord(
                 ts, payload.get("role"), "text",
                 _codex_message_text(payload.get("content")), raw_offset=offset,
@@ -420,12 +433,20 @@ def read_codex_rollout(
             if text:
                 turns.append(TurnRecord(ts, "assistant", "thinking", text, raw_offset=offset))
         elif ptype in ("function_call", "custom_tool_call"):
+            open_calls.add(payload.get("call_id"))
+            tail["last_role"] = "assistant"
+            tail["last_was_tool_result"] = False
+            tail["pending_tool_use"] = True
             body, truncated = _cap(_as_text(payload.get("arguments") or payload.get("input")))
             turns.append(TurnRecord(
                 ts, "assistant", "tool_use", body,
                 tool_name=payload.get("name"), truncated=truncated, raw_offset=offset,
             ))
         elif ptype in ("function_call_output", "custom_tool_call_output"):
+            open_calls.discard(payload.get("call_id"))
+            tail["last_role"] = "tool"
+            tail["last_was_tool_result"] = True
+            tail["pending_tool_use"] = bool(open_calls)
             body, truncated = _cap(_as_text(payload.get("output")))
             turns.append(TurnRecord(
                 ts, "tool", "tool_result", body, truncated=truncated, raw_offset=offset,
@@ -438,5 +459,7 @@ def read_codex_rollout(
     session = SessionRecord(
         id=session_id, kind=KIND_MAIN, agent="codex", source="codex-rollout",
         cwd=cwd, started=started, ended=ended, grade=GRADE_FULL,
+        outcome=derive_outcome(tail),
+        # last_stop_reason has no codex analogue; NULL beats an invented one.
     )
     return session, turns, end_offset

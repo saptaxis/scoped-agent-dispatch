@@ -363,6 +363,87 @@ from scad.records import (  # noqa: E402
 )
 
 
+def codex_item(payload: dict, ts="2026-07-25T11:32:00.000Z") -> dict:
+    return {"timestamp": ts, "type": "response_item", "payload": payload}
+
+
+class TestCodexOutcome:
+    """The same outcome vocabulary, derived from codex's tail shapes.
+
+    Measured over the 107 archived rollouts: 104 end on an assistant message,
+    2 on a `function_call_output`, 1 on a user message, and none has an
+    unmatched `call_id` at EOF.
+    """
+
+    def test_a_trailing_output_is_tool_result_last(self, tmp_path):
+        """CODEX_LINES ends on function_call_output c1 — a result awaiting the model."""
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES)
+        session, _, _ = read_codex_rollout(p)
+        assert session.outcome == OUTCOME_TOOL_RESULT_LAST
+
+    def test_assistant_message_last_is_awaiting_user(self, tmp_path):
+        lines = CODEX_LINES + [codex_item({
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "all done"}]})]
+        session, _, _ = read_codex_rollout(write_jsonl(tmp_path / "r.jsonl", lines))
+        assert session.outcome == OUTCOME_AWAITING_USER
+
+    def test_user_message_last_is_user_last(self, tmp_path):
+        lines = CODEX_LINES + [codex_item({
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "one more thing"}]})]
+        session, _, _ = read_codex_rollout(write_jsonl(tmp_path / "r.jsonl", lines))
+        assert session.outcome == OUTCOME_USER_LAST
+
+    def test_a_call_with_no_output_is_in_flight(self, tmp_path):
+        lines = CODEX_LINES + [codex_item({
+            "type": "function_call", "name": "shell",
+            "arguments": "{\"cmd\":\"sleep 99\"}", "call_id": "c2"})]
+        session, _, _ = read_codex_rollout(write_jsonl(tmp_path / "r.jsonl", lines))
+        assert session.outcome == OUTCOME_IN_FLIGHT
+
+    def test_calls_pair_to_outputs_by_call_id_not_position(self, tmp_path):
+        """An output for a DIFFERENT call does not answer the open one."""
+        lines = CODEX_LINES + [
+            codex_item({"type": "function_call", "name": "shell",
+                        "arguments": "{}", "call_id": "c2"}),
+            codex_item({"type": "function_call_output", "call_id": "c9", "output": "stale"}),
+        ]
+        session, _, _ = read_codex_rollout(write_jsonl(tmp_path / "r.jsonl", lines))
+        assert session.outcome == OUTCOME_IN_FLIGHT
+
+    def test_custom_tool_calls_count_the_same(self, tmp_path):
+        lines = CODEX_LINES + [codex_item({
+            "type": "custom_tool_call", "name": "apply_patch",
+            "input": "*** Begin Patch", "call_id": "c3"})]
+        assert read_codex_rollout(
+            write_jsonl(tmp_path / "a.jsonl", lines))[0].outcome == OUTCOME_IN_FLIGHT
+
+        lines = lines + [codex_item({
+            "type": "custom_tool_call_output", "call_id": "c3", "output": "ok"})]
+        assert read_codex_rollout(
+            write_jsonl(tmp_path / "b.jsonl", lines))[0].outcome == OUTCOME_TOOL_RESULT_LAST
+
+    def test_reasoning_does_not_disturb_the_tail(self, tmp_path):
+        """Reasoning is not a turn anyone is waiting on."""
+        lines = CODEX_LINES[:4] + [codex_item({
+            "type": "reasoning", "content": None,
+            "summary": [{"type": "summary_text", "text": "thinking"}]})]
+        session, _, _ = read_codex_rollout(write_jsonl(tmp_path / "r.jsonl", lines))
+        assert session.outcome == OUTCOME_AWAITING_USER
+
+    def test_a_rollout_with_no_conversation_has_no_outcome(self, tmp_path):
+        """An honest NULL: session_meta only, so there is no tail to read."""
+        p = write_jsonl(tmp_path / "r.jsonl", CODEX_LINES[:2])
+        session, _, _ = read_codex_rollout(p)
+        assert session.outcome is None
+
+    def test_last_stop_reason_has_no_codex_analogue(self, tmp_path):
+        p = write_jsonl(tmp_path / "r.jsonl", CODEX_LINES)
+        session, _, _ = read_codex_rollout(p)
+        assert session.last_stop_reason is None
+
+
 def assistant(content, stop_reason="end_turn", ts="2026-07-28T10:00:00.000Z", **extra):
     rec = {"type": "assistant", "sessionId": "S1", "timestamp": ts,
            "message": {"role": "assistant", "content": content, "stop_reason": stop_reason}}
