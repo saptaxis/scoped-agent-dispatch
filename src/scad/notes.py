@@ -165,6 +165,114 @@ def append_note(
     return path
 
 
+# --- --current: the session whose trace is being written in this cwd right now ---
+
+# Two transcripts in one cwd touched within this many seconds of each other are
+# both taken to be live. A live session appends on every turn, so two minutes is
+# generous for "currently being written"; anything much longer starts sweeping in
+# this morning's finished work and turns an ordinary busy project into a
+# permanent ambiguity. This is deliberately NOT "how many files are in the
+# directory" — a project with a year of history has dozens and no live session.
+LIVE_WINDOW_S = 120
+
+
+class NoteTargetError(Exception):
+    """`--current` could not name exactly one session."""
+
+
+class NoSessionFound(NoteTargetError):
+    pass
+
+
+class AmbiguousSession(NoteTargetError):
+    pass
+
+
+def claude_projects_root() -> Path:
+    return Path.home() / ".claude" / "projects"
+
+
+def _transcripts_in(directory: Path) -> list[Path]:
+    """Top-level `*.jsonl` only — never `<parent>/subagents/agent-*.jsonl`.
+
+    A subagent file repeats its PARENT's sessionId and is named by its agentId,
+    so treating one as the current session would key the note onto a row that is
+    not the session the human is talking to.
+    """
+    if not directory.is_dir():
+        return []
+    return [p for p in directory.glob("*.jsonl") if p.is_file()]
+
+
+def _first_cwd(path: Path) -> str | None:
+    """The `cwd` off the first record that carries one, without parsing the file."""
+    try:
+        with path.open("rb") as fh:
+            for i, raw in enumerate(fh):
+                if i > 40:
+                    break
+                try:
+                    rec = json.loads(raw)
+                except (ValueError, UnicodeDecodeError):
+                    continue
+                if isinstance(rec, dict) and rec.get("cwd"):
+                    return rec["cwd"]
+    except OSError:
+        return None
+    return None
+
+
+def _scan_for_cwd(projects_root: Path, cwd: str) -> list[Path]:
+    """Fallback: find transcripts whose records say they ran in `cwd`.
+
+    The encoded directory name is a Claude Code implementation detail and could
+    change under us; the `cwd` field inside the records is the agent's own
+    statement of where it ran, so it is the honest backstop. Costs a read of the
+    head of every top-level transcript, which is why it is not the first move.
+    """
+    if not projects_root.is_dir():
+        return []
+    return [
+        p
+        for d in projects_root.iterdir() if d.is_dir()
+        for p in _transcripts_in(d)
+        if _first_cwd(p) == cwd
+    ]
+
+
+def current_session_id(
+    cwd: str | None = None, *, projects_root: Path | None = None,
+    window_s: float = LIVE_WINDOW_S,
+) -> str:
+    """Resolve the session whose trace is being written in `cwd` right now.
+
+    Encoded directory first, `cwd`-field scan as the fallback, newest mtime wins.
+    Where several are genuinely live this raises rather than picking one: a note
+    filed against the wrong session is worse than a note not filed, because
+    nothing downstream can detect the mistake.
+    """
+    root = projects_root or claude_projects_root()
+    here = os.path.realpath(cwd or os.getcwd())
+
+    candidates = _transcripts_in(root / encode_cwd(here)) or _scan_for_cwd(root, here)
+    if not candidates:
+        raise NoSessionFound(
+            f"No Claude transcript for {here}. Pass --session <id> explicitly."
+        )
+
+    candidates.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    newest = candidates[0].stat().st_mtime
+    live = [p for p in candidates if newest - p.stat().st_mtime <= window_s]
+
+    if len(live) > 1:
+        names = ", ".join(p.stem for p in live)
+        raise AmbiguousSession(
+            f"{len(live)} sessions are live in {here} ({names}). "
+            "Pass --session <id> to say which."
+        )
+    return candidates[0].stem
+
+
 def read_note_file(path: Path, start_offset: int = 0) -> list[dict]:
     """Read a note file's records in append order — oldest first, newest last.
 

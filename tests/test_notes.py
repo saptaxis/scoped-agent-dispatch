@@ -170,3 +170,100 @@ class TestReadNoteFile:
             fh.write("{not json\n")
         append_note({"title": "also good"}, session_id="S1")
         assert [r["title"] for r in read_note_file(p)] == ["good", "also good"]
+
+
+# --- --current: which session's trace is being written in this cwd right now ---
+
+import os as _os  # noqa: E402
+
+from scad.notes import (  # noqa: E402
+    LIVE_WINDOW_S,
+    AmbiguousSession,
+    NoSessionFound,
+    current_session_id,
+)
+
+
+def _transcript(projects: Path, cwd: str, session_id: str, *, age_s: float = 0.0,
+                encoded: str | None = None) -> Path:
+    from scad.notes import encode_cwd
+    d = projects / (encoded or encode_cwd(cwd))
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"{session_id}.jsonl"
+    p.write_text(json.dumps({"sessionId": session_id, "cwd": cwd, "type": "user"}) + "\n")
+    now = p.stat().st_mtime
+    _os.utime(p, (now - age_s, now - age_s))
+    return p
+
+
+class TestCurrentSession:
+    def test_takes_the_newest_transcript_in_the_encoded_directory(self, tmp_path):
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "older", age_s=4000)
+        _transcript(projects, "/w/proj", "newest", age_s=0)
+        assert current_session_id("/w/proj", projects_root=projects) == "newest"
+
+    def test_history_in_the_same_directory_does_not_make_it_ambiguous(self, tmp_path):
+        # The point of the recency window: a busy project accumulates dozens of
+        # dead transcripts, and none of them is a live session.
+        projects = tmp_path / "projects"
+        for i in range(6):
+            _transcript(projects, "/w/proj", f"dead{i}", age_s=LIVE_WINDOW_S + 60 + i)
+        _transcript(projects, "/w/proj", "live", age_s=1)
+        assert current_session_id("/w/proj", projects_root=projects) == "live"
+
+    def test_two_live_sessions_in_one_cwd_refuse_to_guess(self, tmp_path):
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "alpha", age_s=1)
+        _transcript(projects, "/w/proj", "beta", age_s=2)
+        with pytest.raises(AmbiguousSession) as exc:
+            current_session_id("/w/proj", projects_root=projects)
+        assert "alpha" in str(exc.value) and "beta" in str(exc.value)
+        assert "--session" in str(exc.value)
+
+    def test_subagent_transcripts_are_not_candidates(self, tmp_path):
+        # A subagent file's sessionId is its PARENT's, and its stem is an agentId.
+        # Taking one as the current session would key the note onto the wrong row.
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "main", age_s=30)
+        sub = projects / encode_cwd("/w/proj") / "main" / "subagents"
+        sub.mkdir(parents=True)
+        (sub / "agent-xyz.jsonl").write_text("{}\n")
+        assert current_session_id("/w/proj", projects_root=projects) == "main"
+
+    def test_nothing_at_all_raises_rather_than_inventing_an_id(self, tmp_path):
+        with pytest.raises(NoSessionFound):
+            current_session_id("/w/proj", projects_root=tmp_path / "projects")
+
+    def test_cwd_is_realpathed_before_encoding(self, tmp_path):
+        # /tmp is a symlink to /private/tmp on macOS, and Claude Code encodes the
+        # resolved path — an unresolved cwd would look at a directory that has
+        # never existed.
+        projects = tmp_path / "projects"
+        real = tmp_path / "real"
+        real.mkdir()
+        link = tmp_path / "link"
+        link.symlink_to(real)
+        _transcript(projects, str(real.resolve()), "S1")
+        assert current_session_id(str(link), projects_root=projects) == "S1"
+
+    def test_falls_back_to_scanning_cwd_fields_when_the_directory_is_absent(self, tmp_path):
+        # A future Claude Code could change the naming and this would silently
+        # find nothing; the records themselves carry the cwd, so scan for it.
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "S1", encoded="some-other-naming-scheme")
+        assert current_session_id("/w/proj", projects_root=projects) == "S1"
+
+    def test_the_fallback_scan_also_takes_the_newest(self, tmp_path):
+        projects = tmp_path / "projects"
+        _transcript(projects, "/w/proj", "old", age_s=9000, encoded="other-a")
+        _transcript(projects, "/w/proj", "new", age_s=0, encoded="other-b")
+        assert current_session_id("/w/proj", projects_root=projects) == "new"
+
+    def test_defaults_to_the_process_cwd(self, tmp_path, monkeypatch):
+        projects = tmp_path / "projects"
+        work = tmp_path / "work"
+        work.mkdir()
+        _transcript(projects, str(work.resolve()), "S1")
+        monkeypatch.chdir(work)
+        assert current_session_id(projects_root=projects) == "S1"
