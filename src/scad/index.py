@@ -73,11 +73,16 @@ CREATE TABLE IF NOT EXISTS sessions (
   n_interrupts      INTEGER NOT NULL DEFAULT 0,
   n_tool_denials    INTEGER NOT NULL DEFAULT 0,
   n_errors          INTEGER NOT NULL DEFAULT 0,
-  -- From the harness's own jobs/<short>/state.json. `name` is the only human
-  -- name a session has anywhere; `harness_state` is structural, observed of a
-  -- live process. `needs` and `needs_detail` are MODEL-WRITTEN PROSE — the notes
-  -- tier, self-report, not trace evidence. Do not read them as measurements.
+  -- `name` is the human's own label, and it has TWO writers: the transcript
+  -- reader (the `custom-title` record `/rename` appends — 17 sessions in the
+  -- real archive) and the harness's jobs/<short>/state.json (5 named jobs).
+  -- Whichever writes non-NULL last wins; neither may blank the other's, which
+  -- is why both paths COALESCE. Never derived from `title` — see records.py.
   name              TEXT,
+  -- The rest come from the harness's state.json alone. `harness_state` is
+  -- structural, observed of a live process. `needs` and `needs_detail` are
+  -- MODEL-WRITTEN PROSE — the notes tier, self-report, not trace evidence. Do
+  -- not read them as measurements.
   harness_state     TEXT,
   needs             TEXT,
   needs_detail      TEXT,
@@ -186,15 +191,30 @@ def upsert_session(
         """
         INSERT INTO sessions (
             id, kind, parent_session_id, agent_id, workflow_id, agent, machine,
-            scad_run_id, cwd, project, title, git_branch, started, ended,
+            scad_run_id, cwd, project, title, name, git_branch, started, ended,
             grade, source, outcome, last_stop_reason, n_interrupts,
             n_tool_denials, n_errors, archive_path, source_mtime, source_size,
             parsed_offset, raw_present, extractor_version
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
         ON CONFLICT(id) DO UPDATE SET
-            cwd              = COALESCE(excluded.cwd, sessions.cwd),
+            -- First cwd wins, and later passes may only FILL it, never move it.
+            -- Claude Code stamps `cwd` on every record, so a tool call made in
+            -- another directory writes that directory into the trace. An
+            -- incremental pass parses only the tail, so it can legitimately
+            -- begin on one of those foreign records and would otherwise
+            -- relabel the whole session. Observed: 1394 records saying
+            -- `code/scoped-agent-dispatch` against 182 saying `traitful-docs`,
+            -- and the session had moved to the latter. `project` is computed
+            -- from `cwd` and is the join key for retrieval, so a wandering cwd
+            -- silently moves a session between projects.
+            cwd              = COALESCE(sessions.cwd, excluded.cwd),
             project          = excluded.project,
             title            = COALESCE(excluded.title, sessions.title),
+            -- COALESCE, not assignment. Two writers share this column (see the
+            -- schema), and an incremental pass parses only the tail — which
+            -- rarely contains the rename — so assigning would blank a name on
+            -- the next quiet append. A new rename is non-NULL and still wins.
+            name             = COALESCE(excluded.name, sessions.name),
             git_branch       = COALESCE(excluded.git_branch, sessions.git_branch),
             started          = MIN(COALESCE(sessions.started, excluded.started), excluded.started),
             ended            = MAX(COALESCE(sessions.ended, excluded.ended), excluded.ended),
@@ -220,7 +240,8 @@ def upsert_session(
         (
             session.id, session.kind, session.parent_session_id, session.agent_id,
             session.workflow_id, session.agent, machine, scad_run_id, session.cwd,
-            project, session.title, session.git_branch, session.started, session.ended,
+            project, session.title, session.name, session.git_branch,
+            session.started, session.ended,
             session.grade, session.source, session.outcome, session.last_stop_reason,
             session.n_interrupts, session.n_tool_denials, session.n_errors,
             archive_path, source_mtime, source_size,
@@ -264,17 +285,22 @@ def append_turns(conn, session_id: str, turns: list[TurnRecord]) -> int:
 def apply_job_state(conn, job: JobStateRecord) -> bool:
     """Attach one harness job state to a session, creating the row if need be.
 
-    Assignment, not COALESCE: the newest snapshot is authoritative for its
-    session, so a job that has since unblocked must be able to clear `needs`
-    rather than keep advertising a resolved one.
+    Assignment, not COALESCE, for the state fields: the newest snapshot is
+    authoritative for its session, so a job that has since unblocked must be able
+    to clear `needs` rather than keep advertising a resolved one.
+
+    `name` is the exception, because it is the one column this pass does not own.
+    The transcript reader writes it too, from `/rename`, and most job snapshots
+    carry no name at all — a NULL here means "this job was never named", not
+    "forget what the human typed". So the name only ever moves to another
+    non-NULL value, whichever writer supplies it last.
 
     An id with no session INSERTS rather than being ignored. The harness outlives
     transcripts: nd-3 has no transcript and no history.jsonl line on the live
     roots or anywhere in the archive, so its state.json is the only surviving
     record that it ever ran. That is exactly the argument this index already
-    accepts for history.jsonl, so job state gets the same standing — otherwise
-    the one case where a session HAS a human name is the one case it is
-    unfindable.
+    accepts for history.jsonl, so job state gets the same standing — otherwise a
+    session that HAS a human name is one of the few that is unfindable.
 
     The inserted row is `grade='skeleton'` (no turns were ever extracted) and
     `raw_present=1` (its source, state-history.jsonl, IS in the archive and the
@@ -282,8 +308,8 @@ def apply_job_state(conn, job: JobStateRecord) -> bool:
     forever over a row that has nothing to lose).
     """
     cursor = conn.execute(
-        "UPDATE sessions SET name = ?, harness_state = ?, needs = ?, needs_detail = ? "
-        "WHERE id = ?",
+        "UPDATE sessions SET name = COALESCE(?, name), harness_state = ?, "
+        "needs = ?, needs_detail = ? WHERE id = ?",
         (job.name, job.state, job.needs, job.detail, job.session_id),
     )
     if cursor.rowcount == 0:

@@ -106,6 +106,20 @@ class TestUpsert:
         assert session_row(conn, "S1")["parsed_offset"] == 99
         assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
 
+    def test_the_human_name_is_stored(self, tmp_path):
+        """A `/rename` reaches the index through the ordinary session upsert."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(name="jul29-session-cli", title="Doing the thing"))
+        row = session_row(conn, "S1")
+        assert row["name"] == "jul29-session-cli"
+        assert row["title"] == "Doing the thing"     # kept apart, both stored
+
+    def test_a_rename_overwrites_an_earlier_name(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(name="first-name"))
+        store(conn, rec(name="second-name"), parsed_offset=99)
+        assert session_row(conn, "S1")["name"] == "second-name"
+
     def test_cumulative_counters_add_rather_than_overwrite(self, tmp_path):
         """The unit-level statement of the same rule: a later upsert carries the
         tail's counts, so the column must accumulate. Fields the tail *does*
@@ -617,6 +631,26 @@ class TestApplyJobState:
         assert row["name"] == "nd-5"
         assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
 
+    def test_a_transcript_pass_without_a_name_keeps_the_one_job_state_set(self, tmp_path):
+        """Two writers share this column: the transcript reader (customTitle) and
+        job state. An incremental pass parses only the tail, which usually holds
+        no rename at all, so a plain assignment there would blank a real name."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec())
+        apply_job_state(conn, job(name="nd-5"))
+        store(conn, rec(name=None), parsed_offset=99)
+        assert session_row(conn, "S1")["name"] == "nd-5"
+
+    def test_a_job_state_without_a_name_keeps_the_one_the_transcript_read(self, tmp_path):
+        """The mirror case. Most job snapshots carry no name; a NULL there means
+        "this job was never named", not "forget what the human typed"."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(name="jul29-session-cli"))
+        apply_job_state(conn, job(name=None, state="done"))
+        row = session_row(conn, "S1")
+        assert row["name"] == "jul29-session-cli"
+        assert row["harness_state"] == "done"      # the rest still assigns
+
     def test_a_newer_snapshot_clears_a_resolved_need(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
         store(conn, rec())
@@ -746,6 +780,47 @@ class TestReindexJoinsJobState:
         assert row["grade"] == GRADE_SKELETON
         assert row["source"] == "claude-jobstate"
         assert row["started"] is not None
+
+
+class TestReindexReadsRenames:
+    """`/rename` is the commoner source of a human name than job state is —
+    17 sessions in the real archive against 5 named jobs."""
+
+    RENAMED = MAIN + [{"type": "custom-title", "sessionId": "S1",
+                       "customTitle": "writing-wm-evals-research"}]
+
+    def test_a_renamed_session_is_named_in_the_index(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", self.RENAMED)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert session_row(conn, "S1")["name"] == "writing-wm-evals-research"
+
+    def test_a_session_nobody_renamed_stays_unnamed(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert session_row(conn, "S1")["name"] is None
+
+    def test_a_later_pass_over_a_grown_transcript_keeps_the_name(self, tmp_path, monkeypatch):
+        """The incremental case: the tail holds no custom-title record, so the
+        name has to survive being re-upserted from a partial read."""
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        p = arc_write(arc, "claude/projects/-repo/S1.jsonl", self.RENAMED)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        with p.open("a") as fh:
+            fh.write(json.dumps({
+                "type": "assistant", "sessionId": "S1",
+                "timestamp": "2026-07-28T11:00:00.000Z", "cwd": "/repo",
+                "message": {"role": "assistant",
+                            "content": [{"type": "text", "text": "more"}]}}) + "\n")
+        reindex(conn)
+        assert session_row(conn, "S1")["name"] == "writing-wm-evals-research"
 
 
 # --- notes: the tier that is never rederivable --------------------------------
@@ -945,3 +1020,33 @@ class TestReindexArchivesFirst:
         conn = connect(tmp_path / "i.sqlite")
         with patch("scad.index.archive_all", side_effect=OSError("disk full")):
             reindex(conn, archive_first=True)          # must not raise
+
+
+class TestCwdIsTheSessionsOwnDirectory:
+    """A session's cwd is where it was launched, and must never drift.
+
+    Claude Code records `cwd` on EVERY record, so a tool call that runs in
+    another directory writes that directory into the trace. The reader takes
+    the first cwd in the range it parsed — and an incremental pass parses only
+    the tail, which may well begin on one of those foreign records.
+
+    Found on the real corpus: this session's transcript holds 1394 records
+    saying `code/scoped-agent-dispatch` and 182 saying `traitful-docs`, and an
+    incremental pass had relabelled the whole session `traitful-docs`. Project
+    is a computed column derived from cwd, and project is the join key for
+    retrieval — so a wandering cwd silently moves a session between projects.
+    """
+
+    def test_a_later_pass_cannot_move_a_session_to_another_directory(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(cwd="/repo/real"))
+        store(conn, rec(cwd="/somewhere/else"), parsed_offset=99)
+        assert session_row(conn, "S1")["cwd"] == "/repo/real"
+
+    def test_a_missing_cwd_is_still_filled_in_later(self, tmp_path):
+        """Only drift is refused. A row that never had a cwd must still get one
+        — a history.jsonl skeleton has none until a transcript supplies it."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(cwd=None))
+        store(conn, rec(cwd="/repo/real"), parsed_offset=99)
+        assert session_row(conn, "S1")["cwd"] == "/repo/real"
