@@ -2186,3 +2186,52 @@ class TestSessionNotes:
                       input=json.dumps(self.NOTE))
         result = runner.invoke(main, ["reindex"])
         assert "notes: 1" in result.output
+
+
+class TestRememberCommandIsAThinCaller:
+    """`/remember` produces the record; `scad session note` decides where it goes.
+
+    The split is the point. The old command reimplemented project resolution in
+    prose — basename of the git root, fall back to the cwd — which meant every
+    other agent that wanted to capture had to reimplement it again, and a change
+    to what a project means would have had to be made in two languages.
+    """
+
+    @property
+    def text(self):
+        return (Path(__file__).resolve().parent.parent / "commands" / "remember.md").read_text()
+
+    def test_it_pipes_to_the_cli(self):
+        assert "scad session note --current" in self.text
+
+    def test_the_dead_store_path_is_gone(self):
+        # ~/.capture/<project>/ was never created on any machine, and a project
+        # in a durable path is what session-state-cli.md forbids.
+        assert "~/.capture" not in self.text
+
+    def test_it_no_longer_resolves_a_project_in_prose(self):
+        lowered = self.text.lower()
+        assert "basename of the current git repo" not in lowered
+        assert "git repo root (fall back" not in lowered
+
+    def test_it_does_not_tell_the_agent_to_append_by_hand(self):
+        # The old step 3 said "use a tool call that appends (e.g. shell >>)".
+        # Asserting the absence of ">>" would be wrong — the file now names it
+        # in order to forbid it.
+        assert "that **appends**" not in self.text
+        assert "Do not append with" in self.text
+
+    def test_the_anti_inflation_discipline_survives(self):
+        # The valuable part: everything else here is mechanism, this is judgment.
+        assert "anti-inflation" in self.text.lower()
+        assert "tentative" in self.text
+        assert "reverse it" in self.text
+
+    def test_the_record_fields_still_match_the_capture_format(self):
+        from scad.notes import NOTE_FIELDS
+        authored = set(NOTE_FIELDS) - {"ts", "cwd_at_write"}   # filled by the CLI
+        for field in authored:
+            assert f"`{field}`" in self.text, f"{field} undocumented in /remember"
+
+    def test_the_fields_the_cli_fills_are_marked_as_not_the_callers_job(self):
+        assert "Do not set them." in self.text
