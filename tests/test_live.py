@@ -5,11 +5,12 @@ from unittest.mock import patch
 
 from scad.live import TmuxPane, is_agent_command, tmux_panes
 
-SAMPLE = """main:0.0|/Users/vsr|htop
-main:1.2|/Users/vsr/code/orgdeck|2.1.219
-main:2.0|/Users/vsr/code/docs|zsh
-main:3.0|/Users/vsr/code/scad|2.1.205
-work:0.1|/Users/vsr/code/nd|codex
+# session:window.pane | window_name | path | command
+SAMPLE = """main:0.0|shell|/Users/vsr|htop
+main:1.2|services|/Users/vsr/code/orgdeck|2.1.219
+main:2.0|docs|/Users/vsr/code/docs|zsh
+main:3.0|scad|/Users/vsr/code/scad|2.1.205
+work:0.1|nd|/Users/vsr/code/nd|codex
 """
 
 
@@ -40,7 +41,8 @@ class TestTmuxPanes:
         with patch("scad.live.subprocess.run", return_value=fake_run(SAMPLE)):
             panes = tmux_panes()
         assert len(panes) == 5
-        assert panes[1] == TmuxPane(target="main:1.2", path="/Users/vsr/code/orgdeck", command="2.1.219")
+        assert panes[1] == TmuxPane(target="main:1.2", path="/Users/vsr/code/orgdeck",
+                                    command="2.1.219", window="services")
 
     def test_no_tmux_server_yields_empty(self):
         """`tmux list-panes` exits non-zero when no server is running."""
@@ -56,16 +58,17 @@ class TestTmuxPanes:
             assert tmux_panes() == []
 
     def test_malformed_lines_are_skipped_not_fatal(self):
-        with patch("scad.live.subprocess.run", return_value=fake_run("garbage\nmain:1.2|/p|zsh\n")):
+        with patch("scad.live.subprocess.run", return_value=fake_run("garbage\nmain:1.2|w|/p|zsh\n")):
             panes = tmux_panes()
         assert [p.target for p in panes] == ["main:1.2"]
 
     def test_paths_with_pipes_do_not_break_parsing(self):
         """Split from the left on a fixed field count, not naively."""
-        with patch("scad.live.subprocess.run", return_value=fake_run("main:0.0|/we|rd|zsh\n")):
+        with patch("scad.live.subprocess.run", return_value=fake_run("main:0.0|win|/we|rd|zsh\n")):
             panes = tmux_panes()
         assert panes[0].command == "zsh"
         assert panes[0].path == "/we|rd"
+        assert panes[0].window == "win"
 
 
 from scad.live import running_run_ids
@@ -108,3 +111,28 @@ class TestRunningContainers:
                     running_run_ids()
                 except Exception:
                     raise AssertionError("discovery must never raise")
+
+
+class TestAgentPanes:
+    def test_lists_only_agent_panes_across_every_tmux_session(self):
+        """`list-panes -a` spans all sessions, so main, main2 and the rest are
+        covered without enumerating them."""
+        from scad.live import agent_panes
+        out = ("main:1.0|services|/a|2.1.215\n"
+               "main:2.0|docs|/b|zsh\n"
+               "main2:0.1|other|/c|codex\n")
+        with patch("scad.live.subprocess.run", return_value=fake_run(out)):
+            panes = agent_panes()
+        assert [p.target for p in panes] == ["main:1.0", "main2:0.1"]
+
+    def test_several_agents_in_one_window_all_appear(self):
+        """main:3 really holds three on this machine — two claude and a codex."""
+        from scad.live import agent_panes
+        out = ("main:3.0|scad|/repo|2.1.205\n"
+               "main:3.1|scad|/repo|codex\n"
+               "main:3.2|scad|/repo|2.1.220\n")
+        with patch("scad.live.subprocess.run", return_value=fake_run(out)):
+            assert len(agent_panes()) == 3
+
+    def test_session_name_is_derived_from_the_target(self):
+        assert TmuxPane("main2:3.1", "/p", "codex").session == "main2"

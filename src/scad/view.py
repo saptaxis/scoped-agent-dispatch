@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from scad.live import TmuxPane, is_agent_command
+from scad.live import TmuxPane, agent_panes, is_agent_command
 
 _RESUME = {"claude": "claude --resume {id}", "codex": "codex resume {id}"}
 
@@ -43,6 +43,59 @@ def _goto(target: str) -> str:
     return f"tmux select-window -t {window} \\; select-pane -t {target}"
 
 
+def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
+    """One row per live agent pane — the panes themselves, not sessions.
+
+    This is the section that answers "what have I got open right now". It is
+    pane-first because that is what exists: `list-panes -a` spans every tmux
+    session, and a single window routinely holds several agents (three in
+    `main:3` here). Sessions cannot be matched one-to-one onto them, so the
+    newest session in the pane's directory is offered as a hint and labelled as
+    one — never as fact.
+    """
+    rows = []
+    for pane in panes:
+        if not is_agent_command(pane.command):
+            continue
+        agent = "codex" if pane.command == "codex" else "claude"
+        # Match the pane's own agent: a codex pane must not be offered a claude
+        # session as its likely occupant, which the unfiltered query did.
+        guess = conn.execute(
+            "SELECT id, project, title, outcome, ended FROM sessions "
+            "WHERE cwd = ? AND kind = 'main' AND agent = ? ORDER BY ended DESC LIMIT 1",
+            (pane.path, agent),
+        ).fetchone()
+        rows.append({
+            "target": pane.target,
+            "tmux_session": pane.session,
+            "window": pane.window,
+            "cwd": pane.path,
+            "agent": agent,
+            "version": pane.command,
+            "project": (guess["project"] if guess else None),
+            "likely_id": (guess["id"] if guess else None),
+            "likely_title": (guess["title"] if guess else None),
+            "likely_outcome": (guess["outcome"] if guess else None),
+            "goto": _goto(pane.target),
+        })
+    return rows
+
+
+def _resume_command(row: dict) -> str:
+    """The resume command, regardless of whether the session is open.
+
+    Always available and always unambiguous — unlike a tmux target, which cannot
+    be resolved to a session when the same project opens in the same window
+    every time. This is what you actually paste.
+    """
+    if row.get("kind") not in (None, "main") or not row.get("id"):
+        return ""
+    template = _RESUME.get(row.get("agent") or "claude", _RESUME["claude"])
+    resume = template.format(id=row["id"])
+    cwd = row.get("cwd")
+    return f"cd {shlex.quote(cwd)} && {resume}" if cwd else resume
+
+
 def _one_per_place(rows) -> list[dict]:
     """Collapse live rows to one per pane or container — the newest in each.
 
@@ -58,6 +111,34 @@ def _one_per_place(rows) -> list[dict]:
     for row in rows:                       # all_rows is already ordered ended DESC
         newest.setdefault(row["reentry"]["command"], row)
     return list(newest.values())
+
+
+STATUS_OPEN = "open"
+STATUS_MAYBE = "maybe-open"
+STATUS_CLOSED = "closed"
+
+
+def status_for(row: dict, live_ids: set[str], cwds: set[str], running: set[str]) -> str:
+    """Is this session still open?
+
+    Three answers, and the middle one is the honest part. `claude` does not hold
+    its transcript open, so a running agent cannot be traced back to the session
+    inside it. Where the daemon roster names a live pid we can say "open" for
+    certain; where an agent is merely running in the same directory we can only
+    say "maybe" — and with the same project opened in the same window every time,
+    that ambiguity is the norm rather than the exception.
+
+    Claiming certainty there would be worse than admitting the limit: you would
+    stop trusting the column the first time it was wrong.
+    """
+    if row.get("id") in live_ids:
+        return STATUS_OPEN
+    run_id = row.get("scad_run_id")
+    if run_id and run_id in running:
+        return STATUS_OPEN
+    if row.get("cwd") and row["cwd"] in cwds:
+        return STATUS_MAYBE
+    return STATUS_CLOSED
 
 
 def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
@@ -102,12 +183,15 @@ _COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state,
             "needs, n_turns, started, ended, scad_run_id, grade")
 
 
-def _as_rows(cursor_rows, panes, running) -> list[dict]:
+def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict]:
+    live_ids = live_ids or set()
+    cwds = cwds if cwds is not None else set()
     out = []
     for r in cursor_rows:
         row = dict(r)
         re_ = reentry_for(row, panes, running)
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note}
+        row["status"] = status_for(row, live_ids, cwds, running)
         out.append(row)
     return out
 
@@ -120,9 +204,14 @@ def _last_text(conn, session_id: str) -> str:
     return (row["text"] or "")[:_SNIPPET] if row else ""
 
 
-def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14) -> dict:
+def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
+           live_ids: set[str] | None = None) -> dict:
     """Everything the page needs: what waits, what is live, and the full list."""
     cutoff = int((time.time() - days * 86400) * 1000)
+    live_ids = live_ids or set()
+    # A cwd with an agent in it means "something is running here", not "this
+    # session is". That distinction is what status_for reports honestly.
+    cwds = {p.path for p in panes if is_agent_command(p.command) and p.path}
 
     waiting_rows = conn.execute(
         f"SELECT {_COLUMNS} FROM sessions "
@@ -131,19 +220,20 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14) -> di
         f"ORDER BY CASE outcome WHEN 'awaiting-question' THEN 0 ELSE 1 END, ended ASC",
         (*_WAITING, cutoff),
     ).fetchall()
-    waiting = _as_rows(waiting_rows, panes, running)
+    waiting = _as_rows(waiting_rows, panes, running, live_ids, cwds)
     for row in waiting:
         row["last_text"] = _last_text(conn, row["id"])
 
     all_rows = _as_rows(
         conn.execute(f"SELECT {_COLUMNS} FROM sessions ORDER BY ended DESC").fetchall(),
-        panes, running,
+        panes, running, live_ids, cwds,
     )
     live = _one_per_place(r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container"))
 
     return {
         "waiting": waiting,
         "live": live,
+        "panes": live_pane_rows(conn, panes),
         "all": all_rows,
         "generated": int(time.time() * 1000),
     }
@@ -168,6 +258,11 @@ _PAGE = """<!doctype html>
  .snippet {{ color: #555; font-size: .85rem; max-width: 34rem; }}
  .needs {{ color: #b45309; font-size: .85rem; }}
  .muted {{ color: #999; }}
+ .st {{ font-size: .72rem; padding: .1rem .4rem; border-radius: 3px; text-transform: uppercase;
+        letter-spacing: .04em; }}
+ .st.open {{ background: #d1fae5; color: #065f46; }}
+ .st.maybe-open {{ background: #fef3c7; color: #92400e; }}
+ .st.closed {{ background: #eee; color: #666; }}
  input {{ font: inherit; padding: .35rem .5rem; width: 22rem; margin-bottom: .75rem;
           border: 1px solid #ccc; border-radius: 4px; }}
  @media (prefers-color-scheme: dark) {{
@@ -182,6 +277,9 @@ _PAGE = """<!doctype html>
 
 <h2>Waiting on you ({n_waiting})</h2>
 {waiting}
+
+<h2>Open agent panes ({n_panes})</h2>
+{panes}
 
 <h2>Live now ({n_live})</h2>
 {live}
@@ -243,12 +341,19 @@ def _rows_html(rows: list[dict], waiting: bool = False) -> str:
         if waiting and r.get("last_text"):
             extra += f'<br><span class="snippet">{e(" ".join(str(r["last_text"]).split())[:220])}</span>'
         # Built outside the f-string so the attribute keeps its quotes.
-        cmd_html = f'<code onclick="copy(this)">{e(cmd)}</code>{note}' if cmd else ""
+        # Lead with the resume command: tmux targets are ambiguous when the same
+        # project always opens in the same window, which is the normal case here.
+        resume = _resume_command(r)
+        status = r.get("status", "")
+        badge = f'<span class="st {status}">{status}</span>' if status else ""
+        cmd_html = f'<code onclick="copy(this)">{e(resume)}</code>' if resume else ""
+        if cmd and r["reentry"]["kind"] == "tmux":
+            cmd_html += f'<br><span class="muted">{e(cmd)}{e(" · " + r["reentry"]["note"]) if r["reentry"]["note"] else ""}</span>"'.rstrip('"')
         out.append(
             f'<tr{cls}><td>{name}<br><span class="muted">{e(str(r.get("agent") or ""))} · '
             f'{r.get("n_turns") or 0} turns</span>{extra}</td>'
             f'<td>{e(str(r.get("project") or ""))}<br><span class="muted">{e(str(r.get("cwd") or ""))}</span></td>'
-            f'<td>{since}</td>'
+            f'<td>{since}<br>{badge}</td>'
             f'<td>{cmd_html}</td></tr>'
         )
     out.append("</table>")
@@ -267,11 +372,37 @@ def _embed(data: dict) -> str:
             .replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026"))
 
 
+def _panes_html(rows: list[dict]) -> str:
+    """The live-panes table. Pane-first, with the session shown only as a guess."""
+    if not rows:
+        return '<p class="muted">No agent panes open.</p>'
+    e = _html.escape
+    out = ['<table><tr><th>pane</th><th>window</th><th>agent</th>'
+           '<th>cwd</th><th>likely session</th><th>go</th></tr>']
+    for r in rows:
+        guess = ""
+        if r.get("likely_id"):
+            title = e(str(r.get("likely_title") or "")[:44])
+            guess = (f'<span class="muted">~ {e(r["likely_id"][:8])}</span> {title}'
+                     f'<br><span class="muted">best guess — a pane cannot be tied to a session</span>')
+        out.append(
+            f'<tr><td><code onclick="copy(this)">{e(r["target"])}</code></td>'
+            f'<td>{e(r.get("window") or "")}</td>'
+            f'<td>{e(r["agent"])} <span class="muted">{e(r.get("version") or "")}</span></td>'
+            f'<td>{e(r.get("project") or "")}<br><span class="muted">{e(r["cwd"])}</span></td>'
+            f'<td>{guess}</td>'
+            f'<td><code onclick="copy(this)">{e(r["goto"])}</code></td></tr>'
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
 def render(data: dict) -> str:
     """One self-contained page. No network, no external assets."""
     return _PAGE.format(
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
+        n_panes=len(data.get("panes") or []), panes=_panes_html(data.get("panes") or []),
         waiting=_rows_html(data["waiting"], waiting=True),
         live=_rows_html(data["live"]),
         data=_embed(data),

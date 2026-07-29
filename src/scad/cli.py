@@ -2239,7 +2239,7 @@ def view(days, output, no_open):
     write_view(target, render(data))
 
     click.echo(f"[scad] {target}")
-    click.echo(f"[scad]   waiting: {len(data['waiting'])}  live: {len(data['live'])}  "
-               f"total: {len(data['all'])}")
+    click.echo(f"[scad]   waiting: {len(data['waiting'])}  "
+               f"open panes: {len(data.get('panes') or [])}  total: {len(data['all'])}")
     if not no_open:
         webbrowser.open(target.as_uri())

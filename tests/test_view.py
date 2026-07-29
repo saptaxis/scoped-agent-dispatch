@@ -286,3 +286,95 @@ class TestLiveIsOnePerPlace:
         _store(conn, "NEW", "tool-result-last", ended_days_ago=1, cwd="/repo")
         data = gather(conn, [TmuxPane("main:1.0", "/repo", "2.1.219")], set())
         assert {r["id"] for r in data["all"]} == {"OLD", "NEW"}
+
+
+class TestStatus:
+    def test_roster_proves_a_session_is_open(self, tmp_path):
+        """The only exact signal: the daemon maps sessionId -> a live pid."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        data = gather(conn, [], set(), live_ids={"S1"})
+        assert data["waiting"][0]["status"] == "open"
+
+    def test_an_agent_in_the_same_cwd_is_only_maybe(self, tmp_path):
+        """claude does not hold its transcript open, so a running agent cannot be
+        traced to a session. With one project per window, this is the normal case."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+        assert gather(conn, panes, set())["waiting"][0]["status"] == "maybe-open"
+
+    def test_no_agent_anywhere_is_closed(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        assert gather(conn, [], set())["waiting"][0]["status"] == "closed"
+
+    def test_a_shell_in_the_cwd_does_not_make_it_maybe(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "zsh")]
+        assert gather(conn, panes, set())["waiting"][0]["status"] == "closed"
+
+    def test_a_running_container_is_open(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        now = int(time.time() * 1000)
+        rec = SessionRecord(id="C1", kind=KIND_MAIN, agent="claude", source="claude-transcript",
+                            cwd="/workspace/x", started=now - 1000, ended=now,
+                            outcome="awaiting-user")
+        upsert_session(conn, rec, machine="mac", project="x", archive_path="/a.jsonl",
+                       source_size=1, source_mtime=1, parsed_offset=1, scad_run_id="r1")
+        assert gather(conn, [], {"r1"})["waiting"][0]["status"] == "open"
+
+    def test_roster_beats_a_merely_shared_cwd(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+        assert gather(conn, panes, set(), live_ids={"S1"})["waiting"][0]["status"] == "open"
+
+    def test_the_page_shows_the_resume_command_even_when_a_pane_matches(self, tmp_path):
+        """A tmux target is ambiguous; the resume command never is."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+        html = render(gather(conn, panes, set()))
+        assert "claude --resume S1" in html
+        assert "maybe-open" in html
+
+
+class TestLivePanes:
+    def test_a_codex_pane_is_not_guessed_a_claude_session(self, tmp_path):
+        """Panes share cwds; without filtering by agent, a codex pane was offered
+        the claude session sitting in the same directory."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "CLAUDE1", "awaiting-user", cwd="/repo", agent="claude")
+        _store(conn, "CODEX1", "awaiting-user", cwd="/repo", agent="codex")
+        panes = [TmuxPane("main:3.1", "/repo", "codex", window="scad")]
+        rows = gather(conn, panes, set())["panes"]
+        assert rows[0]["agent"] == "codex"
+        assert rows[0]["likely_id"] == "CODEX1"
+
+    def test_every_agent_pane_gets_a_row_even_sharing_a_cwd(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        panes = [TmuxPane("main:3.0", "/repo", "2.1.205", window="scad"),
+                 TmuxPane("main:3.2", "/repo", "2.1.220", window="scad")]
+        assert [r["target"] for r in gather(conn, panes, set())["panes"]] == ["main:3.0", "main:3.2"]
+
+    def test_non_agent_panes_are_excluded(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        panes = [TmuxPane("main:2.0", "/repo", "zsh", window="docs")]
+        assert gather(conn, panes, set())["panes"] == []
+
+    def test_a_pane_with_no_matching_session_still_appears(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        panes = [TmuxPane("main:9.0", "/never/indexed", "2.1.219", window="new")]
+        rows = gather(conn, panes, set())["panes"]
+        assert rows[0]["likely_id"] is None
+        assert rows[0]["goto"].startswith("tmux select-window")
+
+    def test_window_name_and_tmux_session_are_carried(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        panes = [TmuxPane("main2:1.0", "/repo", "2.1.219", window="orglens")]
+        row = gather(conn, panes, set())["panes"][0]
+        assert row["window"] == "orglens"
+        assert row["tmux_session"] == "main2"
