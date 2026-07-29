@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json.schemastore.org/claude-code-marketplace-manifest.json",
+  "name": "scad",
+  "owner": {
+    "name": "Vignesh Saptarishi",
+    "url": "https://github.com/vsaptarishi"
+  },
+  "description": "Scoped agent dispatch — the scad repo, installable as a Claude Code plugin.",
+  "plugins": [
+    {
+      "name": "scad",
+      "source": "./",
+      "description": "Scoped agent dispatch and tooling for Claude Code sessions",
+      "license": "MIT",
+      "keywords": ["agents", "dispatch", "sessions", "notes", "memory"]
+    }
+  ]
+}

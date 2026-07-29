@@ -626,3 +626,44 @@ class TestInstallPathIsThePluginRoot:
         data = json.loads((plugins / "installed_plugins.json").read_text())
         assert set(data["plugins"]) == {"humanizer@humanizer", "scad"}
         assert data["plugins"]["humanizer@humanizer"][0]["installPath"] == "/x"
+
+
+class TestMarketplaceManifest:
+    """The repo is its own marketplace.
+
+    Every plugin that actually loads is keyed `name@marketplace` and has a
+    matching marketplace entry. A bare `scad` key resolves to no marketplace at
+    all, which is what produced "Marketplace 'inline' not found" and kept
+    `/remember` from ever loading. Shipping a marketplace manifest in the repo
+    lets scad install as `scad@scad` like everything else that works.
+    """
+
+    def _manifest(self):
+        path = Path(__file__).parent.parent / ".claude-plugin" / "marketplace.json"
+        return path, json.loads(path.read_text())
+
+    def test_marketplace_manifest_exists(self):
+        path, _ = self._manifest()
+        assert path.is_file()
+
+    def test_manifest_has_the_shape_claude_code_reads(self):
+        _, data = self._manifest()
+        assert data["name"] == "scad"
+        assert "$schema" in data
+        assert isinstance(data["owner"], dict)
+        assert data["owner"].get("name")
+        assert data["description"]
+
+    def test_it_declares_exactly_the_repo_as_its_one_plugin(self):
+        _, data = self._manifest()
+        assert len(data["plugins"]) == 1
+        entry = data["plugins"][0]
+        assert entry["name"] == "scad"
+        assert entry["source"] == "./"
+
+    def test_the_marketplace_plugin_name_matches_plugin_json(self):
+        # If these drift, the install resolves to `scad@scad` but finds nothing.
+        _, data = self._manifest()
+        plugin = json.loads(
+            (Path(__file__).parent.parent / ".claude-plugin" / "plugin.json").read_text())
+        assert data["plugins"][0]["name"] == plugin["name"]
