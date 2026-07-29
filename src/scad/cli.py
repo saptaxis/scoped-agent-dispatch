@@ -1911,7 +1911,8 @@ def reindex(rebuild, force):
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
-    for key in ("files", "sessions", "turns", "named", "skipped_lines", "skipped_files"):
+    for key in ("files", "sessions", "turns", "notes", "named",
+                "skipped_lines", "skipped_files"):
         if stats.get(key):
             click.echo(f"[scad]   {key}: {stats[key]}")
 

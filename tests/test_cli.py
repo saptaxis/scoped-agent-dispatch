@@ -2177,3 +2177,12 @@ class TestSessionNotes:
         result = runner.invoke(main, ["session", "show", "S1"])
         assert result.exit_code == 0
         assert "notes" in result.output
+
+    def test_reindex_reports_the_note_count(self, runner, tmp_path, monkeypatch):
+        # Drift must be visible: a pass that indexed a note and said nothing
+        # would leave "did /remember work?" answerable only by opening sqlite.
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["reindex"])
+        assert "notes: 1" in result.output
