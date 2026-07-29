@@ -82,7 +82,9 @@ from scad.project import resolve_project
 from scad.index import (
     connect as index_connect,
     reindex as run_reindex,
+    search_notes,
     search_turns,
+    session_notes as index_session_notes,
     session_notes as index_session_notes,
     session_row,
     session_turns,
@@ -1908,9 +1910,10 @@ def archive(run_id, as_json):
 @main.command()
 @click.option("--rebuild", is_flag=True, help="Drop and rebuild from the archive.")
 @click.option("--force", is_flag=True, help="Allow --rebuild when raw is missing (destructive).")
-def reindex(rebuild, force):
-    """Rebuild the session index from the archive."""
-    stats = run_reindex(rebuild=rebuild, force=force)
+@click.option("--no-archive", is_flag=True, help="Skip the archive sweep and index what is already archived.")
+def reindex(rebuild, force, no_archive):
+    """Archive new traces, then rebuild the session index from the archive."""
+    stats = run_reindex(rebuild=rebuild, force=force, archive_first=not no_archive)
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
@@ -2173,10 +2176,24 @@ def session_read(session_id, kind, role, limit):
               type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
               help="Search only this kind — e.g. --kind thinking for reasoning.")
 @click.option("--limit", default=20, help="Hits to show.")
+@click.option("--notes", "notes_only", is_flag=True, help="Search notes instead of turns.")
 @click.option("--json", "as_json", is_flag=True, help="Emit hits as JSON.")
-def search(query, project, kind, limit, as_json):
-    """Full-text search across every indexed turn."""
+def search(query, project, kind, limit, notes_only, as_json):
+    """Full-text search across every indexed turn, or across notes with --notes."""
     conn = index_connect()
+    if notes_only:
+        hits = search_notes(conn, query, limit=limit)
+        if as_json:
+            click.echo(json.dumps(hits, default=str))
+            return
+        if not hits:
+            click.echo(f"[scad] No note matches {query!r}.")
+            return
+        for h in hits:
+            when = datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d %H:%M") if h["ts"] else "?"
+            click.echo(f"{(h.get('name') or h['session_id'][:12]):<20} {when}  "
+                       f"{(h.get('topic') or ''):<24} {(h.get('title') or '')[:60]}")
+        return
     hits = search_turns(conn, query, project=project, kind=kind, limit=limit)
 
     if as_json:

@@ -1734,39 +1734,39 @@ class TestIndexCommands:
 
     def test_reindex_reports_counts(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["reindex", "--no-archive"])
         assert result.exit_code == 0
         assert "sessions" in result.output
 
     def test_session_ls_lists_the_row(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "ls"])
         assert result.exit_code == 0
         assert "S1" in result.output
 
     def test_session_show_includes_turn_count(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "show", "S1"])
         assert result.exit_code == 0
         assert "turns" in result.output.lower()
 
     def test_session_show_unknown_id_exits_nonzero(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "show", "NOPE"])
         assert result.exit_code != 0
 
     def test_project_ls_groups(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["project", "ls"])
         assert result.exit_code == 0
 
     def test_session_ls_json_is_parseable(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "ls", "--json"])
         assert result.exit_code == 0
         payload = json.loads(result.stdout)
@@ -1775,7 +1775,7 @@ class TestIndexCommands:
     def test_since_and_until_bound_the_window(self, runner, tmp_path, monkeypatch):
         """'What was I doing in March' is the query this exists for."""
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
 
         inside = runner.invoke(main, ["session", "ls", "--since", "2026-07-01", "--json"])
         assert json.loads(inside.stdout)[0]["id"] == "S1"
@@ -1795,7 +1795,7 @@ class TestIndexCommands:
     def test_outcome_filter_finds_sessions_awaiting_input(self, runner, tmp_path, monkeypatch):
         """The query this whole feature exists for: what is waiting on me?"""
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "ls", "--outcome", "awaiting-user", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.stdout)[0]["id"] == "S1"
@@ -1803,7 +1803,7 @@ class TestIndexCommands:
     def test_tool_result_last_is_a_filterable_outcome(self, runner, tmp_path, monkeypatch):
         """The majority outcome on a real index — unfilterable is unusable."""
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "ls", "--outcome", "tool-result-last"])
         assert result.exit_code == 0, result.output
 
@@ -1816,7 +1816,7 @@ class TestIndexCommands:
              "sessionId": "S1", "name": "nd-5", "state": "blocked",
              "needs": "drop the bioRxiv PDF", "detail": "workflow salvaged",
              "updatedAt": "2026-07-28T17:56:43.450Z"}) + "\n")
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
 
         result = runner.invoke(main, ["session", "ls"])
         assert result.exit_code == 0
@@ -1829,13 +1829,13 @@ class TestIndexCommands:
 
     def test_session_ls_falls_back_to_the_id_when_unnamed(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "ls"])
         assert "S1" in result.output
 
     def test_grade_filter_separates_skeletons(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "ls", "--grade", "skeleton", "--json"])
         assert result.exit_code == 0
         assert json.loads(result.stdout) == []      # this fixture has a real transcript
@@ -1861,33 +1861,33 @@ class TestReadAndSearch:
 
     def test_read_prints_turn_text(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "read", "S1"])
         assert result.exit_code == 0
         assert "the resolver returns a directory" in result.output
 
     def test_read_can_exclude_reasoning(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "read", "S1", "--kind", "text"])
         assert "weighing markers" not in result.output
         assert "the resolver returns a directory" in result.output
 
     def test_read_unknown_session_exits_nonzero(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         assert runner.invoke(main, ["session", "read", "NOPE"]).exit_code != 0
 
     def test_search_finds_the_session(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["search", "resolver"])
         assert result.exit_code == 0
         assert "S1" in result.output
 
     def test_search_with_no_hits_says_so(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["search", "zzzznomatch"])
         assert result.exit_code == 0
         assert "no match" in result.output.lower()
@@ -2173,7 +2173,7 @@ class TestSessionNotes:
         self._home(tmp_path, monkeypatch)
         runner.invoke(main, ["session", "note", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        runner.invoke(main, ["reindex"])
+        runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "show", "S1"])
         assert result.exit_code == 0
         assert "notes" in result.output
@@ -2184,7 +2184,7 @@ class TestSessionNotes:
         self._home(tmp_path, monkeypatch)
         runner.invoke(main, ["session", "note", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        result = runner.invoke(main, ["reindex"])
+        result = runner.invoke(main, ["reindex", "--no-archive"])
         assert "notes: 1" in result.output
 
 
@@ -2260,3 +2260,18 @@ class TestViewCommand:
         with patch("scad.cli.webbrowser.open") as opener:
             runner.invoke(main, ["view", "--no-open"])
         opener.assert_not_called()
+
+
+class TestReindexSweepIsolation:
+    def test_reindex_sweeps_by_default_but_can_be_opted_out(self, runner, tmp_path, monkeypatch):
+        """The sweep reads the real ~/.claude — SCAD_HOME cannot redirect it — so
+        the CLI defaults it on for users and tests pass --no-archive."""
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        with patch("scad.index.archive_all") as sweep:
+            runner.invoke(main, ["reindex"])
+        sweep.assert_called_once()
+
+        with patch("scad.index.archive_all") as sweep:
+            runner.invoke(main, ["reindex", "--no-archive"])
+        sweep.assert_not_called()

@@ -403,9 +403,23 @@ else:
     fi
 fi
 
+# --- Bootstrap the session index ---
+# Without this a fresh install has an empty index, so `scad view` shows nothing
+# and looks broken. Archiving first matters most here: on a machine with months
+# of history this is the moment those traces stop being one prune away from gone.
+echo ""
+echo "[scad] Archiving existing agent traces (first run can take a minute)..."
+if scad archive >/dev/null 2>&1; then
+    echo "[scad] Building the session index..."
+    scad reindex --no-archive 2>&1 | sed 's/^/  /' || true
+else
+    echo "[scad] Skipped archive/index — run 'scad archive && scad reindex' by hand."
+fi
+
 # --- Done ---
 echo ""
 echo "[scad] Install complete!"
 echo ""
 echo "  Restart your shell or run: source ~/.zshrc"
-echo "  Then try: scad --help"
+echo "  Then try: scad view       # who is waiting on you"
+echo "            scad --help"

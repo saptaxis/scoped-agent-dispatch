@@ -129,6 +129,30 @@ def split_waiting(waiting: list[dict], cwds: set[str]) -> tuple[list[dict], list
     return at_hand, closed
 
 
+def group_notes(notes: list[dict]) -> list[dict]:
+    """Notes grouped by the session that wrote them, newest session first.
+
+    A note only means something beside its siblings — the `relation` edges
+    (continue / shift / branch / return) describe a session's shape, and a lone
+    note out of order says nothing about it.
+    """
+    sessions: dict[str, list[dict]] = {}
+    for note in notes:
+        sessions.setdefault(note["session_id"], []).append(note)
+    groups = [
+        {"session_id": sid,
+         "label": rows[0].get("name") or sid[:12],
+         "project": rows[0].get("project"),
+         "agent": rows[0].get("agent"),
+         "cwd": rows[0].get("cwd"),
+         "rows": sorted(rows, key=lambda r: r.get("idx") or 0),
+         "last_activity": max((r.get("ts") or 0) for r in rows)}
+        for sid, rows in sessions.items()
+    ]
+    groups.sort(key=lambda g: g["last_activity"], reverse=True)
+    return groups
+
+
 def group_by_project(rows: list[dict]) -> list[dict]:
     """Group rows by project, most recently active project first.
 
@@ -326,6 +350,15 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     )
     live = _one_per_place(r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container"))
 
+    # Notes are the authored tier — the only thing here that can never be
+    # re-derived — and until now they were write-only from the page's side.
+    notes = [dict(r) for r in conn.execute(
+        "SELECT n.session_id, n.idx, n.ts, n.topic, n.relation, n.parent, n.title, "
+        "       n.tags, n.entities, n.note_path, s.project, s.name, s.agent, s.cwd "
+        "FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        "ORDER BY n.ts DESC"
+    ).fetchall()]
+
     pane_rows = live_pane_rows(conn, panes)
     at_hand, closed_waiting = split_waiting(waiting, cwds)
 
@@ -333,6 +366,8 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "waiting": waiting,
         "waiting_at_hand": at_hand,
         "waiting_closed": closed_waiting,
+        "notes": notes,
+        "grouped_notes": group_notes(notes),
         "grouped_panes": group_panes(pane_rows),
         "grouped_closed": group_by_project(closed_waiting),
         "live": live,
@@ -406,6 +441,9 @@ _PAGE = """<!doctype html>
  input {{ font: inherit; padding: .5rem .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
           border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); }}
  input:focus {{ outline: 2px solid var(--claude); outline-offset: -1px; }}
+ .tags {{ margin-top: .3rem; display: flex; flex-wrap: wrap; gap: .25rem; }}
+ .tag {{ font-size: .7rem; padding: .08rem .35rem; border-radius: 4px;
+         background: var(--chip); color: var(--dim); border: 1px solid var(--line); }}
  .clip {{ cursor: zoom-in; border-bottom: 1px dotted var(--faint); }}
  .clip.open {{ cursor: auto; border-bottom: 0; user-select: text;
                -webkit-line-clamp: unset; overflow: visible; }}
@@ -425,6 +463,9 @@ _PAGE = """<!doctype html>
 
 <h2>Waiting — closed <span class="n">{n_closed}</span></h2>
 {grouped_closed}
+
+<h2>Notes <span class="n">{n_notes}</span></h2>
+{notes}
 
 <h2>All sessions <span class="n">{n_all}</span></h2>
 <input id="f" placeholder="filter by name, project, cwd, title…" autocomplete="off">
@@ -654,6 +695,36 @@ def _grouped_closed_html(groups: list[dict]) -> str:
     return "".join(out)
 
 
+def _notes_html(groups: list[dict]) -> str:
+    """One card per session, its notes in the order they were written."""
+    if not groups:
+        return _empty("No notes yet — write one with /remember or `scad session note`.")
+    e = _html.escape
+    out = []
+    for g in groups:
+        rows = []
+        for n in g["rows"]:
+            try:
+                tags = json.loads(n.get("tags") or "[]")
+            except (TypeError, ValueError):
+                tags = []
+            tag_html = "".join(f'<span class="tag">{e(str(t))}</span>' for t in tags[:12])
+            rel = n.get("relation") or ""
+            parent = f' ← {e(str(n["parent"]))}' if n.get("parent") else ""
+            out_extra = f'<div class="tags">{tag_html}</div>' if tag_html else ""
+            rows.append(_row(
+                _clip(n.get("title") or n.get("topic") or "(untitled)", 90),
+                f'<b>{e(str(n.get("topic") or ""))}</b> · {e(rel)}{parent} · {_ago(n.get("ts"))}',
+                [], extra=out_extra,
+            ))
+        out.append(_card(
+            _clip(g["label"], 60),
+            f'{e(g.get("project") or "")} · {len(g["rows"])} note'
+            f'{"s" if len(g["rows"]) != 1 else ""} · {_ago(g["last_activity"])}',
+            rows))
+    return "".join(out)
+
+
 def render(data: dict) -> str:
     """One self-contained page. No network, no external assets."""
     return _PAGE.format(
@@ -664,6 +735,8 @@ def render(data: dict) -> str:
         n_closed=len(data.get("waiting_closed") or []),
         grouped_panes=_grouped_panes_html(data.get("grouped_panes") or []),
         grouped_closed=_grouped_closed_html(data.get("grouped_closed") or []),
+        n_notes=len(data.get("notes") or []),
+        notes=_notes_html(data.get("grouped_notes") or []),
         waiting=_waiting_rows_html(data.get("waiting_at_hand") or []),
         data=_embed(data),
     )

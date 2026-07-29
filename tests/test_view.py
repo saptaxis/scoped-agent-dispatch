@@ -601,3 +601,58 @@ class TestExpandableText:
     def test_short_text_is_neither_clipped_nor_clickable(self, tmp_path):
         html = self._html_with_long_title(tmp_path, "brief")
         assert 'data-full="brief"' not in html
+
+
+class TestNotesSection:
+    def _with_note(self, tmp_path, **over):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        row = {"session_id": "S1", "idx": 0, "ts": int(time.time() * 1000),
+               "topic": "notes-store", "relation": "shift", "parent": None,
+               "title": "Built the notes store", "tags": '["append-only","jsonl"]',
+               "entities": '["notes.py"]', "note_path": "/n/S1.jsonl"}
+        row.update(over)
+        conn.execute(
+            "INSERT INTO notes (session_id, idx, ts, topic, relation, parent, title, "
+            "tags, entities, note_path) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            tuple(row[k] for k in ("session_id", "idx", "ts", "topic", "relation",
+                                   "parent", "title", "tags", "entities", "note_path")))
+        conn.commit()
+        return conn
+
+    def test_notes_appear_grouped_under_their_session(self, tmp_path):
+        conn = self._with_note(tmp_path)
+        data = gather(conn, [], set())
+        assert len(data["notes"]) == 1
+        assert data["grouped_notes"][0]["session_id"] == "S1"
+
+    def test_tags_render_as_chips(self, tmp_path):
+        html = render(gather(self._with_note(tmp_path), [], set()))
+        assert 'class="tag">append-only<' in html
+        assert 'class="tag">jsonl<' in html
+
+    def test_topic_and_relation_are_shown(self, tmp_path):
+        html = render(gather(self._with_note(tmp_path), [], set()))
+        assert "notes-store" in html and "shift" in html
+
+    def test_a_branch_note_shows_its_parent(self, tmp_path):
+        conn = self._with_note(tmp_path, relation="branch", parent="earlier-topic")
+        assert "earlier-topic" in render(gather(conn, [], set()))
+
+    def test_notes_within_a_session_keep_write_order(self, tmp_path):
+        """relation edges only mean anything in sequence."""
+        conn = self._with_note(tmp_path)
+        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+                     "VALUES ('S1', 1, 2, 'later', 'second', '/n/S1.jsonl')")
+        conn.commit()
+        rows = gather(conn, [], set())["grouped_notes"][0]["rows"]
+        assert [r["idx"] for r in rows] == [0, 1]
+
+    def test_malformed_tags_json_does_not_break_the_page(self, tmp_path):
+        conn = self._with_note(tmp_path, tags="not json")
+        assert "</html>" in render(gather(conn, [], set()))
+
+    def test_an_empty_notes_store_says_how_to_write_one(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        assert "/remember" in render(gather(conn, [], set()))

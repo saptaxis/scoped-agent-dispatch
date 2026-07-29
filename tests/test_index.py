@@ -771,3 +771,41 @@ class TestIndexNotes:
         append_note({**NOTE, "title": "second"}, session_id="S1")
         index_notes(conn)
         assert [r["title"] for r in session_notes(conn, "S1")] == ["first", "second"]
+
+
+class TestReindexArchivesFirst:
+    def test_reindex_sweeps_the_archive_before_reading_it(self, tmp_path, monkeypatch):
+        """The index reads the archive, so without this a reindex after a day's
+        work indexes nothing new and still reports success."""
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / "i.sqlite")
+        with patch("scad.index.archive_all") as sweep:
+            reindex(conn, archive_first=True)
+        sweep.assert_called_once()
+
+    def test_the_library_function_does_not_sweep_by_default(self, tmp_path, monkeypatch):
+        """archive_all reads the real ~/.claude whatever SCAD_ARCHIVE says, so a
+        default-on sweep would make every reindexing test copy the live corpus."""
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / "i.sqlite")
+        with patch("scad.index.archive_all") as sweep:
+            reindex(conn)
+        sweep.assert_not_called()
+
+    def test_no_archive_skips_the_sweep(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / "i.sqlite")
+        with patch("scad.index.archive_all") as sweep:
+            reindex(conn, archive_first=False)
+        sweep.assert_not_called()
+
+    def test_a_failing_archive_does_not_block_indexing(self, tmp_path, monkeypatch):
+        """A full disk should degrade to 'index what we have', not to nothing."""
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / "i.sqlite")
+        with patch("scad.index.archive_all", side_effect=OSError("disk full")):
+            reindex(conn, archive_first=True)          # must not raise

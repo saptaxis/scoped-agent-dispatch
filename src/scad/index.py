@@ -16,7 +16,7 @@ from pathlib import Path
 
 import click
 
-from scad.archive import STATE_HISTORY_NAME, archive_root
+from scad.archive import STATE_HISTORY_NAME, archive_all, archive_root
 from scad.config import get_scad_home
 from scad.notes import notes_root
 from scad.project import resolve_project
@@ -447,7 +447,8 @@ def _peek_session_id(conn, path: Path) -> str | None:
     return row["id"] if row else ident["id"]
 
 
-def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[str, int]:
+def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
+            archive_first: bool = False) -> dict[str, int]:
     """Scan the archive into the index.
 
     Incremental by default: a file whose size already equals the session's
@@ -456,6 +457,22 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False) -> dict[st
     because those turns cannot be re-derived from anything.
     """
     conn = conn or connect()
+
+    # Archive before reading. The index reads the ARCHIVE, never the live trace
+    # dirs, so without this a reindex after a day's work quietly indexes nothing
+    # new and still reports success — the worst kind of failure. This is the
+    # spec's invariant: nothing enters the index that is not archived first.
+    #
+    # Defaults OFF here and ON at the CLI. archive_all() sweeps the real ~/.claude
+    # regardless of SCAD_ARCHIVE, so a default of True would make every test that
+    # reindexes copy the whole live corpus into its tmpdir. The user-facing
+    # command is where the sweep belongs; the library function stays pure.
+    if archive_first:
+        try:
+            archive_all()
+        except Exception as exc:            # a full disk must not block indexing
+            click.echo(f"[scad] Warning: archive step failed: {exc}")
+
     root = archive_root()
     stats = collections.Counter()
     machine = platform.node()
@@ -610,6 +627,37 @@ def _fts_query(raw: str) -> str:
     """
     words = [w.replace('"', "") for w in raw.split()]
     return " ".join(f'"{w}"' for w in words if w)
+
+
+def session_notes(conn, session_id: str) -> list[dict]:
+    """A session's notes, oldest first — the order they were written."""
+    rows = conn.execute(
+        "SELECT idx, ts, topic, relation, parent, title, tags, entities, note_path "
+        "FROM notes WHERE session_id = ? ORDER BY idx",
+        (session_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def search_notes(conn, query: str, *, limit: int = 20) -> list[dict]:
+    """Search notes by topic, title and tags.
+
+    Deliberately not FTS. Notes are the authored tier and there are few of them;
+    a LIKE over four short columns is exact enough and needs no second index to
+    keep in sync with `turns_fts`. If the note count ever reaches the thousands
+    this becomes an FTS table over `notes.title`.
+    """
+    like = f"%{query.lower()}%"
+    rows = conn.execute(
+        "SELECT n.session_id, n.idx, n.ts, n.topic, n.relation, n.title, n.tags, "
+        "       n.entities, n.note_path, s.project, s.name, s.agent "
+        "FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        "WHERE lower(COALESCE(n.topic,'')) LIKE ? OR lower(COALESCE(n.title,'')) LIKE ? "
+        "   OR lower(COALESCE(n.tags,'')) LIKE ? OR lower(COALESCE(n.entities,'')) LIKE ? "
+        "ORDER BY n.ts DESC LIMIT ?",
+        (like, like, like, like, limit),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def search_turns(conn, query: str, *, project=None, kind=None, limit: int = 20):
