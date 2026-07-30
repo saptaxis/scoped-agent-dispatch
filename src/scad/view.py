@@ -23,14 +23,31 @@ from scad.live import (
     is_agent_command,
 )
 
-_RESUME = {"claude": "claude --resume {id}", "codex": "codex resume {id}"}
+_RESUME = {"claude": "claude --resume {id}",
+           "codex": "codex resume {id}",
+           "kimi": "kimi --session {id}"}
+
+# kimi keys a session directory `session_<uuid>` and `kimi_identity_from_path`
+# strips that prefix to key the row — but kimi's own CLI wants it back. Measured
+# on 2026-07-30: `kimi -S <bare-uuid>` answers `Session "<uuid>" not found.`
+# while the prefixed form resolves and prints the session's own resume line.
+_KIMI_PREFIX = "session_"
 
 
 @dataclass(frozen=True)
 class Reentry:
+    """How to get back into a session, and where it is open right now.
+
+    Two questions, and conflating them is what hid the resume command from the
+    rows most likely to be clicked. `command` answers "what do I paste" and is
+    always the resume command; `target` and `goto` answer "where is it open",
+    which is state the resume path consults and the row reports as metadata.
+    """
     kind: str        # tmux | container | resume | none
-    command: str
+    command: str     # the resume command — always, when the row has one
     note: str = ""
+    target: str = ""  # the live place: a tmux pane target, or a run id
+    goto: str = ""    # how to walk to that place now
 
 
 def _goto(target: str) -> str:
@@ -194,17 +211,34 @@ def _is_agent_state_dir(cwd: str) -> bool:
     return any(part in _AGENT_STATE for part in parts)
 
 
-def _resume_command(row: dict) -> str:
+def resume_argv(row: dict) -> list[str]:
+    """The resume command as argv, for `os.execvp`. `[]` when there is none.
+
+    argv rather than a string is the primitive because `scad session resume`
+    execs it directly, with no shell in between. The displayed command is built
+    from this, so the two can never name different flags.
+    """
+    if row.get("kind") not in (None, "main") or not row.get("id"):
+        return []
+    agent = row.get("agent") or "claude"
+    session_id = str(row["id"])
+    if agent == "kimi" and not session_id.startswith(_KIMI_PREFIX):
+        session_id = _KIMI_PREFIX + session_id
+    template = _RESUME.get(agent, _RESUME["claude"])
+    return shlex.split(template.format(id=session_id))
+
+
+def resume_command(row: dict) -> str:
     """The resume command, regardless of whether the session is open.
 
     Always available and always unambiguous — unlike a tmux target, which cannot
     be resolved to a session when the same project opens in the same window
     every time. This is what you actually paste.
     """
-    if row.get("kind") not in (None, "main") or not row.get("id"):
+    argv = resume_argv(row)
+    if not argv:
         return ""
-    template = _RESUME.get(row.get("agent") or "claude", _RESUME["claude"])
-    resume = template.format(id=row["id"])
+    resume = shlex.join(argv)
     cwd = row.get("cwd")
     if not cwd or _is_agent_state_dir(cwd):
         return resume
@@ -221,10 +255,15 @@ def _one_per_place(rows) -> list[dict]:
 
     Only the most recent session per place can plausibly be the one running
     there, so that is the one kept. The rest remain findable in "All sessions".
+
+    Keyed on `reentry.target` — the place itself. It used to key on the command,
+    which worked only because a live row's command WAS the tmux target; now that
+    the command is the resume command, one per session, keying on it would put
+    every session that ever ran in the directory back on the page.
     """
     newest: dict[str, dict] = {}
     for row in rows:                       # all_rows is already ordered ended DESC
-        newest.setdefault(row["reentry"]["command"], row)
+        newest.setdefault(row["reentry"]["target"], row)
     return list(newest.values())
 
 
@@ -257,10 +296,12 @@ def status_for(row: dict, live_ids: set[str], cwds: set[str], running: set[str])
 
 
 def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
-    """How to get back into this session.
+    """How to get back into this session, and where it is open right now.
 
-    Precedence is live-first: a running pane or container is a place you can go
-    now, while a resume command rebuilds a conversation from disk.
+    `kind` is still live-first, because that is what `scad session resume` acts
+    on: attach to a place that exists rather than start a second process against
+    a live session id. What changed is that liveness no longer displaces the
+    command — a pane closes, the resume command does not.
 
     Matching a pane by cwd is approximate — several panes can share a directory —
     so every candidate is reported rather than one being guessed at.
@@ -269,6 +310,10 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
         # Subagents and workflow agents have no independent session to re-enter.
         return Reentry("none", "")
 
+    # shlex.quote leaves ordinary paths alone and quotes the 84 real cwds that
+    # contain spaces ("Saptarishi Apartments"), which `cd` would otherwise split.
+    # An agent-state directory gets no cd at all — see _is_agent_state_dir.
+    resume = resume_command(row)
     cwd = row.get("cwd")
 
     if cwd:
@@ -278,20 +323,15 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
             if len(matches) > 1:
                 others = ", ".join(p.target for p in matches[1:])
                 note = f"ambiguous — same cwd also in {others}"
-            return Reentry("tmux", _goto(matches[0].target), note)
+            return Reentry("tmux", resume, note,
+                           target=matches[0].target, goto=_goto(matches[0].target))
 
     run_id = row.get("scad_run_id")
     if run_id and run_id in running:
-        return Reentry("container", f"scad run attach {run_id}")
+        return Reentry("container", resume, target=run_id,
+                       goto=f"scad run attach {run_id}")
 
-    template = _RESUME.get(row.get("agent") or "claude", _RESUME["claude"])
-    resume = template.format(id=row.get("id"))
-    # shlex.quote leaves ordinary paths alone and quotes the 84 real cwds that
-    # contain spaces ("Saptarishi Apartments"), which `cd` would otherwise split.
-    # An agent-state directory gets no cd at all — see _is_agent_state_dir.
-    if not cwd or _is_agent_state_dir(cwd):
-        return Reentry("resume", resume)
-    return Reentry("resume", f"cd {shlex.quote(cwd)} && {resume}")
+    return Reentry("resume", resume)
 
 
 _WAITING = ("awaiting-question", "awaiting-user")
@@ -308,7 +348,8 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
     for r in cursor_rows:
         row = dict(r)
         re_ = reentry_for(row, panes, running)
-        row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note}
+        row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
+                          "target": re_.target, "goto": re_.goto}
         row["status"] = status_for(row, live_ids, cwds, running)
         out.append(row)
     return out
@@ -418,7 +459,8 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
             "indexed": known is not None,
         }
         re_ = reentry_for(row, panes, running)
-        row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note}
+        row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
+                          "target": re_.target, "goto": re_.goto}
         rows.append(row)
     rows.sort(key=lambda r: r["ended"] or r["started_at"] or 0, reverse=True)
     return rows
@@ -930,6 +972,31 @@ def _empty(msg: str) -> str:
     return f'<div class="empty">{_html.escape(msg)}</div>'
 
 
+def _open_in(row: dict) -> str:
+    """`· also open in main:3.1`, when the row is live somewhere.
+
+    Metadata, not a command. Where a session is open now is a fact about the
+    row that decays the moment the pane closes, so it reads as a note beside
+    the name rather than as the thing you copy.
+    """
+    target = (row.get("reentry") or {}).get("target")
+    return f' · also open in {_html.escape(target)}' if target else ""
+
+
+def _chips(row: dict) -> list[str]:
+    """The resume command, plus a demoted way to walk to a live pane.
+
+    Order and emphasis are the whole point: the command that always works is
+    the one in the ordinary chip, and the tmux target — which cannot be
+    resolved back to a session, and is gone tomorrow — is the ghost.
+    """
+    reentry = row.get("reentry") or {}
+    chips = [_chip(reentry.get("command") or resume_command(row))]
+    if reentry.get("goto"):
+        chips.append(_chip(reentry["goto"], ghost=True))
+    return chips
+
+
 def _agent_tag(agent: str) -> str:
     a = _html.escape(agent or "")
     return f'<span class="ag {a}">{a}</span>'
@@ -989,15 +1056,14 @@ def _open_now_html(rows: list[dict]) -> str:
             # Started too recently to have been archived. Say so rather than
             # showing zeros that look like a session which did nothing.
             bits += [_clip(r.get("cwd") or "", 60), "not indexed yet"]
-        meta = " · ".join(b for b in bits if b) + _notes_meta(r) + _title_meta(r)
+        meta = (" · ".join(b for b in bits if b) + _notes_meta(r) + _title_meta(r)
+                + _open_in(r))
 
         extra = ""
         if r.get("waiting_for"):
             extra = f'<div class="needs">waiting on {e(str(r["waiting_for"]))}</div>'
 
-        chips = [_chip(_resume_command(r), ghost=True)]
-        if r["reentry"]["kind"] in ("tmux", "container"):
-            chips.insert(0, _chip(r["reentry"]["command"]))
+        chips = _chips(r)
         out.append(_row(_label(r), meta, chips, pill=r.get("status") or "open",
                         extra=extra, flag=r.get("status") == "waiting",
                         project=r.get("project")))
@@ -1022,7 +1088,7 @@ def _grouped_panes_html(groups: list[dict]) -> str:
                 else:
                     title = '<span class="m">no indexed session here</span>'
                     hint = "unmatched"
-                resume = _resume_command({"id": r.get("likely_id"), "cwd": r.get("cwd"),
+                resume = resume_command({"id": r.get("likely_id"), "cwd": r.get("cwd"),
                                           "agent": r.get("agent"), "kind": "main"}) \
                     if r.get("likely_id") else ""
                 rows.append(_row(
@@ -1059,13 +1125,12 @@ def _waiting_rows_html(rows: list[dict]) -> str:
             flat = " ".join(str(r["last_text"]).split())
             extra += (f'<div class="snip clip" title="{e(flat)}" data-full="{e(flat)}" '
                       f'onclick="expand(event, this)">{e(flat[:240])}</div>')
-        chips = [_chip(_resume_command(r), ghost=True)]
-        if r["reentry"]["kind"] == "tmux":
-            chips.insert(0, _chip(r["reentry"]["command"]))
+        chips = _chips(r)
         out.append(_row(
             _label(r),
             f'{_agent_tag(r.get("agent") or "")} · {e(r.get("project") or "")} · '
-            f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}{_title_meta(r)}',
+            f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}'
+            f'{_title_meta(r)}{_open_in(r)}',
             chips, pill=r.get("status", ""), extra=extra,
             flag=r.get("outcome") == "awaiting-question",
             project=r.get("project"),
@@ -1087,7 +1152,7 @@ def _grouped_closed_html(groups: list[dict]) -> str:
                 _label(r),
                 f'{_agent_tag(r.get("agent") or "")} · {r.get("n_turns") or 0} turns · '
                 f'{_ago(r.get("ended"))}{_title_meta(r)}',
-                [_chip(_resume_command(r))], extra=extra,
+                [_chip(resume_command(r))], extra=extra,
                 flag=r.get("outcome") == "awaiting-question",
                 project=r.get("project") or g["project"],
             ))

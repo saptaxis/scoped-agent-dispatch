@@ -89,7 +89,14 @@ from scad.index import (
     session_row,
     session_turns,
 )
-from scad.live import running_run_ids, tmux_panes
+from scad.launch import read_record
+from scad.live import (
+    attach_argv,
+    claude_live_sessions,
+    find_pane,
+    running_run_ids,
+    tmux_panes,
+)
 from scad.notes import (
     NoteTargetError,
     append_note,
@@ -97,7 +104,7 @@ from scad.notes import (
     note_path,
     read_note_file,
 )
-from scad.view import gather, render, write_view
+from scad.view import gather, render, resume_argv, resume_command, write_view
 
 
 def _relative_time(iso_str: str) -> str:
@@ -2016,6 +2023,90 @@ def session_show(session_id):
     click.echo(f"{'notes':<18} {len(notes)}")
     for n in notes:
         click.echo(f"  [{n['idx']:>3}] {n['topic'] or '?':<24} {(n['title'] or '')[:48]}")
+
+
+def _exec(argv: list[str]) -> None:
+    """Replace this process with `argv`. Never returns.
+
+    Its own function so the one call a test can never make is the one thing a
+    test replaces. `execvp` rather than a subprocess: the caller lands directly
+    in the agent, with no scad process left behind holding its stdio open.
+    """
+    os.execvp(argv[0], argv)
+
+
+@session.command("resume")
+@click.argument("session_id")
+@click.option("--print", "print_only", is_flag=True,
+              help="Emit the command instead of running it.")
+def session_resume(session_id, print_only):
+    """Go back into a session — attach if it is open, resume if it is closed.
+
+    Works for every session the index has seen, not only the ones scad
+    launched: the index already holds the agent, the cwd and the id, which is
+    everything a resume command needs. A launch record adds the one thing the
+    index cannot know — which pane the session is sitting in — and is otherwise
+    optional.
+
+    \b
+    Three behaviours:
+      open in a recorded pane   attach to it; never a second process on one id
+      closed                    exec the agent, cwd set to where it ran
+      --print                   emit the command; this is what the viewer copies
+    """
+    record = read_record(session_id) or {}
+    row = session_row(index_connect(), session_id)
+    if row is None and not record:
+        raise click.ClickException(
+            f"No session {session_id} in the index and no launch record. "
+            f"Try: scad reindex")
+
+    def field(name):
+        value = row[name] if row is not None else None
+        return value or record.get(name)
+
+    kind = (row["kind"] if row is not None else None) or "main"
+    if kind != "main":
+        raise click.ClickException(
+            f"{session_id} is a {kind} — it has no independent session to resume. "
+            f"Resume the session that spawned it.")
+
+    target = {"id": session_id, "kind": "main",
+              "agent": field("agent"), "cwd": field("cwd")}
+    argv = resume_argv(target)
+    command = resume_command(target)
+
+    if print_only:
+        click.echo(command)
+        return
+
+    # The launch record is the only thing that can name the pane a specific
+    # session id is in — a pane matched by cwd is "something is running here",
+    # which is not the same session and would attach you to a stranger.
+    pane_target = record.get("tmux")
+    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
+        click.echo(f"[scad] {session_id} is open in {pane_target} — attaching.")
+        _exec(attach_argv(pane_target))
+        return
+
+    # Proven live, nowhere to attach. The registry names the session exactly but
+    # cannot name its window, and resuming would put a second writer on it.
+    live = next((s for s in claude_live_sessions() if s.session_id == session_id), None)
+    if live is not None:
+        raise click.ClickException(
+            f"{session_id} is running right now (pid {live.pid}) and scad cannot "
+            f"tell which pane holds it, so resuming would start a second process "
+            f"against a live session. Go to the window, or get the command with: "
+            f"scad session resume {session_id} --print")
+
+    cwd = target["cwd"]
+    if cwd and Path(cwd).is_dir():
+        os.chdir(cwd)
+    elif cwd:
+        # A recorded cwd outlives its directory. The conversation is still there.
+        click.echo(f"[scad] {cwd} is gone — resuming from here instead.")
+    click.echo(f"[scad] {command}")
+    _exec(argv)
 
 
 @session.command("note")

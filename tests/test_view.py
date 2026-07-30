@@ -30,7 +30,8 @@ class TestReentry:
         panes = [TmuxPane("main:1.2", "/Users/vsr/code/scad", "2.1.219")]
         r = reentry_for(row(), panes, set())
         assert r.kind == "tmux"
-        assert r.command == "tmux select-window -t main:1 \\; select-pane -t main:1.2"
+        assert r.target == "main:1.2"
+        assert r.goto == "tmux select-window -t main:1 \\; select-pane -t main:1.2"
 
     def test_the_command_selects_the_pane_not_just_the_window(self):
         """`select-window -t main:3.0` silently ignores the pane component.
@@ -43,9 +44,9 @@ class TestReentry:
         """
         panes = [TmuxPane("main:3.0", "/Users/vsr/code/scad", "2.1.205")]
         r = reentry_for(row(), panes, set())
-        assert "select-pane -t main:3.0" in r.command
+        assert "select-pane -t main:3.0" in r.goto
         # The escaped semicolon survives a shell paste as a tmux command separator.
-        assert " \\; " in r.command
+        assert " \\; " in r.goto
 
     def test_a_pane_in_the_same_cwd_that_is_not_an_agent_is_ignored(self):
         """Three panes share a directory on the real machine; only agent panes count."""
@@ -60,14 +61,15 @@ class TestReentry:
         ]
         r = reentry_for(row(), panes, set())
         assert r.kind == "tmux"
-        assert "main:1.2" in r.command
+        assert "main:1.2" in r.goto
         assert "main:3.0" in r.note
         assert "ambiguous" in r.note.lower()
 
     def test_running_container_beats_resume(self):
         r = reentry_for(row(scad_run_id="demo-Jul28-1200"), [], {"demo-Jul28-1200"})
         assert r.kind == "container"
-        assert r.command == "scad run attach demo-Jul28-1200"
+        assert r.target == "demo-Jul28-1200"
+        assert r.goto == "scad run attach demo-Jul28-1200"
 
     def test_dead_container_falls_back_to_resume(self):
         r = reentry_for(row(scad_run_id="old-Mar01-1200"), [], set())
@@ -110,6 +112,60 @@ class TestReentry:
         r = reentry_for(row(kind="subagent"), [], set())
         assert r.kind == "none"
         assert r.command == ""
+
+
+class TestTheCommandIsAlwaysTheResumeCommand:
+    """What is displayed and copied never depends on what is open right now.
+
+    `reentry_for` used to answer two questions with one field: a live pane
+    returned a tmux target *instead of* a resume command, so the one string
+    that always works — and still works tomorrow, after the pane is gone —
+    never appeared for exactly the rows most likely to be clicked. The live
+    place is still known; it moved to `target`/`goto`, where the resume path
+    consults it and the row shows it as metadata.
+    """
+
+    def test_a_live_pane_does_not_displace_the_resume_command(self):
+        panes = [TmuxPane("main:1.2", "/Users/vsr/code/scad", "2.1.219")]
+        r = reentry_for(row(), panes, set())
+        assert r.command == "cd /Users/vsr/code/scad && claude --resume S1"
+
+    def test_a_running_container_does_not_displace_it_either(self):
+        r = reentry_for(row(scad_run_id="demo-Jul28-1200"), [], {"demo-Jul28-1200"})
+        assert r.command == "cd /Users/vsr/code/scad && claude --resume S1"
+
+    def test_kind_still_says_which_section_the_row_belongs_to(self):
+        """The page selects its live section on `kind`, so it must survive."""
+        panes = [TmuxPane("main:1.2", "/Users/vsr/code/scad", "2.1.219")]
+        assert reentry_for(row(), panes, set()).kind == "tmux"
+
+    def test_a_closed_session_has_no_place_to_go(self):
+        r = reentry_for(row(), [], set())
+        assert (r.target, r.goto) == ("", "")
+
+
+class TestKimiResume:
+    """kimi is the third family and had no entry at all, so kimi rows offered
+    nothing in either surface.
+
+    The id needs putting back together. `kimi_identity_from_path` strips the
+    `session_` prefix off the directory name to key the row, and kimi's own CLI
+    rejects the bare uuid: `kimi -S <uuid>` answers `Session "<uuid>" not
+    found.` while the prefixed form resolves. Measured against kimi-code on
+    2026-07-30.
+    """
+
+    def test_the_prefix_the_index_stripped_is_put_back(self):
+        r = reentry_for(row(agent="kimi", id="a01d5fe5-2327-428d-8c37-fdde5a99f714"), [], set())
+        assert r.command == ("cd /Users/vsr/code/scad && "
+                             "kimi --session session_a01d5fe5-2327-428d-8c37-fdde5a99f714")
+
+    def test_an_id_that_already_carries_the_prefix_is_not_doubled(self):
+        r = reentry_for(row(agent="kimi", id="session_a01d5fe5"), [], set())
+        assert r.command.endswith("kimi --session session_a01d5fe5")
+
+    def test_an_unknown_agent_still_falls_back_to_claude(self):
+        assert "claude --resume S1" in reentry_for(row(agent="pi"), [], set()).command
 
 
 import time
@@ -335,6 +391,37 @@ class TestLiveIsOnePerPlace:
         data = gather(conn, [TmuxPane("main:1.0", "/repo", "2.1.219")], set())
         assert {r["id"] for r in data["all"]} == {"OLD", "NEW"}
 
+    def test_the_collapse_keys_on_the_place_not_on_the_command(self, tmp_path):
+        """The coupling that made the viewer amendment dangerous.
+
+        Rows used to be deduped by `reentry.command`, which was the tmux target
+        for every live row — one string per pane, so the collapse worked by
+        accident. A resume command is unique per session, so keying on it would
+        have quietly restored the 36-rows-for-8-panes dump with every test
+        above still green: they use one session per pane. This one does not.
+        """
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD", "tool-result-last", ended_days_ago=9, cwd="/repo")
+        _store(conn, "NEW", "tool-result-last", ended_days_ago=1, cwd="/repo")
+        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+
+        live = gather(conn, panes, set())["live"]
+
+        assert len(live) == 1
+        assert live[0]["reentry"]["command"] != live[0]["reentry"]["target"]
+
+    def test_two_containers_stay_two_rows(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        for sid, run in (("A", "r1"), ("B", "r2")):
+            now = int(time.time() * 1000)
+            rec = SessionRecord(id=sid, kind=KIND_MAIN, agent="claude",
+                                source="claude-transcript", cwd=f"/workspace/{sid}",
+                                started=now - 1000, ended=now, outcome="tool-result-last")
+            upsert_session(conn, rec, machine="mac", project="x",
+                           archive_path=f"/a/{sid}.jsonl", source_size=1,
+                           source_mtime=1, parsed_offset=1, scad_run_id=run)
+        assert len(gather(conn, [], {"r1", "r2"})["live"]) == 2
+
 
 class TestStatus:
     def test_roster_proves_a_session_is_open(self, tmp_path):
@@ -387,6 +474,22 @@ class TestStatus:
         html = render(gather(conn, panes, set()))
         assert "claude --resume S1" in html
         assert "maybe-open" in html
+
+
+class TestTheOpenPaneIsMetadata:
+    """Where a session is open now is worth saying — but as a fact about the
+    row, not as the thing you copy."""
+
+    def _html(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        return render(gather(conn, [TmuxPane("main:1.0", "/repo", "2.1.219")], set()))
+
+    def test_the_row_names_the_pane(self, tmp_path):
+        assert "also open in main:1.0" in self._html(tmp_path)
+
+    def test_walking_there_is_still_one_click_away(self, tmp_path):
+        assert "select-pane -t main:1.0" in self._html(tmp_path)
 
 
 class TestLivePanes:

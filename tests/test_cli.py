@@ -1952,7 +1952,7 @@ class TestRunSessionSplit:
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "note", "notes")
+    TRACE_VERBS = ("ls", "show", "read", "resume", "note", "notes")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -2642,3 +2642,206 @@ class TestNotesReadIsProgressive:
         result = runner.invoke(main, ["notes", "read", "S1", "--idx", "99"])
         assert result.exit_code == 0
         assert "no note" in result.output.lower()
+
+
+class TestSessionResume:
+    """`scad session resume <id>` — back into a conversation, by id.
+
+    Off the index, so it covers every session on the machine rather than the
+    ones scad launched. A launch record only sharpens it.
+    """
+
+    def _seed(self, tmp_path, monkeypatch, session_id="S1", agent="claude",
+              cwd="/repo", kind=None):
+        import time as _time
+        from scad.index import connect
+        from scad.records import KIND_MAIN, SessionRecord
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: [])
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
+        now = int(_time.time() * 1000)
+        rec = SessionRecord(id=session_id, kind=kind or KIND_MAIN, agent=agent,
+                            source=f"{agent}-transcript", cwd=cwd,
+                            started=now - 1000, ended=now, outcome="awaiting-user")
+        conn = connect()
+        from scad.index import upsert_session
+        upsert_session(conn, rec, machine="mac", project="proj",
+                       archive_path=f"/arc/{session_id}.jsonl", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        conn.commit()
+
+    def _exec_spy(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+        return calls
+
+    def test_print_emits_the_command_and_runs_nothing(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        calls = self._exec_spy(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == "cd /repo && claude --resume S1"
+        assert calls == []
+
+    def test_a_codex_session_prints_codex_resume(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, session_id="C1", agent="codex")
+        self._exec_spy(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "C1", "--print"])
+        assert result.output.strip() == "cd /repo && codex resume C1"
+
+    def test_a_kimi_session_gets_its_prefix_back(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch, session_id="abc-123", agent="kimi")
+        self._exec_spy(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "abc-123", "--print"])
+        assert result.output.strip() == "cd /repo && kimi --session session_abc-123"
+
+    def test_a_closed_session_execs_the_agent_with_the_cwd_set(
+            self, runner, tmp_path, monkeypatch):
+        """`os.execvp`, not a shell: the caller lands in the session with no
+        wrapper process left behind holding a pipe open."""
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        self._seed(tmp_path, monkeypatch, cwd=str(repo))
+        calls = self._exec_spy(monkeypatch)
+        chdirs = []
+        monkeypatch.setattr("scad.cli.os.chdir", chdirs.append)
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == [["claude", "--resume", "S1"]]
+        assert chdirs == [str(repo)]
+
+    def test_a_cwd_that_is_gone_still_resumes(self, runner, tmp_path, monkeypatch):
+        """Recorded cwds outlive their directories; the conversation does not
+        stop existing because the folder was moved."""
+        self._seed(tmp_path, monkeypatch, cwd="/gone/away")
+        calls = self._exec_spy(monkeypatch)
+        monkeypatch.setattr("scad.cli.os.chdir", lambda p: None)
+        result = runner.invoke(main, ["session", "resume", "S1"])
+        assert result.exit_code == 0, result.output
+        assert calls == [["claude", "--resume", "S1"]]
+        assert "gone/away" in result.output
+
+    def test_an_unknown_session_says_so(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        self._exec_spy(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "NOPE"])
+        assert result.exit_code != 0
+        assert "NOPE" in result.output
+
+    def test_a_subagent_cannot_be_resumed(self, runner, tmp_path, monkeypatch):
+        from scad.records import KIND_SUBAGENT
+
+        self._seed(tmp_path, monkeypatch, session_id="S1:agent-0", kind=KIND_SUBAGENT)
+        self._exec_spy(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1:agent-0"])
+        assert result.exit_code != 0
+        assert "subagent" in result.output.lower()
+
+
+class TestResumeIsLiveFirst:
+    """Attach to a session that is open; never start a second process on it."""
+
+    def _record(self, tmp_path, monkeypatch, target="main:3.1", **kw):
+        from scad.launch import write_record
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
+        record = {"agent": "claude", "session_id": "S1", "cwd": "/repo",
+                  "tmux": target, "started": "2026-07-30T14:30:00Z",
+                  "resume": "cd /repo && claude --resume S1",
+                  "provenance": "minted"}
+        record.update(kw)
+        write_record(record)
+
+    def _panes(self, monkeypatch, *panes):
+        from scad.live import TmuxPane
+
+        monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: list(panes))
+
+    def test_a_live_recorded_pane_is_attached_to(self, runner, tmp_path, monkeypatch):
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code == 0, result.output
+        assert calls and calls[0][0] == "tmux"
+        assert "main:3.1" in calls[0]
+        assert "main:3.1" in result.output
+
+    def test_a_recorded_pane_that_is_gone_falls_back_to_resuming(
+            self, runner, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch)
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+        monkeypatch.setattr("scad.cli.os.chdir", lambda p: None)
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code == 0, result.output
+        assert calls == [["claude", "--resume", "S1"]]
+
+    def test_a_pane_that_now_holds_a_shell_is_not_attached_to(
+            self, runner, tmp_path, monkeypatch):
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "zsh"))
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+        monkeypatch.setattr("scad.cli.os.chdir", lambda p: None)
+
+        runner.invoke(main, ["session", "resume", "S1"])
+
+        assert calls == [["claude", "--resume", "S1"]]
+
+    def test_print_still_prints_the_resume_command_for_a_live_session(
+            self, runner, tmp_path, monkeypatch):
+        """--print is the viewer's clipboard payload, which is never a tmux
+        target — the pane is gone tomorrow and the command is not."""
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.output.strip() == "cd /repo && claude --resume S1"
+
+    def test_a_session_the_registry_proves_is_running_is_not_started_twice(
+            self, runner, tmp_path, monkeypatch):
+        """The registry names the session exactly but cannot name its pane, so
+        there is nowhere to attach — and resuming anyway would put a second
+        process on a live session id."""
+        from scad.live import ClaudeSession
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd="/repo")])
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code != 0
+        assert calls == []
+        assert "4242" in result.output
+
+    def test_a_launched_session_resumes_before_it_has_been_indexed(
+            self, runner, tmp_path, monkeypatch):
+        """Read-back is eventually consistent behind an index pass; getting
+        back into the session you just launched must not be."""
+        self._record(tmp_path, monkeypatch, agent="codex", cwd="/repo")
+        self._panes(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.exit_code == 0, result.output
+        assert result.output.strip() == "cd /repo && codex resume S1"

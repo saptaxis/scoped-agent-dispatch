@@ -371,3 +371,78 @@ class TestProcessStartTimes:
         from scad.live import _process_start_times
         with patch("scad.live.subprocess.run", side_effect=subprocess.TimeoutExpired("ps", 5)):
             assert _process_start_times([1]) == {}
+
+
+class TestAttachArgv:
+    """Walking to a pane, as argv — `scad session resume` execs it.
+
+    Every shape below was run against a scratch tmux server (`tmux -L
+    scadtest`) on 2026-07-30: the bare `;` argument separates tmux commands,
+    `select-window` then `select-pane` lands on the pane (verified with
+    `display-message -p`), and the attach form reaches attach — it fails only
+    with "open terminal failed: not a terminal", which is what a test harness
+    with no tty should get.
+    """
+
+    def test_from_outside_tmux_it_attaches_after_selecting(self):
+        from scad.live import attach_argv
+
+        assert attach_argv("main:3.1", inside=False) == [
+            "tmux", "select-window", "-t", "main:3", ";",
+            "select-pane", "-t", "main:3.1", ";",
+            "attach-session", "-t", "main",
+        ]
+
+    def test_from_inside_tmux_it_switches_rather_than_attaching(self):
+        """`attach-session` inside a client is refused ("sessions should be
+        nested with care"); switching the client is the same journey."""
+        from scad.live import attach_argv
+
+        assert attach_argv("main:3.1", inside=True) == [
+            "tmux", "switch-client", "-t", "main:3", ";",
+            "select-pane", "-t", "main:3.1",
+        ]
+
+    def test_the_pane_is_selected_explicitly(self):
+        """Same trap as `_goto`: select-window discards the pane component and
+        leaves you on whichever pane was last active in that window."""
+        from scad.live import attach_argv
+
+        assert "select-pane" in attach_argv("main:3.1", inside=True)
+
+    def test_a_target_with_no_pane_component_selects_the_window(self):
+        from scad.live import attach_argv
+
+        assert attach_argv("main:3", inside=False) == [
+            "tmux", "select-window", "-t", "main:3", ";",
+            "attach-session", "-t", "main",
+        ]
+
+    def test_tmux_in_the_environment_is_what_inside_means(self, monkeypatch):
+        from scad.live import attach_argv
+
+        monkeypatch.setenv("TMUX", "/private/tmp/tmux-501/default,123,0")
+        assert attach_argv("main:3.1")[1] == "switch-client"
+        monkeypatch.delenv("TMUX")
+        assert attach_argv("main:3.1")[1] == "select-window"
+
+
+class TestFindPane:
+    def test_the_pane_at_a_target_is_returned(self):
+        from scad.live import find_pane
+
+        panes = [TmuxPane("main:1.2", "/repo", "2.1.219"),
+                 TmuxPane("main:3.0", "/other", "codex")]
+        assert find_pane("main:3.0", panes).path == "/other"
+
+    def test_a_target_nothing_answers_to_is_none(self):
+        from scad.live import find_pane
+
+        assert find_pane("main:9.9", [TmuxPane("main:1.2", "/repo", "2.1.219")]) is None
+
+    def test_a_pane_that_is_no_longer_an_agent_does_not_count(self):
+        """A recorded target outlives the pane it named — tmux reuses indices,
+        so the pane at `main:3.1` tomorrow may be somebody's shell."""
+        from scad.live import find_pane
+
+        assert find_pane("main:1.2", [TmuxPane("main:1.2", "/repo", "zsh")]) is None

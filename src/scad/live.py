@@ -89,6 +89,47 @@ def agent_panes() -> list[TmuxPane]:
     return [p for p in tmux_panes() if is_agent_command(p.command)]
 
 
+def find_pane(target: str, panes: list[TmuxPane] | None = None) -> TmuxPane | None:
+    """The agent pane sitting at `target` right now, or None.
+
+    Both halves matter. A recorded target outlives the pane it named — tmux
+    hands out the same session:window.pane again as windows come and go — so
+    "the target exists" is not "the session is still there". Requiring an agent
+    in it is the cheapest check that keeps `scad session resume` from attaching
+    somebody to their own shell.
+    """
+    panes = tmux_panes() if panes is None else panes
+    for pane in panes:
+        if pane.target == target and is_agent_command(pane.command):
+            return pane
+    return None
+
+
+def attach_argv(target: str, *, inside: bool | None = None) -> list[str]:
+    """tmux argv that lands the caller on `target`, for `os.execvp`.
+
+    Two forms, because a client already inside tmux cannot attach again —
+    tmux refuses to nest — and one already outside has nothing to switch. The
+    bare `;` is its own argv element: with no shell in between there is nothing
+    to escape it from, unlike `_goto`'s pasteable string.
+
+    The pane is always selected explicitly. `select-window -t main:3.1`
+    discards the pane component and leaves you wherever that window was last.
+    """
+    inside = bool(os.environ.get("TMUX")) if inside is None else inside
+    session = target.split(":", 1)[0]
+    window, _, pane = target.rpartition(".")
+    if not window or not pane.isdigit():
+        window, pane = target, ""
+
+    argv = ["tmux", "switch-client" if inside else "select-window", "-t", window]
+    if pane:
+        argv += [";", "select-pane", "-t", target]
+    if not inside:
+        argv += [";", "attach-session", "-t", session]
+    return argv
+
+
 def _docker_env() -> dict | None:
     """Environment that points the docker CLI at the daemon scad actually uses.
 
