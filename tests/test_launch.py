@@ -388,7 +388,7 @@ class TestThePrimingTurn:
 # artefact the family under test resolves its id from. No model, no session.
 
 STUB = r'''
-import json, os, pathlib, sys, tty
+import json, os, pathlib, sys, time, tty
 
 d = pathlib.Path(os.environ["SCAD_STUB_DIR"])
 d.mkdir(parents=True, exist_ok=True)
@@ -410,13 +410,26 @@ def emit(text):
     sys.stdout.write("\033[2J\033[H" + text)   # a TUI redraws; so does this
     sys.stdout.flush()
 
-def read_line():
+def read_line(echo=False, deaf_until=0.0):
+    """Read a line, optionally echoing it and ignoring an early submit.
+
+    `deaf_until` models what kimi actually does: a pasted prompt is ingested
+    asynchronously, and a newline arriving before ingestion finishes is
+    swallowed. The launcher must therefore wait for the text to appear on
+    screen before pressing Enter, not fire both in the same breath.
+    """
     buf = ""
     while True:
         ch = sys.stdin.read(1)
-        if ch in ("\r", "\n", ""):
+        if ch == "":
+            return buf
+        if ch in ("\r", "\n"):
+            if time.monotonic() < deaf_until:
+                continue                      # too early — swallowed, as kimi does
             return buf
         buf += ch
+        if echo:
+            emit("composer\n> " + buf)
 
 for step in json.loads((d / "script.json").read_text()):
     if "print" in step:
@@ -424,7 +437,8 @@ for step in json.loads((d / "script.json").read_text()):
     if step.get("read") == "key":
         note(sys.stdin.read(1))
     elif step.get("read") == "line":
-        note(read_line())
+        note(read_line(echo=step.get("echo", False),
+                       deaf_until=time.monotonic() + step.get("deaf", 0.0)))
     if "then" in step:
         emit(step["then"])
     for w in step.get("write", []):
@@ -547,6 +561,30 @@ class TestLaunching:
 
         assert self._wait_for(stub / "keys.json")
         assert json.loads((stub / "keys.json").read_text()) == ["do the thing"]
+
+    def test_a_tui_that_ingests_slowly_still_gets_its_turn(self, tmp_path):
+        """Regression, found by launching kimi for real on 2026-07-30.
+
+        The pane sat at `context: 0% (0/256k)` with the prompt still in the
+        composer: the text had landed and the Enter had been swallowed. kimi
+        ingests a pasted prompt asynchronously and drops a newline that arrives
+        mid-ingest, so typing and submitting in the same breath loses the
+        turn — silently, because the launch itself succeeds. kimi's id does not
+        depend on the turn, so the record was written and the run looked clean.
+
+        The stub reproduces exactly that: it echoes what it reads and is deaf
+        to Enter for the first 600ms. Nothing the suite had could catch this —
+        every other stub reads stdin directly, so no amount of stub testing
+        exercised a *rendering* race.
+        """
+        from scad.launch import launch
+
+        binary, stub = self._stub(tmp_path, [
+            {"print": CLAUDE_READY, "read": "line", "echo": True, "deaf": 0.6}])
+        launch("claude", tmp_path, binary=binary, prompt="port the parser")
+
+        assert self._wait_for(stub / "keys.json")
+        assert json.loads((stub / "keys.json").read_text()) == ["port the parser"]
 
     def test_with_no_prompt_nothing_is_typed_at_all(self, tmp_path):
         """scad sends the first turn and then the session belongs to the human.

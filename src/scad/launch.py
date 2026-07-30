@@ -138,6 +138,28 @@ POLL_INTERVAL = 0.2
 KIMI_DEADLINE = 15.0
 START_DEADLINE = 20.0     # TUI up and past any gate
 ROLLOUT_DEADLINE = 30.0   # codex writing the rollout its first turn produces
+# Delivering the first turn. The text is waited for on screen, the TUI is given
+# a per-family settle (below), and the Enter is repeated as a backstop. An extra
+# press is an empty submit, which every TUI ignores; a missed one costs the turn.
+ECHO_DEADLINE = 5.0
+SUBMIT_TRIES = 3
+SUBMIT_RETRY_INTERVAL = 0.4
+_ECHO_PROBE = 40          # enough of the text to identify it on screen
+
+# How long to let a TUI settle between the paste and the Enter, per family.
+# Measured 2026-07-30 by isolating the paste from the submit: kimi took the
+# text out of its composer and *displayed it as sent* while never dispatching
+# it, for every wait under a second. A single Enter 8s after the paste
+# dispatched immediately — so the composer clearing is NOT proof the turn ran,
+# and kimi needs a settle an order of magnitude longer than the others.
+SUBMIT_SETTLE = {"kimi": 8.0}
+SUBMIT_SETTLE_DEFAULT = 0.5
+
+# Proof that a turn actually ran, per family — NOT that the composer cleared,
+# which kimi does while discarding the turn. Only kimi is checked: claude and
+# codex were verified dispatching reliably on 2026-07-30, and kimi was not.
+DISPATCH_PROOF = {"kimi": re.compile(r"context:\s*[1-9]")}
+DISPATCH_DEADLINE = 25.0
 
 
 class LaunchError(Exception):
@@ -442,10 +464,67 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _first_turn(target: str, text: str) -> None:
-    """Deliver one turn: type it, then submit it. Two calls, always."""
+def _first_turn(target: str, text: str, agent: str = "") -> None:
+    """Deliver one turn: type it, let the TUI settle, then submit it.
+
+    The settle is the whole point, and it is per-family. kimi ingests a pasted
+    prompt asynchronously and, until it has finished, an Enter does not submit
+    — it takes the text out of the composer and **renders it as sent while
+    never dispatching it**. Observed 2026-07-30: `context: 0% (0/256k)` for
+    minutes with the turn displayed above the composer, and further Enters
+    changing nothing. Isolating paste from submit showed a single Enter 8s
+    later dispatches immediately.
+
+    Two consequences worth stating because both cost time to learn:
+
+    - **A cleared composer is not proof the turn ran.** The obvious check is
+      the wrong one; only the family's own progress signal is real.
+    - **The launch still reports success**, since kimi's id comes from its
+      index line and does not depend on the turn. A dropped prompt is
+      therefore silent, which is what makes the settle worth paying for.
+
+    Runs only after READY, never at a gate — a stray Enter there would answer
+    the update prompt's `curl | sh` default.
+    """
     send_text(target, text)
-    submit(target)
+    # The echo proves the paste was ingested; it does not prove the TUI is
+    # ready to act on Enter. Both waits are needed, for different reasons.
+    probe = text.strip()[:_ECHO_PROBE]
+    _wait(lambda: probe and probe in capture_pane(target), ECHO_DEADLINE)
+    time.sleep(SUBMIT_SETTLE.get(agent, SUBMIT_SETTLE_DEFAULT))
+
+    for attempt in range(SUBMIT_TRIES):
+        submit(target)
+        if attempt + 1 == SUBMIT_TRIES:
+            return
+        time.sleep(SUBMIT_RETRY_INTERVAL)
+        if probe and probe not in capture_pane(target):
+            return          # composer cleared — weak, but worth exiting on
+
+
+def _turn_undispatched(target: str, agent: str) -> str | None:
+    """None if the turn demonstrably ran; a description of the problem if not.
+
+    Exists because kimi will accept a pasted prompt, clear its composer, render
+    the text as a sent turn, and then **not run it** — leaving a session that
+    looks correct in every way scad can otherwise see. Measured 2026-07-30: the
+    same keystrokes dispatched when issued by hand into a pane and did not when
+    issued by the launcher, and that difference is still unexplained.
+
+    Until it is understood, a launch that cannot prove the turn ran says so.
+    A wrong success is worse than an honest warning: the session is real and
+    resumable either way, and the only thing at stake is whether the human
+    knows their first instruction is still sitting there unrun.
+    """
+    proof = DISPATCH_PROOF.get(agent)
+    if proof is None:
+        return None
+    if _wait(lambda: bool(proof.search(capture_pane(target))), DISPATCH_DEADLINE):
+        return None
+    return (f"{agent} accepted the prompt but showed no sign of running it "
+            f"within {DISPATCH_DEADLINE:.0f}s. The session is real and "
+            f"resumable; the first turn may need submitting by hand — attach "
+            f"to the pane and press Enter.")
 
 
 def _resolve_kimi(target, cwd, since, prompt, say) -> tuple:
@@ -456,10 +535,14 @@ def _resolve_kimi(target, cwd, since, prompt, say) -> tuple:
     candidates = found or []
 
     if len(candidates) == 1:
+        problem = None
         if prompt:
             settle_pane(target)
-            _first_turn(target, prompt)
-        return candidates[0], TUI_NATIVE, None, {}
+            _first_turn(target, prompt, "kimi")
+            problem = _turn_undispatched(target, "kimi")
+            if problem:
+                say(problem)
+        return candidates[0], TUI_NATIVE, problem, {}
 
     if not candidates:
         return None, UNRESOLVED, (
@@ -489,7 +572,7 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
             f"key was pressed. The pane is showing:\n{text.strip()}"), {}
 
     turn = prompt or PRIMING_PROMPT
-    _first_turn(target, turn)
+    _first_turn(target, turn, "codex")
     say("waiting for the rollout the first turn creates")
     new = _wait(lambda: rollout_ids() - before, ROLLOUT_DEADLINE)
     new = sorted(new or ())
