@@ -2103,6 +2103,81 @@ def session_notes_cmd(session_id, agent, as_json):
 
 
 @main.group()
+def notes():
+    """Find and read notes — how a fresh session picks up where one left off.
+
+    Deliberately two verbs. A session writes a note when it stops; the next one
+    runs `notes ls --project <p>` to find it and `notes read <session-id>` to
+    read it. That replaces a handoff document with something written by the
+    same command every time, into a store that is already indexed and
+    searchable, rather than a file whose name and location must be remembered.
+    """
+    pass
+
+
+@notes.command("ls")
+@click.option("--project", "project_name", default=None,
+              help="Only notes from sessions in this project.")
+@click.option("--session", "session_id", default=None, help="Only this session's notes.")
+@click.option("--limit", default=20, help="How many, newest first.")
+@click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
+def notes_ls(project_name, session_id, limit, as_json):
+    """List notes, newest first.
+
+    Metadata only — the body is not in the index at all, so this can say what
+    exists and never what it says. `notes read` is the second half.
+    """
+    conn = index_connect()
+    where, params = [], []
+    if project_name:
+        where.append("s.project = ?")
+        params.append(project_name)
+    if session_id:
+        where.append("n.session_id = ?")
+        params.append(session_id)
+    clause = f"WHERE {' AND '.join(where)}" if where else ""
+    rows = [dict(r) for r in conn.execute(
+        "SELECT n.session_id, n.idx, n.ts, n.topic, n.relation, n.title, n.tags, "
+        "       s.project, s.name, s.agent "
+        "FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"{clause} ORDER BY n.ts DESC LIMIT ?", (*params, limit))]
+
+    if as_json:
+        click.echo(json.dumps(rows, ensure_ascii=False, default=str))
+        return
+    if not rows:
+        scope = f" for project '{project_name}'" if project_name else ""
+        click.echo(f"[scad] No notes{scope}.")
+        return
+
+    for r in rows:
+        # `ts` is epoch MILLISECONDS here, not the ISO string _relative_time
+        # takes — the notes table stores what the CLI stamped, not what a
+        # transcript recorded.
+        when = (datetime.fromtimestamp(r["ts"] / 1000).strftime("%m-%d %H:%M")
+                if r.get("ts") else "?")
+        # The session id leads because it is the argument to the next command.
+        click.echo(f'{r["session_id"]}  [{r["idx"]}]  {when:>14}  '
+                   f'{(r.get("project") or "-"):22}  {(r.get("topic") or "-"):20}  '
+                   f'{r.get("title") or ""}')
+    click.echo(f"\n[scad] {len(rows)} note(s). Read one: scad notes read <session-id>")
+
+
+@notes.command("read")
+@click.argument("session_id")
+@click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
+@click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
+@click.pass_context
+def notes_read(ctx, session_id, agent, as_json):
+    """Print one session's notes in full.
+
+    Same reader as `scad session notes` — the FILE, not the index. The index
+    stores no body text, so the file is the only place the narrative exists.
+    """
+    ctx.invoke(session_notes_cmd, session_id=session_id, agent=agent, as_json=as_json)
+
+
+@main.group()
 def project():
     """Query sessions by resolved project."""
     pass

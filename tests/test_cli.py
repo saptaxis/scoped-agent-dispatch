@@ -2534,3 +2534,67 @@ class TestProjectShow:
         result = runner.invoke(main, ["project", "show", "alpha"])
         assert result.exit_code != 0
         assert "alpha" in result.output
+
+
+class TestNotesForHandoff:
+    """`scad notes` — the minimum a fresh session needs to pick up work.
+
+    This exists to replace the handoff document. A note is written at the end of
+    a session; the next session finds it and reads it. Two verbs only: find
+    which notes exist for a project, and read one in full. Anything more is the
+    browse CLI, which is separately backlogged.
+    """
+
+    def _index(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        for sid, proj, name, ended in (
+            ("S1", "scad", "jul29-cli", 100),
+            ("S2", "other", None, 90),
+        ):
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, "
+                "project, name, ended) VALUES (?,?,?,?,?,?,?,?,?)",
+                (sid, "main", "claude", "m", "full", "claude-transcript", proj, name, ended))
+        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+                     "VALUES ('S1',0,200,'registry','What the registry solved','/n')")
+        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+                     "VALUES ('S2',0,150,'other-thing','Unrelated','/n')")
+        conn.commit()
+        conn.close()
+
+    def test_ls_scoped_to_a_project_shows_only_that_project(self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--project", "scad"])
+        assert result.exit_code == 0
+        assert "What the registry solved" in result.output
+        assert "Unrelated" not in result.output
+
+    def test_ls_gives_the_session_id_to_read_with(self, runner, tmp_path, monkeypatch):
+        # The listing is only useful if it hands over the key to the next command.
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--project", "scad"])
+        assert "S1" in result.output
+
+    def test_ls_json_is_machine_readable(self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--json"])
+        rows = json.loads(result.output)
+        assert {r["session_id"] for r in rows} == {"S1", "S2"}
+        assert rows[0]["ts"] >= rows[-1]["ts"]      # newest first
+
+    def test_ls_says_so_when_a_project_has_none(self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--project", "nothing-here"])
+        assert result.exit_code == 0
+        assert "No notes" in result.output
+
+    def test_read_prints_the_full_record(self, runner, tmp_path, monkeypatch):
+        """Reads the FILE, not the index — the index holds no body text at all."""
+        self._index(tmp_path, monkeypatch)
+        from scad.notes import append_note
+        append_note({"topic": "registry", "title": "What the registry solved",
+                     "text": "THE FULL BODY GOES HERE"}, session_id="S1", agent="claude")
+        result = runner.invoke(main, ["notes", "read", "S1"])
+        assert "THE FULL BODY GOES HERE" in result.output
