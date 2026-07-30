@@ -357,8 +357,14 @@ def project_tabs(rows: list[dict], waiting: list[dict]) -> list[dict]:
         if not key:
             continue
         tab = tabs.setdefault(key, {"project": key, "sessions": 0, "waiting": 0,
-                                    "last_activity": 0})
+                                    "notes": 0, "last_activity": 0})
         tab["sessions"] += 1
+        # Notes per project, so the strip answers a third question: where has
+        # anything been *written down*. The authored tier is the only one that
+        # cannot be re-derived, and it is invisible from a session count — a
+        # project with 200 sessions and no notes looks identical to one with
+        # 200 sessions and twenty, which is exactly the difference worth seeing.
+        tab["notes"] += row.get("n_notes") or 0
         tab["last_activity"] = max(tab["last_activity"], row.get("ended") or 0)
     for key, tab in tabs.items():
         tab["waiting"] = waits.get(key, 0)
@@ -487,11 +493,32 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "ORDER BY n.ts DESC"
     ).fetchall()]
 
+    # Notes belong ON the row, not only in their own section. A session with
+    # three notes rendered identically to one with none, so the only way to find
+    # a note was to scroll elsewhere and match session ids by eye. Notes are the
+    # authored tier — the one thing here that can never be re-derived — and a
+    # tier you cannot see from the main view is one you stop writing to.
+    # Counted from the notes already loaded above rather than re-queried: same
+    # numbers by construction, so the row and the section cannot disagree.
+    note_counts: dict[str, int] = {}
+    for note in notes:
+        sid = note.get("session_id")
+        if sid:
+            note_counts[sid] = note_counts.get(sid, 0) + 1
+    # Built here rather than inline in the return so it can be counted too — a
+    # running session is the likeliest one to have just been written about.
+    open_now = open_now_rows(sessions, all_rows, panes, running)
+    for collection in (waiting, all_rows, open_now):
+        for row in collection:
+            # 0, never None: the renderer should be able to test a number, and
+            # "no notes" is a fact worth stating rather than absent data.
+            row["n_notes"] = note_counts.get(row.get("id"), 0)
+
     pane_rows = live_pane_rows(conn, panes)
     at_hand, closed_waiting = split_waiting(waiting, cwds)
 
     return {
-        "open_now": open_now_rows(sessions, all_rows, panes, running),
+        "open_now": open_now,
         "tabs": project_tabs(all_rows, waiting),
         "waiting": waiting,
         "waiting_at_hand": at_hand,
@@ -562,6 +589,9 @@ _PAGE = """<!doctype html>
  /* The registry's own status for a session proven to be running. */
  .busy {{ color: var(--open); background: var(--open-bg); }}
  .waiting {{ color: var(--maybe); background: var(--maybe-bg); }}
+ .nn {{ margin-left: .3rem; padding: 0 .3rem; border-radius: 6px;
+        background: var(--note-bg, #e8e2ff); color: var(--note, #5b46b8);
+        font-size: .7rem; font-weight: 600; }}
  .idle {{ color: var(--shut); background: var(--shut-bg); }}
  .ag {{ font-size: .72rem; font-weight: 600; }}
  .ag.claude {{ color: var(--claude); }}
@@ -879,6 +909,18 @@ def _title_meta(row: dict) -> str:
     return f' · {_clip(title, 70)}' if title else ""
 
 
+def _notes_meta(row: dict) -> str:
+    """`· 2 notes` when a session has any, nothing when it has none.
+
+    Silent at zero on purpose: most sessions have no notes, and "0 notes" on
+    every row would be noise that trains the eye to skip the very place the
+    count matters. A note is the authored tier — worth marking where it exists,
+    not worth announcing where it does not.
+    """
+    n = row.get("n_notes") or 0
+    return f' · {n} note{"" if n == 1 else "s"}' if n else ""
+
+
 def _card(head: str, meta: str, rows: list[str]) -> str:
     return (f'<div class="card"><div class="head"><b>{head}</b>'
             f'<span class="meta">{meta}</span></div>{"".join(rows)}</div>')
@@ -900,17 +942,31 @@ def _tabs_html(tabs: list[dict], n_all: int, n_waiting: int) -> str:
     reason to click one. The totals ride along in the tooltip.
     """
     e = _html.escape
+    n_notes_all = sum(t.get("notes") or 0 for t in tabs)
     out = [f'<button class="tab on{" hot" if n_waiting else ""}" data-tab="" '
-           f'title="{n_all} sessions · {n_waiting} waiting">All'
-           f'<span class="n">{n_waiting}</span></button>']
+           f'title="{n_all} sessions · {n_waiting} waiting · {n_notes_all} notes">All'
+           f'<span class="n">{n_waiting}</span>'
+           f'{_note_badge(n_notes_all)}</button>']
     for tab in tabs:
         name = e(tab["project"])
         out.append(
             f'<button class="tab{" hot" if tab["waiting"] else ""}" data-tab="{name}" '
             f'title="{tab["sessions"]} sessions · {tab["waiting"]} waiting · '
-            f'{_ago(tab["last_activity"])}">{name}'
-            f'<span class="n">{tab["waiting"]}</span></button>')
+            f'{tab.get("notes") or 0} notes · {_ago(tab["last_activity"])}">{name}'
+            f'<span class="n">{tab["waiting"]}</span>'
+            f'{_note_badge(tab.get("notes") or 0)}</button>')
     return "".join(out)
+
+
+def _note_badge(n: int) -> str:
+    """A second, quieter number on a tab: how much has been written down here.
+
+    Separate from the waiting count rather than folded into it, because they
+    pull in opposite directions — waiting is work arriving, notes are work
+    understood. Silent at zero, which is the common case and would otherwise
+    put a `0` on every tab and teach the eye to ignore the position entirely.
+    """
+    return f'<span class="nn" title="{n} note{"" if n == 1 else "s"}">{n}</span>' if n else ""
 
 
 def _open_now_html(rows: list[dict]) -> str:
@@ -933,7 +989,7 @@ def _open_now_html(rows: list[dict]) -> str:
             # Started too recently to have been archived. Say so rather than
             # showing zeros that look like a session which did nothing.
             bits += [_clip(r.get("cwd") or "", 60), "not indexed yet"]
-        meta = " · ".join(b for b in bits if b) + _title_meta(r)
+        meta = " · ".join(b for b in bits if b) + _notes_meta(r) + _title_meta(r)
 
         extra = ""
         if r.get("waiting_for"):

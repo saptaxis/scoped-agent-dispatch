@@ -1103,3 +1103,47 @@ class TestTheEmbeddedScriptParses:
         result = subprocess.run([node, "--check", str(path)],
                                 capture_output=True, text=True)
         assert result.returncode == 0, result.stderr
+
+
+class TestNotesAreVisibleOnTheRow:
+    """A session with notes must say so where you are already looking.
+
+    Notes are the authored tier — the one thing here that can never be
+    re-derived — and until now the page listed them in their own section only.
+    A session with three notes rendered identically to one with none, so the
+    only way to discover a note was to scroll elsewhere and match session ids
+    by eye. The tier you cannot see is the tier you stop writing to.
+    """
+
+    def _conn(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        conn.execute(
+            "INSERT INTO sessions (id, kind, agent, machine, grade, source, cwd, "
+            "project, ended, n_turns) VALUES "
+            "('S1','main','claude','m','full','claude-transcript','/r','p',9,3)")
+        conn.execute(
+            "INSERT INTO sessions (id, kind, agent, machine, grade, source, cwd, "
+            "project, ended, n_turns) VALUES "
+            "('S2','main','claude','m','full','claude-transcript','/r','p',8,3)")
+        for i in range(2):
+            conn.execute(
+                "INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+                "VALUES ('S1', ?, 1, 't', 'ti', '/n.jsonl')", (i,))
+        conn.commit()
+        return conn
+
+    def test_a_row_carries_its_note_count(self, tmp_path):
+        data = gather(self._conn(tmp_path), [], set(), live_sessions=[])
+        by_id = {r["id"]: r for r in data["all"]}
+        assert by_id["S1"]["n_notes"] == 2
+
+    def test_a_session_without_notes_reports_zero_not_none(self, tmp_path):
+        # Zero must be a number so the renderer can test it without guarding
+        # for None, and so "no notes" is a stated fact rather than missing data.
+        data = gather(self._conn(tmp_path), [], set(), live_sessions=[])
+        by_id = {r["id"]: r for r in data["all"]}
+        assert by_id["S2"]["n_notes"] == 0
+
+    def test_the_count_reaches_the_rendered_page(self, tmp_path):
+        html = render(gather(self._conn(tmp_path), [], set(), live_sessions=[]))
+        assert "2 notes" in html
