@@ -90,7 +90,13 @@ from scad.index import (
     session_row,
     session_turns,
 )
-from scad.launch import read_record
+from scad.launch import (
+    AGENTS,
+    LaunchError,
+    launch as launch_agent,
+    read_record,
+    record_path,
+)
 from scad.live import (
     attach_argv,
     claude_live_sessions,
@@ -2060,6 +2066,72 @@ def _exec(argv: list[str]) -> None:
     in the agent, with no scad process left behind holding its stdio open.
     """
     os.execvp(argv[0], argv)
+
+
+@session.command("launch")
+@click.option("--agent", required=True, type=click.Choice(AGENTS),
+              help="Which family to launch.")
+@click.option("--cwd", default=None, type=click.Path(),
+              help="Where the session works (default: here).")
+@click.option("--prompt", default=None, help="The session's first turn.")
+@click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
+def session_launch(agent, cwd, prompt, attach):
+    """Start an interactive agent in tmux, and record which session it became.
+
+    Detached: it prints the resume command and the pane, and leaves your
+    terminal alone. `--attach` takes you in at the end.
+
+    tmux is required, and not as a convenience — it supplies the pty that keeps
+    a Claude session out of the `sdk-cli` bucket its own /resume picker hides.
+
+    \b
+    The id comes from a different place in each family:
+      claude   minted here and passed in with --session-id
+      kimi     read back from its own index line, confirmed by workDir
+      codex    read off the rollout that the first turn creates
+    """
+    target_cwd = Path(cwd) if cwd else Path.cwd()
+    project, _res = project_resolution(target_cwd)
+    if project == UNFILED:
+        # Not a block: the session is valid, it will just be hard to find by
+        # project later. `scad where` explains it; the marker is the fix.
+        click.echo(f"[scad] warning: {target_cwd} is {UNFILED} — this session "
+                   f"will not group under any project.")
+        click.echo(f"[scad] fix: touch "
+                   f"{shlex.quote(str(target_cwd / '.scad-project'))}  "
+                   f"(then: scad where)")
+    else:
+        click.echo(f"[scad] project: {project}")
+
+    try:
+        record = launch_agent(agent, target_cwd, prompt=prompt,
+                              say=lambda msg: click.echo(f"[scad] {msg}"))
+    except LaunchError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    pane = record.get("tmux") or ""
+    click.echo(f"[scad] pane: {pane}")
+    if record.get("session_id"):
+        click.echo(f"[scad] session: {record['session_id']}  "
+                   f"({record.get('provenance')})")
+        click.echo(f"[scad] resume: {record['resume']}")
+        click.echo(f"[scad] record: {record_path(record['session_id'])}")
+        if attach:
+            _exec(attach_argv(pane))
+        return
+
+    # Launch succeeded, id unknown. Say both halves: the pane is live and the
+    # session is real, and there is no id to read it back by yet.
+    click.echo(f"[scad] the pane is live and the session is real, but scad "
+               f"could not resolve its id.")
+    click.echo(f"[scad] {record.get('problem') or 'no id was resolved.'}")
+    for candidate in record.get("candidates") or ():
+        click.echo(f"[scad]   candidate: {candidate}")
+    click.echo(f"[scad] go and look: {shlex.join(attach_argv(pane))}")
+    if attach:
+        _exec(attach_argv(pane))
+        return
+    raise SystemExit(1)
 
 
 @session.command("resume")

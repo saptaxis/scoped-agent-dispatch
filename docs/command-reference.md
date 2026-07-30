@@ -86,7 +86,28 @@ Use these when you want step-by-step control instead of a composite.
 | `run stop <run-id>` | stop the container, **preserve** clones/state | Pause a session; restartable state stays on disk. `--all [--yes]` for every running session. |
 | `run clean <run-id>` | **destroy** container + clones + run data | Point of no return. Fetch first (`harvest`) or use `finish` which fetches automatically. `--all [--yes] [--force]`. |
 
-> `scad run ls` (top-level) is the fleet view — every running session with jobs nested. `scad session` is now the trace index only (`ls`, `show`, `read`).
+> `scad run ls` (top-level) is the fleet view — every running session with jobs nested. `scad session` means agent sessions themselves — the traces, plus launching one and getting back into it.
+
+---
+
+## `scad session launch` / `resume` — interactive agents on the host
+
+No containers here. These start an agent in a **tmux pane on this machine** and make the conversation findable again afterwards.
+
+| Command | Does | When / conditions |
+|---|---|---|
+| `session launch --agent claude\|codex\|kimi` | start the agent in tmux, resolve its session id, write a launch record | Handing a piece of work to an agent — possibly a different family from the one you are talking to. `--cwd` (default: here), `--prompt` for the first turn, `--attach` to go in at the end. Detached otherwise. |
+| `session resume <id>` | attach if the session is open, otherwise `exec` the agent with the cwd set | Getting back into any indexed session, launched by scad or not. `--print` emits the command instead — this is what the viewer copies. |
+
+Notes that matter:
+
+- **tmux is required and there is no fallback.** It supplies the pty that keeps a Claude session stamped `entrypoint: cli`; without one it is stamped `sdk-cli` and Claude's own `/resume` picker hides it. A degraded launch would look fine and be wrong, so it refuses.
+- **The id comes from a different place per family** — minted for claude, read back off its own index line for kimi, read off the rollout the first turn creates for codex. Codex is therefore the only one that must be sent a turn to exist at all; with no `--prompt` that turn is a fixed string that tells it to do nothing.
+- **Codex's update and trust gates are answered by label, never by Enter.** The update gate's highlighted default runs `curl … | sh`. A gate scad does not recognise is reported, not answered.
+- **An unresolved id is not a failed launch.** The pane is live and the session is real; the record says `provenance: unresolved` and the command exits non-zero so nothing downstream treats a missing id as a session.
+- **`project` is checked before launching.** An `unfiled` target warns and names the `.scad-project` fix, and launches anyway.
+
+Verified by hand rather than in CI — see [`interactive-launch-verification.md`](interactive-launch-verification.md).
 
 ---
 

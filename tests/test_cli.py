@@ -1952,7 +1952,7 @@ class TestRunSessionSplit:
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "resume", "note", "notes")
+    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "note", "notes")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -2948,3 +2948,173 @@ class TestAttributionSkill:
 
     def test_it_has_no_path_that_breaks_once_installed(self):
         assert "../" not in self.text
+
+
+class TestSessionLaunch:
+    """`scad session launch` — hand work to an agent, and be able to find the
+    conversation afterwards.
+
+    The launcher itself is exercised against a stub in test_launch.py. What is
+    checked here is the command around it: what it says, what it refuses, and
+    that it never leaves the human without the two strings that matter.
+    """
+
+    RECORD = {"agent": "codex", "session_id": "CX1", "cwd": "/repo",
+              "tmux": "scad-cx-1430:0.0", "started": "2026-07-30T14:30:00Z",
+              "resume": "cd /repo && codex resume CX1", "provenance": "tui-native"}
+
+    def _fake(self, monkeypatch, record=None, **overrides):
+        calls = []
+
+        def fake_launch(agent, cwd, **kw):
+            calls.append({"agent": agent, "cwd": str(cwd), **kw})
+            return {**(record or self.RECORD), **overrides}
+
+        monkeypatch.setattr("scad.cli.launch_agent", fake_launch)
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+        return calls
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+    def test_it_hands_back_the_resume_command(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "cd /repo && codex resume CX1" in result.output
+
+    def test_it_names_the_pane_it_launched_into(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path)])
+        assert "scad-cx-1430:0.0" in result.output
+
+    def test_it_says_how_the_session_was_born(self, runner, tmp_path, monkeypatch):
+        """Provenance predicts whether the agent's own picker will show it, and
+        a human reading this should not have to re-derive that."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path)])
+        assert "tui-native" in result.output
+
+    def test_it_is_detached_by_default(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "codex",
+                             "--cwd", str(tmp_path)])
+        assert not any(isinstance(c, list) for c in calls)
+
+    def test_attach_takes_you_into_the_pane(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "codex",
+                             "--cwd", str(tmp_path), "--attach"])
+        argv = [c for c in calls if isinstance(c, list)]
+        assert argv and argv[0][0] == "tmux"
+        assert "scad-cx-1430:0.0" in argv[0]
+
+    def test_the_prompt_is_passed_through(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "codex",
+                             "--cwd", str(tmp_path), "--prompt", "port the parser"])
+        assert calls[0]["prompt"] == "port the parser"
+
+    def test_the_cwd_defaults_to_where_you_are(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        with runner.isolated_filesystem(temp_dir=tmp_path) as here:
+            runner.invoke(main, ["session", "launch", "--agent", "kimi"])
+            assert Path(calls[0]["cwd"]).resolve() == Path(here).resolve()
+
+    def test_only_the_three_families_are_accepted(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "pi",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code != 0
+
+    def test_a_refused_launch_says_why(self, runner, tmp_path, monkeypatch):
+        from scad.launch import LaunchError
+
+        self._home(tmp_path, monkeypatch)
+
+        def boom(*a, **k):
+            raise LaunchError("tmux is required and is not usable here.")
+
+        monkeypatch.setattr("scad.cli.launch_agent", boom)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "tmux" in result.output
+
+    def test_an_unresolved_id_is_not_reported_as_success(self, runner, tmp_path,
+                                                         monkeypatch):
+        """The pane is live and the session is real — only its id is unknown.
+        Both halves have to be said, and the exit code cannot claim a findable
+        session was produced."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch, session_id=None, provenance="unresolved",
+                   resume="", problem="kimi wrote no new index line")
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "kimi wrote no new index line" in result.output
+        assert "scad-cx-1430:0.0" in result.output          # the pane is still yours
+
+    def test_ambiguous_candidates_are_both_shown(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch, session_id=None, provenance="unresolved", resume="",
+                   problem="two new index lines", candidates=["aaa", "bbb"])
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(tmp_path)])
+        assert "aaa" in result.output and "bbb" in result.output
+
+
+class TestLaunchChecksAttribution:
+    """`project` is the retrieval join key, and a session launched into an
+    unfiled directory is one you will not find by project later."""
+
+    def _fake(self, monkeypatch):
+        monkeypatch.setattr("scad.cli.launch_agent",
+                            lambda agent, cwd, **kw: dict(TestSessionLaunch.RECORD))
+        monkeypatch.setattr("scad.cli._exec", lambda argv: None)
+
+    def test_an_unfiled_target_is_warned_about(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._fake(monkeypatch)
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(loose)])
+        assert "unfiled" in result.output
+        assert ".scad-project" in result.output
+
+    def test_the_warning_does_not_block_the_launch(self, runner, tmp_path, monkeypatch):
+        """The session is still valid; it will just be hard to find later."""
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._fake(monkeypatch)
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(loose)])
+        assert result.exit_code == 0, result.output
+        assert "codex resume CX1" in result.output
+
+    def test_a_filed_target_is_not_warned_about(self, runner, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        self._fake(monkeypatch)
+        repo = tmp_path / "myproj"
+        repo.mkdir()
+        sp.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(repo)])
+        assert "unfiled" not in result.output
+        assert "myproj" in result.output

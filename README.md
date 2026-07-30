@@ -208,6 +208,7 @@ scad session ls [--project X] [--kind K] ...       # list indexed sessions
 scad session ls --outcome awaiting-question        # what is explicitly asking you something
 scad session show <id>                             # one session's metadata + turn breakdown
 scad session read <id> [--kind text]               # print a session's turns
+scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--attach]
 scad session resume <id> [--print]                 # back into a session — attach if open, resume if closed
 scad search <query> [--kind thinking]              # full-text search across every turn
 scad project ls | scad project show <name>         # sessions grouped by resolved project
@@ -406,6 +407,43 @@ Live panes are matched by working directory, which is approximate — several pa
 share one. Only panes actually running an agent count, and where more than one matches
 every candidate is listed rather than one being guessed at. tmux and docker are queried
 at render time and degrade to empty if either is unavailable, so the page still renders.
+
+## Handing work to an agent, interactively
+
+```bash
+scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
+scad session resume <id>            # attach if it is open, resume if it is closed
+scad session resume <id> --print    # just the command
+```
+
+An interactive session's only output channel is its trace, so reading it back and
+going back into it both reduce to **knowing its session id** — and the three
+families expose that differently. Claude's is minted here and passed in with
+`--session-id`. kimi writes its own index line at TUI start, carrying the working
+directory, so the id is confirmed against a path scad chose rather than correlated
+by time. codex writes nothing until a turn happens, so a first turn is sent and the
+id read off the rollout it creates.
+
+Launching goes through tmux for all three, and that is not incidental: it supplies
+the pty that keeps a Claude session stamped `entrypoint: cli` rather than
+`sdk-cli`, which is what keeps it in Claude's own `/resume` picker. A non-pty
+launch looks fine and is wrong, so a missing tmux **refuses** instead of degrading.
+Codex's update and trust gates are read off the pane and answered by matching the
+option **label** — never by pressing Enter, whose default on the update gate runs
+`curl … | sh`.
+
+Every launch writes `~/.scad/launches/<session-id>.json` — agent, cwd, pane,
+resume command, and how the session was born, which is what predicts whether the
+agent's own picker will show it. A file, never the index: `reindex --rebuild`
+would destroy it. `scad session resume` reads it when it exists and falls back to
+the index when it does not, so resume works for every session on the machine
+rather than only the launched ones.
+
+Interactive read-back is **eventually consistent**: `scad session read <id>` shows
+turns after an index pass, where headless output is immediate.
+
+The launch routes are verified by hand, not in CI — every run costs a model call.
+The checklist is [`docs/interactive-launch-verification.md`](docs/interactive-launch-verification.md).
 
 ## Notes — what the agent chose to record
 
