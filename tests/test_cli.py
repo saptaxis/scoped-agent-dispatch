@@ -2598,3 +2598,47 @@ class TestNotesForHandoff:
                      "text": "THE FULL BODY GOES HERE"}, session_id="S1", agent="claude")
         result = runner.invoke(main, ["notes", "read", "S1"])
         assert "THE FULL BODY GOES HERE" in result.output
+
+
+class TestNotesReadIsProgressive:
+    """`notes read` must be able to fetch ONE note, not a session's whole history.
+
+    Recall is progressive: read the newest note, and backtrack only while the
+    metadata says the thread continues. Printing every note of a session defeats
+    that — the cost of catching up should scale with how much you actually need,
+    not with how long the session was.
+    """
+
+    def _store(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        from scad.notes import append_note
+        for i, (topic, body) in enumerate((
+            ("older", "OLDEST BODY"), ("middle", "MIDDLE BODY"), ("newest", "NEWEST BODY"))):
+            append_note({"topic": topic, "title": f"t{i}", "text": body},
+                        session_id="S1", agent="claude")
+
+    def test_last_reads_only_the_newest(self, runner, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "read", "S1", "--last"])
+        assert "NEWEST BODY" in result.output
+        assert "MIDDLE BODY" not in result.output
+        assert "OLDEST BODY" not in result.output
+
+    def test_idx_reads_exactly_that_one(self, runner, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "read", "S1", "--idx", "1"])
+        assert "MIDDLE BODY" in result.output
+        assert "NEWEST BODY" not in result.output
+
+    def test_no_flag_still_reads_everything(self, runner, tmp_path, monkeypatch):
+        # The whole-session read stays the default; progressive is opt-in.
+        self._store(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "read", "S1"])
+        for body in ("OLDEST BODY", "MIDDLE BODY", "NEWEST BODY"):
+            assert body in result.output
+
+    def test_an_idx_that_does_not_exist_says_so(self, runner, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "read", "S1", "--idx", "99"])
+        assert result.exit_code == 0
+        assert "no note" in result.output.lower()

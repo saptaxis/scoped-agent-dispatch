@@ -2165,16 +2165,58 @@ def notes_ls(project_name, session_id, limit, as_json):
 
 @notes.command("read")
 @click.argument("session_id")
+@click.option("--last", is_flag=True, help="Only the newest note.")
+@click.option("--idx", "idx", type=int, default=None, help="Only this note's index.")
 @click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
 @click.pass_context
-def notes_read(ctx, session_id, agent, as_json):
-    """Print one session's notes in full.
+def notes_read(ctx, session_id, last, idx, agent, as_json):
+    """Print a session's notes — all of them, or one.
 
-    Same reader as `scad session notes` — the FILE, not the index. The index
-    stores no body text, so the file is the only place the narrative exists.
+    Reads the FILE, not the index: the index stores no body text, so the file is
+    the only place the narrative exists.
+
+    `--last` / `--idx` are what make recall progressive. Catching up should cost
+    what you actually need, not the whole length of the session that came
+    before — read the newest, and go back only while `notes ls` says the thread
+    continues.
     """
-    ctx.invoke(session_notes_cmd, session_id=session_id, agent=agent, as_json=as_json)
+    if not last and idx is None:
+        ctx.invoke(session_notes_cmd, session_id=session_id, agent=agent, as_json=as_json)
+        return
+
+    records = read_note_file(note_path(session_id, agent))
+    if not records:
+        click.echo(f"[scad] No notes for {session_id}.")
+        return
+
+    want = len(records) - 1 if last else idx
+    if not 0 <= want < len(records):
+        click.echo(f"[scad] There is no note [{want}] for {session_id} "
+                   f"— it has {len(records)} (0..{len(records) - 1}).")
+        return
+
+    record = records[want]
+    if as_json:
+        click.echo(json.dumps(record, ensure_ascii=False, default=str))
+        return
+
+    click.echo(f"[scad] {note_path(session_id, agent)}  [{want}] of {len(records)}")
+    head = f"[{want:>3}] {record.get('ts') or '?'}  {record.get('topic') or '?'}"
+    if record.get("relation"):
+        head += (f"  ({record['relation']}"
+                 + (f" <- {record['parent']}" if record.get("parent") else "") + ")")
+    click.echo(head)
+    click.echo(f"      {record.get('title') or ''}")
+    if record.get("text"):
+        click.echo()
+        for line in str(record["text"]).splitlines():
+            click.echo(f"      {line}")
+    for field in ("tags", "entities"):
+        if record.get(field):
+            click.echo(f"      {field}: {', '.join(str(v) for v in record[field])}")
+    if record.get("invalidation"):
+        click.echo(f"      invalidation: {record['invalidation']}")
 
 
 @main.group()
