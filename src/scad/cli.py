@@ -3,6 +3,7 @@
 import copy
 import json
 import os
+import shlex
 import subprocess
 import subprocess as _subprocess
 import sys
@@ -78,7 +79,7 @@ from scad.container import (
 )
 from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
 from scad.archive import archive_all, archive_root, archive_run, summarize
-from scad.project import resolve_project
+from scad.project import UNFILED, project_resolution, resolve_project
 from scad.index import (
     connect as index_connect,
     reindex as run_reindex,
@@ -308,12 +309,38 @@ def resolve(root, markers, git_root, ask, start, label, as_json):
 @main.command()
 @click.option("--start", default=None, type=click.Path(), help="Resolve from this directory instead of cwd.")
 def where(start):
-    """Announce the project scad resolves for a directory."""
+    """Announce the project scad resolves for a directory, and how.
+
+    An interactive session is indexed whatever launches it, so the only thing
+    that can silently go wrong is attribution — and `project` is the join key
+    everything else retrieves by. So this shows the evidence: which tier
+    answered, and what was tried before it.
+    """
     from pathlib import Path as _Path
 
     target = _Path(start) if start else _Path.cwd()
-    project = resolve_project(target)
+    project, res = project_resolution(target)
+
     click.echo(f"[scad] project: {project}  ({target})")
+    if res.tried:
+        click.echo(f"[scad] tried: {', '.join(res.tried)}")
+
+    if res.path is not None:
+        click.echo(f"[scad] matched by: {res.matched_by}  ({res.path})")
+        return
+
+    # Not a result. `unfiled` is the bucket every unattributed session on the
+    # machine shares, so a session filed there is findable only by id.
+    click.echo(f'[scad] nothing here marks a project — sessions in this directory '
+               f'are filed under "{UNFILED}", together with everything else that '
+               f'resolved to nothing.')
+    click.echo(f"[scad] fix: touch {shlex.quote(str(_Path(target) / '.scad-project'))}")
+    # The trap worth stating: `project` is a computed column and the incremental
+    # pass is mtime-based, so it never recomputes for a session whose trace has
+    # not changed. Regrouping 83 interior-visualization sessions needed the full
+    # rebuild.
+    click.echo("[scad] a marker files future sessions; for ones already indexed: "
+               "scad reindex --rebuild")
 
 
 @main.group()

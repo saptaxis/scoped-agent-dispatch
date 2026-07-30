@@ -11,7 +11,7 @@ redefining it means editing this file and running `scad reindex`, with no files 
 
 from pathlib import Path
 
-from scad.resolve import ResolveConfig, resolve
+from scad.resolve import UNRESOLVED, ResolveConfig, Resolution, resolve
 
 UNFILED = "unfiled"
 
@@ -52,16 +52,26 @@ def _project_from_config(cfg) -> str:
     return cfg.name or UNFILED
 
 
+def project_resolution(cwd) -> tuple[str, Resolution]:
+    """A directory's project key, with the evidence that produced it.
+
+    `project` is the retrieval join key, so a wrong one is worse than a missing
+    one — and the answer alone gives a human nothing to check. The engine
+    already returns `matched_by` and `tried`; this stops throwing them away.
+
+    Same rule as `resolve_project`, and it is the same code path, so what
+    `scad where` explains cannot drift from what the index recorded.
+    """
+    if cwd is None:
+        return UNFILED, Resolution(path=None, matched_by=UNRESOLVED)
+    res = resolve(SCAD_PROJECT, start=Path(cwd), interactive=False)
+    return (UNFILED if res.path is None else res.path.name), res
+
+
 def resolve_project(cwd, scad_run_id: str | None = None) -> str:
     """Resolve a recorded cwd to a project key. Never raises, never prompts."""
     if scad_run_id:
         cfg = _config_for_run(scad_run_id)
         return _project_from_config(cfg) if cfg is not None else UNFILED
 
-    if cwd is None:
-        return UNFILED
-
-    res = resolve(SCAD_PROJECT, start=Path(cwd), interactive=False)
-    if res.path is None:
-        return UNFILED
-    return res.path.name
+    return project_resolution(cwd)[0]

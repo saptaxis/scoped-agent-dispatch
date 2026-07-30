@@ -208,9 +208,10 @@ scad session ls [--project X] [--kind K] ...       # list indexed sessions
 scad session ls --outcome awaiting-question        # what is explicitly asking you something
 scad session show <id>                             # one session's metadata + turn breakdown
 scad session read <id> [--kind text]               # print a session's turns
+scad session resume <id> [--print]                 # back into a session — attach if open, resume if closed
 scad search <query> [--kind thinking]              # full-text search across every turn
 scad project ls | scad project show <name>         # sessions grouped by resolved project
-scad where                                         # which project scad resolves for a directory
+scad where                                         # which project a directory resolves to, and how
 scad view [--days N] [--no-open] [--refresh] [--output PATH]   # render the index to a page and open it
 
 # Notes — the authored tier
@@ -337,8 +338,16 @@ scad reindex          # incremental; --rebuild to start over
 scad session ls --project scad --kind main
 scad session show <id>
 scad project ls
-scad where            # which project scad resolves for this directory
+scad where            # which project this directory resolves to, and how
 ```
+
+`scad where` shows the evidence, not just the answer: which tier matched
+(`scad.yml` → `.scad-project` → git root), what was tried before it, and the
+root it landed on. When nothing matches it says so plainly — `unfiled` is a
+shared bucket, not a result — and names the fix. A marker files *future*
+sessions; `project` is a computed column and the incremental pass is
+mtime-based, so re-filing what is already indexed needs `scad reindex
+--rebuild`. The `attribution` skill walks all of this from inside any session.
 
 Sessions include Claude main sessions, their subagents and workflow agents, codex
 rollouts, and container sessions from scad runs. Sessions known only to

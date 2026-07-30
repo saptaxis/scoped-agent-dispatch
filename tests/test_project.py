@@ -84,3 +84,49 @@ class TestContainerSessions:
     def test_unknown_run_is_unfiled(self):
         with patch("scad.project._config_for_run", return_value=None):
             assert resolve_project("/workspace/x", scad_run_id="ghost") == UNFILED
+
+
+class TestResolutionEvidence:
+    """`resolve_project` throws away `matched_by` and `tried`.
+
+    `project` is the retrieval join key, so a wrong one is worse than a missing
+    one — and a bare answer gives a human nothing to check it against.
+    """
+
+    def test_the_key_comes_with_the_tier_that_answered(self, tmp_path):
+        from scad.project import project_resolution
+
+        repo = git_repo(tmp_path / "myproj")
+        name, res = project_resolution(repo)
+        assert name == "myproj"
+        assert res.matched_by == "marker:.git"
+
+    def test_a_marker_says_which_marker(self, tmp_path):
+        from scad.project import project_resolution
+
+        (tmp_path / "scad.yml").write_text("name: x\n")
+        assert project_resolution(tmp_path)[1].matched_by == "marker:scad.yml"
+
+    def test_unfiled_carries_everything_that_was_tried(self, tmp_path):
+        from scad.project import project_resolution
+
+        loose = tmp_path / "just" / "files"
+        loose.mkdir(parents=True)
+        name, res = project_resolution(loose)
+        assert name == UNFILED
+        assert res.path is None
+        assert res.tried == ("marker:scad.yml", "marker:.scad-project", "marker:.git")
+
+    def test_a_cwd_that_is_not_a_directory_is_still_answered(self, tmp_path):
+        from scad.project import project_resolution
+
+        assert project_resolution(None)[0] == UNFILED
+        assert project_resolution(tmp_path / "gone")[0] == UNFILED
+
+    def test_resolve_project_and_the_detail_never_disagree(self, tmp_path):
+        """One rule, two callers: the indexer's answer and the one `scad where`
+        explains have to be the same answer."""
+        from scad.project import project_resolution
+
+        repo = git_repo(tmp_path / "same")
+        assert resolve_project(repo) == project_resolution(repo)[0]

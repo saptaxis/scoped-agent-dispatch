@@ -2845,3 +2845,106 @@ class TestResumeIsLiveFirst:
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
         assert result.exit_code == 0, result.output
         assert result.output.strip() == "cd /repo && codex resume S1"
+
+
+class TestWhereDiagnostics:
+    """`scad where` used to echo one line and discard the evidence.
+
+    An interactive session is indexed whatever launches it, so attribution is
+    the only thing that silently goes wrong — and `project` is the retrieval
+    join key. A human has to be able to see how the answer was reached.
+    """
+
+    def _repo(self, tmp_path):
+        import subprocess as sp
+
+        repo = tmp_path / "myproj"
+        repo.mkdir()
+        sp.run(["git", "init", "-q", str(repo)], check=True, capture_output=True)
+        return repo
+
+    def test_it_names_the_tier_that_answered(self, runner, tmp_path):
+        result = runner.invoke(main, ["where", "--start", str(self._repo(tmp_path))])
+        assert result.exit_code == 0, result.output
+        assert "myproj" in result.output
+        assert "marker:.git" in result.output
+
+    def test_it_lists_what_was_tried(self, runner, tmp_path):
+        result = runner.invoke(main, ["where", "--start", str(self._repo(tmp_path))])
+        assert "marker:scad.yml" in result.output
+        assert "marker:.scad-project" in result.output
+
+    def test_unfiled_is_stated_as_a_failure_not_as_an_answer(self, runner, tmp_path):
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        result = runner.invoke(main, ["where", "--start", str(loose)])
+        assert result.exit_code == 0, result.output
+        assert "unfiled" in result.output
+        assert "nothing here marks a project" in result.output
+
+    def test_unfiled_names_the_fix(self, runner, tmp_path):
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        result = runner.invoke(main, ["where", "--start", str(loose)])
+        assert ".scad-project" in result.output
+        assert str(loose) in result.output
+
+    def test_unfiled_says_a_marker_does_not_refile_the_past(self, runner, tmp_path):
+        """`project` is a computed column and the incremental pass is
+        mtime-based, so it never recomputes for unchanged sessions."""
+        loose = tmp_path / "loose"
+        loose.mkdir()
+        result = runner.invoke(main, ["where", "--start", str(loose)])
+        assert "reindex --rebuild" in result.output
+
+    def test_a_filed_directory_is_not_lectured_about_markers(self, runner, tmp_path):
+        result = runner.invoke(main, ["where", "--start", str(self._repo(tmp_path))])
+        assert "reindex --rebuild" not in result.output
+
+
+class TestAttributionSkill:
+    """A session is indexed whatever launches it; only its `project` can go
+    quietly wrong. The skill is how that gets checked from wherever you are."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+    DIR = ROOT / "skills" / "attribution"
+
+    @property
+    def text(self):
+        return (self.DIR / "SKILL.md").read_text()
+
+    def test_it_ships_as_a_skill_so_every_agent_gets_it(self):
+        """Skills install into ~/.agents/skills and ~/.claude/skills alike. A
+        Claude-only command would leave codex and kimi filing sessions blind."""
+        assert (self.DIR / "SKILL.md").exists()
+        assert re.search(r"^name:\s*attribution\s*$", self.text, re.M)
+
+    def test_it_asks_the_cli_rather_than_resolving_in_prose(self):
+        """The precedence lives in `project.py`. Restating it here is how the
+        two get to disagree about the same directory."""
+        assert "scad where" in self.text
+        assert "basename of the git" not in self.text.lower()
+
+    def test_it_offers_the_marker_by_name(self):
+        assert ".scad-project" in self.text
+        assert "scad.yml" in self.text
+
+    def test_it_states_that_a_marker_does_not_refile_the_past(self):
+        assert "reindex --rebuild" in self.text
+
+    def test_it_covers_resolving_somewhere_unwanted_not_only_unfiled(self):
+        """The worse failure of the two: a wrong project is a wrong join key,
+        and it looks like a result."""
+        assert "unfiled" in self.text.lower()
+        assert re.search(r"wrong project|not the project|somewhere you do not want",
+                         self.text, re.I)
+
+    def test_it_does_not_drop_a_marker_without_asking(self):
+        assert re.search(r"ask|offer|confirm", self.text, re.I)
+
+    def test_it_carries_no_command_only_syntax(self):
+        assert "$ARGUMENTS" not in self.text
+        assert "argument-hint" not in self.text
+
+    def test_it_has_no_path_that_breaks_once_installed(self):
+        assert "../" not in self.text
