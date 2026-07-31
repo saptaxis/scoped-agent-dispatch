@@ -9,6 +9,7 @@ survives being copied off a remote box.
 
 import html as _html
 import json
+import re
 import shlex
 import time
 from dataclasses import dataclass
@@ -336,6 +337,7 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
 
 _WAITING = ("awaiting-question", "awaiting-user")
 _SNIPPET = 400
+_FOLD_HEAD = 110   # summary line before it is cut; the fold carries the rest
 
 _COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state, "
             "needs, n_turns, started, ended, scad_run_id, grade")
@@ -466,9 +468,49 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
     return rows
 
 
+# Openers the agent writes for itself, not the human's ask. Measured over 400
+# sessions: 3% of first user turns are one of these, and they are useless as
+# "what is this session about" — the real question is the turn after them.
+_MACHINERY = re.compile(
+    r"\s*<(system-reminder|environment_context|recommended_plugins|user_instructions|"
+    r"command-name|command-message|local-command|ide_[a-z_]+)\b", re.I)
+
+# A slash-command pastes its whole skill body in as the first user turn. The
+# human's actual ask is elsewhere, so the body answers "which skill ran" and
+# never "what is this session about".
+_SKILL_PREAMBLE = re.compile(r"\s*Base directory for this skill:", re.I)
+
+
+def _first_text(conn, session_id: str) -> str:
+    """The human's opening ask — what this session is *about*.
+
+    Skips the wrappers an agent injects ahead of the real prompt, and reads a
+    few turns rather than one so a session that opens with two of them still
+    answers the question.
+    """
+    for row in conn.execute(
+        "SELECT text FROM turns WHERE session_id = ? AND role = 'user' "
+        "AND kind = 'text' AND text <> '' ORDER BY idx LIMIT 6",
+        (session_id,),
+    ):
+        text = (row["text"] or "").strip()
+        if text and not _MACHINERY.match(text) and not _SKILL_PREAMBLE.match(text):
+            return text[:_SNIPPET]
+    return ""
+
+
 def _last_text(conn, session_id: str) -> str:
+    """Where the session got to — the last thing that was *said*.
+
+    Deliberately `kind = 'text'`. **61% of sessions end on a `tool_result`**
+    (945 of 1537 measured), so taking the literal last turn showed tool output
+    to most rows — which answers "what did a tool return" and never "where did
+    this conversation stop". That a session ended mid-tool-loop is already said
+    by `outcome = tool-result-last`; it does not also need to fill the snippet.
+    """
     row = conn.execute(
-        "SELECT text FROM turns WHERE session_id = ? ORDER BY idx DESC LIMIT 1",
+        "SELECT text FROM turns WHERE session_id = ? AND kind = 'text' "
+        "AND text <> '' ORDER BY idx DESC LIMIT 1",
         (session_id,),
     ).fetchone()
     return (row["text"] or "")[:_SNIPPET] if row else ""
@@ -508,8 +550,6 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         (*_WAITING, cutoff),
     ).fetchall()
     waiting = _as_rows(waiting_rows, panes, running, live_ids, cwds)
-    for row in waiting:
-        row["last_text"] = _last_text(conn, row["id"])
 
     # Only human-started sessions are listed. A subagent is triggered BY an agent,
     # has no independent existence and cannot be resumed — listing it beside the
@@ -524,6 +564,21 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         ).fetchall(),
         panes, running, live_ids, cwds,
     )
+    # What each session opened with and where it got to. Every row, not just the
+    # waiting ones: "which of these is the thing I was doing" is the question
+    # the full list exists to answer, and a uuid and a turn count never answer
+    # it. Two indexed lookups per row; the page is rendered rarely and read a
+    # lot, so the cost belongs here rather than in the reader's head.
+    by_id = {}
+    for row in all_rows:
+        by_id.setdefault(row["id"], []).append(row)
+    for row in waiting:
+        by_id.setdefault(row["id"], []).append(row)
+    for session_id, rows_for_id in by_id.items():
+        first, last = _first_text(conn, session_id), _last_text(conn, session_id)
+        for row in rows_for_id:
+            row["first_text"], row["last_text"] = first, last
+
     live = _one_per_place(r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container"))
 
     # Notes are the authored tier — the only thing here that can never be
@@ -640,6 +695,17 @@ _PAGE = """<!doctype html>
  .ag.codex {{ color: var(--codex); }}
  .q {{ box-shadow: inset 3px 0 0 var(--ask); }}
  .needs {{ color: var(--ask); font-size: .82rem; margin-top: .2rem; }}
+ .ctx {{ margin-top: .25rem; font-size: .82rem; }}
+ .ctx > summary {{ cursor: pointer; color: var(--dim); list-style: none;
+                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+ .ctx > summary::-webkit-details-marker {{ display: none; }}
+ .ctx > summary::before {{ content: "▸ "; }}
+ .ctx[open] > summary {{ white-space: normal; }}
+ .ctx[open] > summary::before {{ content: "▾ "; }}
+ .ctx[open] > summary {{ color: var(--fg); }}
+ .fold-part {{ margin: .35rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
+ .fold-tag {{ display: inline-block; min-width: 3.6rem; color: var(--dim);
+              text-transform: uppercase; font-size: .68rem; letter-spacing: .04em; }}
  .snip {{ color: var(--dim); font-size: .82rem; margin-top: .25rem;
           display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
  .empty {{ color: var(--faint); font-size: .85rem; padding: .9rem; background: var(--card);
@@ -740,6 +806,19 @@ const when = ms => ms ? new Date(ms).toLocaleString() : "";
 // A derived title never stands in for one — it rides along in the meta line.
 const label = r => r.name || r.id.slice(0, 12);
 
+// Mirror of _context_fold: the opener says what a session is, the last word
+// says where it stopped, and a native <details> keeps 200 rows scannable.
+function ctxFold(r) {{
+  const first = (r.first_text || "").trim(), last = (r.last_text || "").trim();
+  if (!first && !last) return '';
+  const head = first || last;
+  let body = '';
+  if (first) body += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
+  if (last && last !== first) body += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
+  return '<details class="ctx"><summary>' + esc(head.slice(0, 110)) +
+         (head.length > 110 ? '\u2026' : '') + '</summary>' + body + '</details>';
+}}
+
 function rows(list) {{
   if (!list.length) return '<div class="empty">' +
     (SCOPE ? 'No sessions in ' + esc(SCOPE) + '.' : 'Nothing here.') + '</div>';
@@ -749,7 +828,7 @@ function rows(list) {{
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
     (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
-    '</div></div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
+    '</div>' + ctxFold(r) + '</div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
     '</span>' + (r.reentry.command ? '<code title="' + esc(r.reentry.command) + '" onclick="copy(this)">' + esc(r.reentry.command) +
     '</code>' : '') + '</div></div>').join('') + '</div>';
 }}
@@ -1111,6 +1190,34 @@ def _grouped_panes_html(groups: list[dict]) -> str:
     return "".join(out)
 
 
+def _context_fold(r: dict) -> str:
+    """Collapsed one-liner that opens into the opening ask and the last word.
+
+    A native `<details>` rather than the click-to-expand used for single long
+    lines: this is two paragraphs, and a disclosure keeps a 1500-row list
+    scannable while costing no JS — which a `file://` page has little room to
+    spend anyway.
+
+    The summary shows whichever end exists, because "what is this session" is
+    answered by the opener and "where did it stop" by the last word, and a row
+    with only one of them should still say something.
+    """
+    e = _html.escape
+    first = " ".join(str(r.get("first_text") or "").split())
+    last = " ".join(str(r.get("last_text") or "").split())
+    if not first and not last:
+        return ""
+    head = first or last
+    body = ""
+    if first:
+        body += f'<p class="fold-part"><span class="fold-tag">opened</span>{e(first)}</p>'
+    if last and last != first:
+        body += f'<p class="fold-part"><span class="fold-tag">last</span>{e(last)}</p>'
+    cut = head[:_FOLD_HEAD]
+    ell = "…" if len(head) > _FOLD_HEAD else ""
+    return (f'<details class="ctx"><summary>{e(cut)}{ell}</summary>{body}</details>')
+
+
 def _waiting_rows_html(rows: list[dict]) -> str:
     """Sessions awaiting you that still have a pane open — go to the pane."""
     if not rows:
@@ -1121,10 +1228,7 @@ def _waiting_rows_html(rows: list[dict]) -> str:
         extra = ""
         if r.get("needs"):
             extra += f'<div class="needs">{e(str(r["needs"]))}</div>'
-        if r.get("last_text"):
-            flat = " ".join(str(r["last_text"]).split())
-            extra += (f'<div class="snip clip" title="{e(flat)}" data-full="{e(flat)}" '
-                      f'onclick="expand(event, this)">{e(flat[:240])}</div>')
+        extra += _context_fold(r)
         chips = _chips(r)
         out.append(_row(
             _label(r),
@@ -1148,6 +1252,7 @@ def _grouped_closed_html(groups: list[dict]) -> str:
         rows = []
         for r in g["rows"]:
             extra = f'<div class="needs">{e(str(r["needs"]))}</div>' if r.get("needs") else ""
+            extra += _context_fold(r)
             rows.append(_row(
                 _label(r),
                 f'{_agent_tag(r.get("agent") or "")} · {r.get("n_turns") or 0} turns · '

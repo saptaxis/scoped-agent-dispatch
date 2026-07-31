@@ -1250,3 +1250,82 @@ class TestNotesAreVisibleOnTheRow:
     def test_the_count_reaches_the_rendered_page(self, tmp_path):
         html = render(gather(self._conn(tmp_path), [], set(), live_sessions=[]))
         assert "2 notes" in html
+
+
+class TestWhatASessionWasAbout:
+    """A uuid and a turn count never answer "which of these is the thing I was
+    doing". The opener says what a session is; the last word says where it
+    stopped. Both are read from turns, because `title` is present on only 72 of
+    1571 real sessions (codex: none at all) and cannot carry this."""
+
+    def _conn(self, tmp_path, turns, name="i"):
+        conn = connect(tmp_path / f"{name}.sqlite")
+        conn.execute(
+            "INSERT INTO sessions (id, kind, agent, machine, grade, source, cwd, "
+            "project, ended, n_turns) VALUES "
+            "('S1','main','claude','m','full','claude-transcript','/r','p',9,9)")
+        for i, (role, kind, text) in enumerate(turns):
+            conn.execute(
+                "INSERT INTO turns (session_id, idx, role, kind, text) "
+                "VALUES ('S1', ?, ?, ?, ?)", (i, role, kind, text))
+        conn.commit()
+        return conn
+
+    def test_the_opening_ask_is_the_first_human_turn(self, tmp_path):
+        from scad.view import _first_text
+
+        conn = self._conn(tmp_path, [("user", "text", "port the parser"),
+                                     ("assistant", "text", "done")])
+        assert _first_text(conn, "S1") == "port the parser"
+
+    def test_machinery_the_agent_wrote_to_itself_is_skipped(self, tmp_path):
+        """A session opening with a reminder or an environment block is about
+        whatever came after it. 3% of first turns measured are one of these."""
+        from scad.view import _first_text
+
+        wrappers = ("<system-reminder>\nnamed this session\n</system-reminder>",
+                    "<environment_context>\n<cwd>/r</cwd>\n</environment_context>",
+                    "<recommended_plugins> Atlassian </recommended_plugins>")
+        for n, wrapper in enumerate(wrappers):
+            conn = self._conn(tmp_path, [("user", "text", wrapper),
+                                         ("user", "text", "the real ask")], name=f"w{n}")
+            assert _first_text(conn, "S1") == "the real ask"
+
+    def test_a_pasted_skill_body_is_not_what_the_session_is_about(self, tmp_path):
+        """A slash command pastes its whole skill into the first turn. It says
+        which skill ran, never what the human wanted."""
+        from scad.view import _first_text
+
+        conn = self._conn(tmp_path, [
+            ("user", "text", "Base directory for this skill: /s/recall\nYou are picking up"),
+            ("user", "text", "catch me up on scad")])
+        assert _first_text(conn, "S1") == "catch me up on scad"
+
+    def test_a_session_with_nothing_human_in_it_says_nothing(self, tmp_path):
+        from scad.view import _first_text
+
+        conn = self._conn(tmp_path, [("assistant", "text", "hello")])
+        assert _first_text(conn, "S1") == ""
+
+    def test_the_last_word_is_a_message_not_a_tool_result(self, tmp_path):
+        """61% of sessions end on a tool_result (945 of 1537 measured), so the
+        literal last turn showed tool output on most rows — which answers what
+        a tool returned, never where the conversation stopped. That a session
+        ended mid-tool-loop is already said by `outcome`."""
+        from scad.view import _last_text
+
+        conn = self._conn(tmp_path, [
+            ("user", "text", "port the parser"),
+            ("assistant", "text", "here is the plan"),
+            ("user", "tool_result", "{'files': ['a.py', 'b.py']}")])
+        assert _last_text(conn, "S1") == "here is the plan"
+
+    def test_both_ends_reach_every_row_not_only_the_waiting_ones(self, tmp_path):
+        """The full list is where "which one was that" gets asked, so a row
+        there needs the same context as a row in the waiting section."""
+        conn = self._conn(tmp_path, [("user", "text", "port the parser"),
+                                     ("assistant", "text", "done")])
+        row = next(r for r in gather(conn, [], set(), live_sessions=[])["all"]
+                   if r["id"] == "S1")
+        assert row["first_text"] == "port the parser"
+        assert row["last_text"] == "done"
