@@ -581,6 +581,26 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
 
         try:
             session, turns, end = reader(path, start)
+            if session is None and start > 0:
+                # A format whose identity lives only at the head cannot be read
+                # from the middle. codex writes `session_meta` on line 1 and
+                # nowhere else, so a tail parse returns nothing at all — and
+                # this branch used to fall through to `skipped_lines`, dropping
+                # every appended turn AND leaving `parsed_offset` behind the
+                # file, so each later pass re-read and re-dropped the same tail.
+                # Only `--rebuild` recovered it, against the standing rule that
+                # rebuild is for derivation changes and incremental handles
+                # growth. Silent, and it argued for a wrong conclusion: the
+                # transcript ended on an unanswered user turn, which reads
+                # exactly like a session that was interrupted.
+                #
+                # So re-read whole and keep only what is new. `raw_offset` is
+                # the offset of the record that produced each turn, which makes
+                # "new" a fact about the file rather than a guess — necessary
+                # because `append_turns` numbers by position and cannot tell a
+                # duplicate from a fresh turn.
+                session, turns, end = reader(path, 0)
+                turns = [t for t in turns if (t.raw_offset or 0) >= start]
         except Exception as exc:                 # a file we cannot read must not stop the scan
             click.echo(f"[scad] skipped {path.name}: {exc}")
             stats["skipped_files"] += 1

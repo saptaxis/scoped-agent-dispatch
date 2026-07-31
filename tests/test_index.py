@@ -1050,3 +1050,105 @@ class TestCwdIsTheSessionsOwnDirectory:
         store(conn, rec(cwd=None))
         store(conn, rec(cwd="/repo/real"), parsed_offset=99)
         assert session_row(conn, "S1")["cwd"] == "/repo/real"
+
+
+CODEX_HEAD = [
+    {"timestamp": "2026-07-31T12:22:08.000Z", "type": "session_meta",
+     "payload": {"id": "C9", "timestamp": "2026-07-31T12:22:08.000Z", "cwd": "/repo",
+                 "originator": "codex-tui", "source": "cli", "cli_version": "0.146.0"}},
+    {"timestamp": "2026-07-31T12:22:20.000Z", "type": "response_item",
+     "payload": {"type": "message", "role": "user",
+                 "content": [{"type": "input_text", "text": "review the spec"}]}},
+]
+CODEX_TAIL = [
+    {"timestamp": "2026-07-31T12:40:00.000Z", "type": "response_item",
+     "payload": {"type": "message", "role": "assistant",
+                 "content": [{"type": "output_text", "text": "the 40-line review"}]}},
+]
+
+
+class TestASessionThatGrewAfterItWasIndexed:
+    """codex writes `session_meta` on the first line and nowhere else, so a
+    reader starting from `parsed_offset` sees no identity and returns nothing.
+
+    That made the incremental pass drop every appended turn **silently**: the
+    session stayed at its old length, `parsed_offset` never advanced, and each
+    later pass re-read and re-dropped the same tail. Only `--rebuild` recovered
+    it — contradicting the standing rule that rebuild is for derivation changes
+    and incremental handles growth.
+
+    The dropped turn is always the most recent one, which for an answer session
+    is the entire payload. And it reads as a session that was interrupted and
+    never replied, so the failure argues for a wrong conclusion rather than
+    announcing itself.
+    """
+
+    def test_a_codex_tail_cannot_identify_itself(self, tmp_path):
+        """The reader behaviour the fix has to work around, pinned so a change
+        to it is visible rather than silently making the workaround dead code."""
+        from scad.readers import read_codex_rollout
+
+        p = tmp_path / "rollout-x.jsonl"
+        p.write_text("".join(json.dumps(r) + "\n" for r in CODEX_HEAD + CODEX_TAIL))
+        _, _, end = read_codex_rollout(p, 0)
+        half = len(json.dumps(CODEX_HEAD[0]) + "\n")
+        session, turns, _ = read_codex_rollout(p, half)
+        assert session is None and turns == []
+
+    def test_appended_codex_turns_are_indexed_not_dropped(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        rel = "codex/2026/07/31/rollout-2026-07-31T12-22-08-C9.jsonl"
+        p = arc_write(arc, rel, CODEX_HEAD)
+
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        before = session_row(conn, "C9")["n_turns"]
+
+        with p.open("a") as fh:
+            for record in CODEX_TAIL:
+                fh.write(json.dumps(record) + "\n")
+        stats = reindex(conn)
+
+        row = session_row(conn, "C9")
+        assert row["n_turns"] > before, "the appended turn was dropped"
+        assert stats["turns"] >= 1
+        texts = [r["text"] for r in conn.execute(
+            "SELECT text FROM turns WHERE session_id='C9' ORDER BY idx")]
+        assert "the 40-line review" in texts
+
+    def test_the_offset_advances_so_a_third_pass_is_quiet(self, tmp_path, monkeypatch):
+        """The old failure left `parsed_offset` behind the file forever, so
+        every pass re-read the same bytes and re-dropped them."""
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        rel = "codex/2026/07/31/rollout-2026-07-31T12-22-08-C9.jsonl"
+        p = arc_write(arc, rel, CODEX_HEAD)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        with p.open("a") as fh:
+            fh.write(json.dumps(CODEX_TAIL[0]) + "\n")
+        reindex(conn)
+        row = session_row(conn, "C9")
+        assert row["parsed_offset"] == p.stat().st_size
+        assert reindex(conn)["turns"] == 0
+
+    def test_growth_does_not_duplicate_what_was_already_stored(self, tmp_path, monkeypatch):
+        """The fix re-reads the whole file, so the turns already in the index
+        must not be appended a second time — `append_turns` numbers by position
+        and cannot tell a duplicate from a new turn."""
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        rel = "codex/2026/07/31/rollout-2026-07-31T12-22-08-C9.jsonl"
+        p = arc_write(arc, rel, CODEX_HEAD)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        with p.open("a") as fh:
+            fh.write(json.dumps(CODEX_TAIL[0]) + "\n")
+        reindex(conn)
+        texts = [r["text"] for r in conn.execute(
+            "SELECT text FROM turns WHERE session_id='C9' ORDER BY idx")]
+        assert texts.count("review the spec") == 1
