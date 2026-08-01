@@ -27,6 +27,18 @@ class TestAgentCommand:
     def test_codex_shows_its_name(self):
         assert is_agent_command("codex") is True
 
+    def test_kimi_shows_its_name(self):
+        """kimi was added to the readers and never to the live-pane detector,
+        so its panes were invisible to the page for as long as it was indexed.
+
+        Measured on this machine: two kimi panes were running and neither
+        appeared under Agent panes or Open now. Worse than absence — the cwd
+        set that decides "a pane is open for it" is built from recognised
+        panes only, so a kimi session sharing a directory with Claude was
+        filed against **Claude's** pane and told to switch to it.
+        """
+        assert is_agent_command("kimi") is True
+
     def test_shells_and_tools_are_not_agents(self):
         for cmd in ("zsh", "bash", "htop", "python3.12", "vim", ""):
             assert is_agent_command(cmd) is False

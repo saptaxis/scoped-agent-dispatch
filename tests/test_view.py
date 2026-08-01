@@ -486,7 +486,10 @@ class TestTheOpenPaneIsMetadata:
         return render(gather(conn, [TmuxPane("main:1.0", "/repo", "2.1.219")], set()))
 
     def test_the_row_names_the_pane(self, tmp_path):
-        assert "also open in main:1.0" in self._html(tmp_path)
+        # The pane is a labelled fact now rather than a phrase in a prose meta
+        # line. Still metadata, still on the row, still not a command.
+        html = self._html(tmp_path)
+        assert "main:1.0" in html and "<dt>where</dt>" in html
 
     def test_walking_there_is_still_one_click_away(self, tmp_path):
         assert "select-pane -t main:1.0" in self._html(tmp_path)
@@ -629,11 +632,13 @@ class TestHumanName:
 
     def test_a_renamed_session_is_labelled_by_its_name(self, tmp_path):
         html = self._html(tmp_path, name="jul29-session-cli", title="Doing the thing")
-        assert '<div class="t">jul29-session-cli</div>' in html
+        # The heading holds the label and now the status pill beside it, so the
+        # assertion is that the label opens the heading, not that it is all of it.
+        assert '<div class="t">jul29-session-cli' in html
 
     def test_an_unnamed_session_shows_its_id_not_its_title(self, tmp_path):
         html = self._html(tmp_path, title="/rename writing-wm-evals-research")
-        assert '<div class="t">S1</div>' in html
+        assert '<div class="t">S1' in html
         assert '<div class="t">/rename' not in html
 
     def test_the_client_side_label_follows_the_same_rule(self, tmp_path):
@@ -664,8 +669,10 @@ class TestPresentation:
 
     def test_sections_share_the_same_row_markup(self, tmp_path):
         html = self._full(tmp_path)
-        # panes, waiting-at-hand and closed all render through _row.
-        assert html.count('class="who"') == html.count('class="go"')
+        # panes, waiting-at-hand and closed all render through _row. Counted
+        # against the row itself rather than a sibling cell: the cells changed
+        # when the layout went to two columns, and the invariant did not.
+        assert html.count('class="who"') == html.count('<div class="row')
 
     def test_status_pills_are_colour_coded(self, tmp_path):
         html = self._full(tmp_path)
@@ -679,7 +686,12 @@ class TestPresentation:
         assert "--card:#181b21" in html
 
     def test_a_question_row_is_flagged(self, tmp_path):
-        assert 'class="row q"' in self._full(tmp_path)
+        # Membership, not the exact string: the class list also carries layout
+        # state now, and pinning the whole attribute broke on a change that was
+        # not about flagging at all.
+        import re as _re
+        classes = _re.findall(r'<div class="(row[^"]*)"', self._full(tmp_path))
+        assert any("q" in c.split() for c in classes)
 
     def test_agents_are_visually_distinguished(self, tmp_path):
         html = self._full(tmp_path)
@@ -982,7 +994,7 @@ class TestOpenNowSection:
 
     def test_it_reuses_the_shared_row_markup(self, tmp_path):
         html = self._html(tmp_path, [_session("S1")])
-        assert html.count('class="who"') == html.count('class="go"')
+        assert html.count('class="who"') == html.count('<div class="row')
 
     def test_user_text_is_escaped(self, tmp_path):
         html = self._html(tmp_path, [_session("S1", name="<script>alert(1)</script>")])
@@ -1160,11 +1172,34 @@ class TestTabCountsMatchTheSections:
         assert tab["sessions"] == len([r for r in data["all"] if r["project"] == "alpha"]) == 4
 
     def test_all_hides_nothing(self, tmp_path):
-        """The default selection has to leave the page exactly as it was."""
+        """The default selection has to leave the page exactly as it was.
+
+        Asserted through the predicate rather than a literal source line: the
+        old form pinned one expression and broke the moment a second filter
+        axis existed, without anything being wrong.
+        """
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
         html = render(gather(conn, [], set()))
-        assert 'r.hidden = SCOPE !== "" && (r.dataset.project || "") !== SCOPE;' in html
+        assert 'r.hidden = !matches(r);' in html
+        assert 'SCOPE === "" ||' in html and 'AGENT === "" ||' in html
+
+    def test_project_and_agent_narrow_together(self, tmp_path):
+        """The two axes AND. A session has exactly one project and one agent,
+        so composing them narrows; it can never contradict."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        html = render(gather(conn, [], set()))
+        assert ('(SCOPE === "" || (el.dataset.project || "") === SCOPE)\n'
+                '      && (AGENT === "" || (el.dataset.agent || "") === AGENT)') in html
+
+    def test_every_row_declares_its_agent(self, tmp_path):
+        """One selector for the whole page, so a new section cannot forget to
+        join the filter — the same reason `data-project` is on every row."""
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        html = render(gather(conn, [], set()))
+        assert 'data-agent="claude"' in html
 
 
 class TestTheEmbeddedScriptParses:

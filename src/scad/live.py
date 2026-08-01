@@ -31,7 +31,12 @@ _START_SKEW = 1.0
 # Claude Code shows up in tmux as its version string (e.g. "2.1.219"), not as
 # "claude" — the binary re-execs. codex uses its own name.
 _VERSION = re.compile(r"^\d+\.\d+\.\d+")
-_AGENT_NAMES = {"codex", "claude"}
+# Measured on this machine: `codex` and `kimi` show under their own names,
+# Claude as its version string. kimi was missing here for as long as it had a
+# reader — so its panes never appeared, and because the "a pane is open for it"
+# cwd set is built from recognised panes only, a kimi session sharing a
+# directory with Claude was filed against Claude's pane and told to go there.
+_AGENT_NAMES = {"codex", "claude", "kimi"}
 
 
 @dataclass(frozen=True)

@@ -81,7 +81,11 @@ def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
     for pane in panes:
         if not is_agent_command(pane.command):
             continue
-        agent = "codex" if pane.command == "codex" else "claude"
+        # The pane names its own agent, except Claude, which re-execs to its
+        # version string. Anything-else-is-claude was wrong the moment a third
+        # family existed: a kimi pane was labelled claude, and then matched
+        # against claude sessions for its occupant.
+        agent = pane.command if pane.command in ("codex", "kimi") else "claude"
         # Match the pane's own agent: a codex pane must not be offered a claude
         # session as its likely occupant, which the unfiltered query did.
         guess = conn.execute(
@@ -337,7 +341,6 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
 
 _WAITING = ("awaiting-question", "awaiting-user")
 _SNIPPET = 400
-_FOLD_HEAD = 110   # summary line before it is cut; the fold carries the rest
 
 _COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state, "
             "needs, n_turns, started, ended, scad_run_id, grade")
@@ -447,6 +450,12 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
             "kind": "main",
             # From the registry: what the human called it, and what it is doing.
             "name": session.name or base.get("name") or "",
+            # What it is about and where it got to. Carried explicitly because
+            # this row is built field by field from `base` rather than copied,
+            # so anything not named here is silently dropped — which is how
+            # Open now ended up the one live section with no context at all.
+            "first_text": base.get("first_text") or "",
+            "last_text": base.get("last_text") or "",
             "status": session.status or "",
             "waiting_for": session.waiting_for or "",
             "started_at": session.started_at,
@@ -612,6 +621,13 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
             row["n_notes"] = note_counts.get(row.get("id"), 0)
 
     pane_rows = live_pane_rows(conn, panes)
+    # A pane row is a pane, not a session — but it names the session it most
+    # likely holds, and that is the row a reader is looking at when they ask
+    # "what is this one". Same context, fetched once per distinct session.
+    for row in pane_rows:
+        if row.get("likely_id"):
+            row["first_text"] = _first_text(conn, row["likely_id"])
+            row["last_text"] = _last_text(conn, row["likely_id"])
     at_hand, closed_waiting = split_waiting(waiting, cwds)
 
     return {
@@ -638,15 +654,24 @@ _PAGE = """<!doctype html>
  :root {{
    --bg:#f6f7f9; --card:#fff; --ink:#1c1f24; --dim:#6b7280; --faint:#9ca3af;
    --line:#e5e7eb; --chip:#f3f4f6; --chip-h:#e5e7eb;
+   --surface:#f7f8fa; --surface-line:#e8eaee; --shadow:0 1px 2px rgba(16,20,28,.06);
+   /* One spacing scale, used everywhere. Every gap was an ad-hoc .3/.4/.5rem
+      before, so controls that belong together landed at different rhythms —
+      most visibly between the filter rows and the search box. */
+   --s1:.25rem; --s2:.5rem; --s3:.75rem; --s4:1.25rem; --s5:2rem;
+   --label:.66rem;
    --open:#059669; --open-bg:#d1fae5; --maybe:#b45309; --maybe-bg:#fef3c7;
-   --shut:#6b7280; --shut-bg:#f3f4f6; --ask:#b45309; --claude:#4f46e5; --codex:#0891b2;
+   --shut:#6b7280; --shut-bg:#f3f4f6; --ask:#b45309; --claude:#4f46e5; --codex:#0891b2; --kimi:#7c3aed;
  }}
  @media (prefers-color-scheme: dark) {{
    :root {{
      --bg:#0f1115; --card:#181b21; --ink:#e5e7eb; --dim:#9199a6; --faint:#6b7280;
      --line:#262b33; --chip:#22262e; --chip-h:#2c313a;
+     /* Dark UI reads depth as elevation, so the recessed panel is LIGHTER
+        than the card rather than darker — the same trick inverted. */
+     --surface:#1e222a; --surface-line:#2b3038; --shadow:0 1px 2px rgba(0,0,0,.35);
      --open:#34d399; --open-bg:#064e3b; --maybe:#fbbf24; --maybe-bg:#4a3208;
-     --shut:#9199a6; --shut-bg:#22262e; --ask:#fbbf24; --claude:#818cf8; --codex:#22d3ee;
+     --shut:#9199a6; --shut-bg:#22262e; --ask:#fbbf24; --claude:#818cf8; --codex:#22d3ee; --kimi:#c084fc;
    }}
  }}
  * {{ box-sizing: border-box; }}
@@ -665,19 +690,88 @@ _PAGE = """<!doctype html>
                   border-bottom: 1px solid var(--line); }}
  .card > .head b {{ font-weight: 620; font-size: .93rem; }}
  .card > .head .meta {{ color: var(--faint); font-size: .78rem; margin-left: auto; }}
- .row {{ display: grid; grid-template-columns: 1fr auto; gap: 1rem; align-items: start;
+ .row {{ display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.25fr);
+         gap: var(--s4); align-items: stretch;
          padding: .65rem .9rem; border-top: 1px solid var(--line); }}
  .row:first-of-type {{ border-top: 0; }}
  .row .who {{ min-width: 0; }}
+ /* The recessed panel. Two columns of plain text on one background read as
+    one run-on paragraph; giving the quoted text its own surface says "this is
+    the session talking, the rest is us describing it". */
+ .ctx-col {{ min-width: 0; background: var(--surface); border-radius: 8px;
+             border: 1px solid var(--surface-line); padding: var(--s2) .6rem;
+             overflow: hidden; }}
+ .row.nocontext .ctx-col {{ display: none; }}
+
+ /* THE one accent. Agent is the strongest categorical fact on the page and the
+    palette already names each family, so a rail turns the list into something
+    you can scan by colour without reading — the same axis the agent filter
+    works on, made visible. 3px, and nothing else on the page competes. */
+ .row {{ border-left: 3px solid transparent; padding-left: .7rem; }}
+ .row[data-agent="claude"] {{ border-left-color: var(--claude); }}
+ .row[data-agent="codex"]  {{ border-left-color: var(--codex); }}
+ .row[data-agent="kimi"]   {{ border-left-color: var(--kimi); }}
+ .row:hover {{ background: color-mix(in srgb, var(--chip) 55%, transparent); }}
+
+ /* Inside an open fold, the two ends of a conversation are separate facts. */
+ .fold-part + .fold-part {{ border-top: 1px solid var(--surface-line);
+                            padding-top: .45rem; margin-top: .45rem; }}
+ .fold-tag {{ color: var(--faint); }}
+ /* Labelled pairs. The label column is fixed so values line up down the page. */
+ .facts {{ display: grid; grid-template-columns: 3.2rem minmax(0,1fr);
+           gap: 0 var(--s2); margin: var(--s1) 0 0; font-size: .76rem; }}
+ .ident {{ font-size: .8rem; color: var(--dim); margin-top: var(--s1); }}
+ .dimmer {{ color: var(--faint); }}
+ .tiny {{ font-size: .74rem; margin-left: auto; white-space: nowrap; }}
+ .age {{ color: var(--dim); font-variant-numeric: tabular-nums; }}
+ .turns {{ font-size: var(--label); color: var(--faint); }}
+ .notes-badge {{ color: var(--ask); }}
+ /* Every dot on the page. Faded so the facts carry the weight, and spaced --
+    without this the run read as one word: "0m ago·645 turns". */
+ .sep {{ color: var(--faint); opacity: .55; margin: 0 .45rem; }}
+ .facts dt {{ font-size: var(--label); letter-spacing: .08em; text-transform: uppercase;
+              color: var(--faint); line-height: 1.7; }}
+ .facts dd {{ margin: 0; color: var(--dim); min-width: 0; overflow-wrap: anywhere; }}
+ .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+          font-size: .72rem; color: var(--ink); }}
+ .card {{ box-shadow: var(--shadow); }}
+ .row.nocontext {{ grid-template-columns: minmax(0,1fr); }}
+ .row.nocontext .ctx-col {{ display: none; }}
+ @media (max-width: 820px) {{
+   .row {{ grid-template-columns: minmax(0,1fr); }}
+ }}
+ /* Actions sit under the metadata they act on, not in a column of their own. */
+ .acts {{ display: flex; gap: .3rem; margin-top: .4rem; flex-wrap: wrap; }}
+ .acts:empty {{ display: none; }}
+ .t {{ display: flex; align-items: baseline; gap: .45rem; flex-wrap: wrap; }}
+ /* Two lines of the opener before the fold, rather than one clipped line —
+    the column is wide and a single truncated line wastes it. */
+ .ctx[open] > summary {{ -webkit-line-clamp: unset; overflow: visible; }}
+ /* A clipped preview should say so. The fade sits over the last line only when
+    closed, so a short session that fits shows no fade and needs no explaining. */
+ .ctx:not([open]) {{ position: relative; }}
+ .ctx:not([open])::after {{ content: ""; position: absolute; left: 0; right: 0;
+    bottom: 0; height: 1.4em; pointer-events: none;
+    background: linear-gradient(to bottom, transparent, var(--surface)); }}
+ .ctx > summary:hover {{ color: var(--ink); }}
+ .cmd {{ font: inherit; font-size: .72rem; font-family: ui-monospace, monospace;
+         padding: .1rem .45rem; border-radius: 5px; cursor: pointer;
+         border: 1px solid var(--line); background: var(--chip); color: var(--dim);
+         white-space: nowrap; }}
+ .cmd:hover {{ border-color: currentColor; color: var(--ink); }}
+ .cmd.ghost {{ background: transparent; opacity: .65; }}
  .row .t {{ font-weight: 550; overflow-wrap: anywhere; }}
  .row .m {{ color: var(--faint); font-size: .78rem; margin-top: .15rem; }}
- .go {{ display: flex; flex-direction: column; gap: .3rem; align-items: flex-end; }}
  code {{ font: 11.5px/1.45 ui-monospace, SFMono-Regular, Menlo, monospace;
          background: var(--chip); border: 1px solid var(--line); color: var(--ink);
          padding: .22rem .45rem; border-radius: 5px; cursor: pointer; white-space: nowrap;
-         max-width: 30rem; overflow: hidden; text-overflow: ellipsis; display: inline-block; }}
+         max-width: 30rem; overflow: hidden; text-overflow: ellipsis; display: inline-block;
+         /* `overflow` other than visible moves an inline-block's baseline to its
+            bottom margin edge, so this sat visibly high against the text beside
+            it. Aligning on the middle rather than a baseline that no longer
+            means what it says. */
+         vertical-align: middle; }}
  code:hover {{ background: var(--chip-h); }}
- code.ghost {{ background: transparent; border-color: transparent; color: var(--faint); }}
  .pill {{ font-size: .68rem; font-weight: 600; padding: .12rem .4rem; border-radius: 4px;
           text-transform: uppercase; letter-spacing: .04em; }}
  .open {{ color: var(--open); background: var(--open-bg); }}
@@ -693,16 +787,54 @@ _PAGE = """<!doctype html>
  .ag {{ font-size: .72rem; font-weight: 600; }}
  .ag.claude {{ color: var(--claude); }}
  .ag.codex {{ color: var(--codex); }}
+ .ag.kimi {{ color: var(--kimi); }}
+ /* All three axes in one place, and they stay reachable: 200 rows means the
+    filters scroll away exactly when you realise you want them. */
+ /* A facet rail, not three widgets. Each facet is one row of a shared grid --
+    label gutter, then controls -- so a new facet (outcome, when, has-notes,
+    full-text) is another row rather than a re-layout. That matters because
+    this is where Littlebird's query UI grows. */
+ .filters {{ position: sticky; top: 0; z-index: 20; background: var(--bg);
+             padding: var(--s3) 0; margin-bottom: var(--s3);
+             border-bottom: 1px solid var(--line); }}
+ .facet {{ display: grid; grid-template-columns: 4.5rem minmax(0,1fr);
+           align-items: baseline; gap: var(--s2); }}
+ .facet + .facet {{ margin-top: var(--s3); }}
+ .flabel {{ font-size: var(--label); letter-spacing: .09em; text-transform: uppercase;
+            color: var(--faint); }}
+ .facet input {{ width: 100%; margin: 0; }}
+ .tabs, .agents {{ display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; }}
+ /* Only shown once something is filtered: the seam to a server-run query. */
+ .summary {{ margin-top: var(--s3); font-size: .74rem; color: var(--dim);
+             display: flex; gap: var(--s2); align-items: baseline; }}
+ .summary b {{ color: var(--ink); font-weight: 600; }}
+ .clearf {{ font: inherit; font-size: .72rem; background: none; cursor: pointer;
+            border: 1px solid var(--line); border-radius: 999px;
+            padding: 0 .5rem; color: var(--dim); }}
+ @media (max-width: 640px) {{
+   .facet {{ grid-template-columns: 1fr; gap: var(--s1); }}
+ }}
+ .achip {{ font: inherit; font-size: .76rem; padding: .12rem .5rem; cursor: pointer;
+           border: 1px solid var(--line); border-radius: 999px;
+           background: transparent; color: var(--dim); }}
+ .achip.claude {{ color: var(--claude); }}
+ .achip.codex {{ color: var(--codex); }}
+ .achip.kimi {{ color: var(--kimi); }}
+ .achip.on {{ background: var(--chip); border-color: currentColor; }}
  .q {{ box-shadow: inset 3px 0 0 var(--ask); }}
  .needs {{ color: var(--ask); font-size: .82rem; margin-top: .2rem; }}
  .ctx {{ margin-top: .25rem; font-size: .82rem; }}
+ /* ONE rule for the closed summary. There were two, and the later one set
+    white-space:nowrap, so the line-clamp above it never applied and the
+    preview was a single clipped line inside a box sized for six. */
  .ctx > summary {{ cursor: pointer; color: var(--dim); list-style: none;
-                   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }}
+                   white-space: normal; overflow: hidden;
+                   display: -webkit-box; -webkit-box-orient: vertical;
+                   -webkit-line-clamp: var(--preview-lines, 6); }}
  .ctx > summary::-webkit-details-marker {{ display: none; }}
  .ctx > summary::before {{ content: "▸ "; }}
- .ctx[open] > summary {{ white-space: normal; }}
  .ctx[open] > summary::before {{ content: "▾ "; }}
- .ctx[open] > summary {{ color: var(--fg); }}
+ .ctx[open] > summary {{ color: var(--ink); }}
  .fold-part {{ margin: .35rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
  .fold-tag {{ display: inline-block; min-width: 3.6rem; color: var(--dim);
               text-transform: uppercase; font-size: .68rem; letter-spacing: .04em; }}
@@ -753,7 +885,21 @@ _PAGE = """<!doctype html>
    click any command to copy</div>
 </header>
 
-<div class="tabs" id="tabs">{tabs}</div>
+<div class="filters">
+  <div class="facet"><span class="flabel">project</span>
+    <div class="tabs" id="tabs">{tabs}</div></div>
+  <div class="facet"><span class="flabel">agent</span>
+    <div class="agents" id="ag">
+      <button class="achip on" data-agent="">all</button>
+      <button class="achip claude" data-agent="claude">claude</button>
+      <button class="achip codex" data-agent="codex">codex</button>
+      <button class="achip kimi" data-agent="kimi">kimi</button>
+    </div></div>
+  <div class="facet"><span class="flabel">find</span>
+    <input id="f" placeholder="name, path, or anything said in the session…"
+           autocomplete="off"></div>
+  <div class="summary" id="sum" hidden></div>
+</div>
 
 <section data-sec="open-now">
 <h2>Open now <span class="n" data-count>{n_open_now}</span></h2>
@@ -787,7 +933,6 @@ _PAGE = """<!doctype html>
 
 <section data-sec="all">
 <h2>All sessions <span class="n" data-count>{n_all}</span></h2>
-<input id="f" placeholder="filter by name, project, cwd, title…" autocomplete="off">
 <div id="all"></div>
 </section>
 </div>
@@ -815,22 +960,24 @@ function ctxFold(r) {{
   let body = '';
   if (first) body += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
   if (last && last !== first) body += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
-  return '<details class="ctx"><summary>' + esc(head.slice(0, 110)) +
-         (head.length > 110 ? '\u2026' : '') + '</summary>' + body + '</details>';
+  return '<details class="ctx"><summary>' + esc(head) + '</summary>' + body + '</details>';
 }}
 
 function rows(list) {{
   if (!list.length) return '<div class="empty">' +
-    (SCOPE ? 'No sessions in ' + esc(SCOPE) + '.' : 'Nothing here.') + '</div>';
+    (scopeLabel() ? 'No sessions for ' + esc(scopeLabel()) + '.' : 'Nothing here.') + '</div>';
   return '<div class="card">' + list.map(r =>
-    '<div class="row"><div class="who"><div class="t" title="' + esc(r.cwd ?? "") + '">' + esc(label(r)) +
-    '</div><div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
+    '<div class="row' + (ctxFold(r) ? '' : ' nocontext') + '">' +
+    '<div class="who"><div class="t" title="' + esc(r.cwd ?? "") + '">' + esc(label(r)) +
+    '<span class="pill ' + esc(r.status) + '">' + esc(r.status) + '</span></div>' +
+    '<div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
-    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
-    '</div>' + ctxFold(r) + '</div><div class="go"><span class="pill ' + esc(r.status) + '">' + esc(r.status) +
-    '</span>' + (r.reentry.command ? '<code title="' + esc(r.reentry.command) + '" onclick="copy(this)">' + esc(r.reentry.command) +
-    '</code>' : '') + '</div></div>').join('') + '</div>';
+    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') + '</div>' +
+    '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
+    esc(r.reentry.command) + '" title="' + esc(r.reentry.command) +
+    '" onclick="copy(this)">\u29c9 resume</button>' : '') + '</div></div>' +
+    '<div class="ctx-col">' + ctxFold(r) + '</div></div>').join('') + '</div>';
 }}
 
 function expand(ev, el) {{
@@ -844,7 +991,8 @@ function expand(ev, el) {{
 }}
 
 function copy(el) {{
-  navigator.clipboard.writeText(el.textContent);
+  // The command lives in data-cmd, not in the text: the button shows a label.
+  navigator.clipboard.writeText(el.dataset.cmd || el.textContent);
   const was = el.textContent; el.textContent = "copied ✓";
   setTimeout(() => el.textContent = was, 800);
 }}
@@ -854,11 +1002,13 @@ const draw = () => {{
   const q = f.value.toLowerCase();
   const list = DATA.all.filter(r =>
     (!SCOPE || (r.project || "") === SCOPE) &&
+    (!AGENT || (r.agent || "") === AGENT) &&
     (!q || [r.name, r.project, r.cwd, r.title, r.id]
              .some(v => (v ?? "").toLowerCase().includes(q))));
   document.getElementById("all").innerHTML = rows(list);
   const n = document.querySelector('section[data-sec="all"] [data-count]');
   if (n) n.textContent = list.length;
+  renderSummary(list.length, DATA.all.length);
 }};
 f.addEventListener("input", draw);
 
@@ -866,10 +1016,25 @@ f.addEventListener("input", draw);
 // looked. Everything is already in the document, so a tab only hides rows:
 // no re-render, no second file, nothing to re-run.
 let SCOPE = "";
+// A second axis, ANDed with the project. Kept as its own variable rather than
+// folded into SCOPE because the two answer different questions -- "whose work
+// is this" and "which tool ran it" -- and a session belongs to exactly one of
+// each, so composing them narrows rather than conflicts.
+let AGENT = "";
+
+function matches(el) {{
+  return (SCOPE === "" || (el.dataset.project || "") === SCOPE)
+      && (AGENT === "" || (el.dataset.agent || "") === AGENT);
+}}
+
+function scopeLabel() {{
+  if (SCOPE && AGENT) return AGENT + " in " + SCOPE;
+  return SCOPE || AGENT || "";
+}}
 
 function applyScope() {{
   document.querySelectorAll(".row[data-project]").forEach(r => {{
-    r.hidden = SCOPE !== "" && (r.dataset.project || "") !== SCOPE;
+    r.hidden = !matches(r);
   }});
   document.querySelectorAll(".card").forEach(card => {{
     const rs = [...card.querySelectorAll(".row")];
@@ -888,12 +1053,13 @@ function applyScope() {{
     const note = sec.querySelector(".scoped");
     // A section that empties out under a scope says so. A blank region reads
     // as a broken page, not as an answer.
-    const blank = SCOPE !== "" && rs.length > 0 && vis === 0;
+    const scoped = SCOPE !== "" || AGENT !== "";
+    const blank = scoped && rs.length > 0 && vis === 0;
     body.hidden = blank;
     note.hidden = !blank;
-    if (blank) note.textContent = "Nothing here for " + SCOPE + ".";
+    if (blank) note.textContent = "Nothing here for " + scopeLabel() + ".";
     const n = sec.querySelector("[data-count]");
-    if (n) n.textContent = SCOPE === "" ? rs.length : vis;
+    if (n) n.textContent = scoped ? vis : rs.length;
   }});
   draw();
 }}
@@ -927,6 +1093,39 @@ document.getElementById("tabs").addEventListener("click", ev => {{
   applyScope();
 }});
 
+document.getElementById("ag").addEventListener("click", ev => {{
+  const chip = ev.target.closest(".achip");
+  if (!chip) return;
+  // Clicking the active agent clears it, so the filter is escapable without
+  // hunting for an "all" button.
+  AGENT = (chip.dataset.agent === AGENT) ? "" : chip.dataset.agent;
+  document.querySelectorAll(".achip").forEach(
+    c => c.classList.toggle("on", c.dataset.agent === AGENT));
+  applyScope();
+}});
+
+function renderSummary(shown, total) {{
+  const sum = document.getElementById("sum");
+  const parts = [];
+  if (AGENT) parts.push(AGENT);
+  if (SCOPE) parts.push("in " + SCOPE);
+  if (f.value.trim()) parts.push('matching "' + f.value.trim() + '"');
+  if (!parts.length) {{ sum.hidden = true; return; }}
+  sum.hidden = false;
+  sum.innerHTML = '<span><b>' + esc(parts.join(" ")) + '</b> \u00b7 ' +
+    shown + ' of ' + total + '</span>' +
+    '<button class="clearf" onclick="clearFilters()">clear</button>';
+}}
+
+function clearFilters() {{
+  SCOPE = ""; AGENT = ""; f.value = "";
+  document.querySelectorAll(".tab").forEach(
+    t => t.classList.toggle("on", t.dataset.tab === ""));
+  document.querySelectorAll(".achip").forEach(
+    c => c.classList.toggle("on", c.dataset.agent === ""));
+  applyScope();
+}}
+
 applyScope();
 </script>
 </html>
@@ -956,18 +1155,23 @@ def _ago(ms) -> str:
     return f"{mins // 1440}d ago"
 
 
-def _chip(text: str, ghost: bool = False) -> str:
-    """A click-to-copy command chip, with the full text on hover.
+def _chip(text: str, ghost: bool = False, label: str = "resume") -> str:
+    """A click-to-copy button that shows its label, not its command.
 
-    CSS ellipsis only hides the overflow visually — the whole string stays in the
-    DOM, so copy still yields the full command. The title is for reading it
-    without copying, which matters most for the long paths inside `cd …`.
+    The command used to be the visible text, so every row spent two lines on
+    `cd /long/path && claude --resume <uuid>` and a tmux incantation. Across
+    200 rows that is most of the page, and none of it is information — nobody
+    reads a resume command, they paste it.
+
+    The command still travels in `data-cmd`, so a copy yields the whole thing,
+    and `title` shows it for anyone who wants to read before pasting.
     """
     if not text:
         return ""
-    cls = ' class="ghost"' if ghost else ""
+    cls = "cmd ghost" if ghost else "cmd"
     safe = _html.escape(text)
-    return f'<code{cls} title="{safe}" onclick="copy(this)">{safe}</code>'
+    return (f'<button class="{cls}" data-cmd="{safe}" title="{safe}" '
+            f'onclick="copy(this)">⧉ {_html.escape(label)}</button>')
 
 
 def _clip(text: str, n: int) -> str:
@@ -989,7 +1193,8 @@ def _clip(text: str, n: int) -> str:
 
 
 def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
-         extra: str = "", flag: bool = False, project: str | None = None) -> str:
+         extra: str = "", flag: bool = False, project: str | None = None,
+         agent: str | None = None, context: str = "", tiny: str = "") -> str:
     """One row, identical in every section.
 
     Every section previously built its own `<table>`, so each computed column
@@ -997,17 +1202,33 @@ def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
     everywhere fixes that by construction — the columns cannot drift apart
     because there is only one definition of them.
 
-    `data-project` is what the tab strip scopes on. Every row carries it, empty
-    string included, so the project filter is one selector rather than a rule
-    per section that some future section would forget to join.
+    `data-project` and `data-agent` are what the filters scope on. Every row
+    carries both, empty string included, so each filter is one selector rather
+    than a rule per section that some future section would forget to join —
+    and the two compose by AND without either knowing about the other.
     """
     pill_html = f'<span class="pill {pill}">{_html.escape(pill)}</span>' if pill else ""
     scope = _html.escape(project or "")
+    who = _html.escape(agent or "")
+    ctx = context or ""
+    # Two columns, not three. Everything that describes the session — name,
+    # status, counts, and the buttons that act on it — is metadata and belongs
+    # together on the left. The right column is only what was *said*, so it is
+    # free to run to several lines without pushing anything else around.
+    #
+    # A row with nothing to quote drops the second column rather than reserving
+    # an empty one: 35 of 220 sessions have no human turn, and a blank gutter
+    # reads as missing data rather than as absent data.
+    blank = "" if ctx else " nocontext"
     return (
-        f'<div class="row{" q" if flag else ""}" data-project="{scope}">'
-        f'<div class="who"><div class="t">{title}</div>'
-        f'<div class="m">{meta}</div>{extra}</div>'
-        f'<div class="go">{pill_html}{"".join(chips)}</div>'
+        f'<div class="row{" q" if flag else ""}{blank}" data-project="{scope}" '
+        f'data-agent="{who}">'
+        f'<div class="who">'
+        f'<div class="t">{title}{pill_html}{tiny}</div>'
+        f'<div class="m">{meta}</div>{extra}'
+        f'<div class="acts">{"".join(chips)}</div>'
+        f'</div>'
+        f'<div class="ctx-col">{ctx}</div>'
         f'</div>'
     )
 
@@ -1024,23 +1245,6 @@ def _label(row: dict) -> str:
     return _clip(row.get("name") or (row.get("id") or "")[:12], 70)
 
 
-def _title_meta(row: dict) -> str:
-    """The derived title, demoted to the meta line where it cannot pose as a name."""
-    title = row.get("title")
-    return f' · {_clip(title, 70)}' if title else ""
-
-
-def _notes_meta(row: dict) -> str:
-    """`· 2 notes` when a session has any, nothing when it has none.
-
-    Silent at zero on purpose: most sessions have no notes, and "0 notes" on
-    every row would be noise that trains the eye to skip the very place the
-    count matters. A note is the authored tier — worth marking where it exists,
-    not worth announcing where it does not.
-    """
-    n = row.get("n_notes") or 0
-    return f' · {n} note{"" if n == 1 else "s"}' if n else ""
-
 
 def _card(head: str, meta: str, rows: list[str]) -> str:
     return (f'<div class="card"><div class="head"><b>{head}</b>'
@@ -1051,29 +1255,131 @@ def _empty(msg: str) -> str:
     return f'<div class="empty">{_html.escape(msg)}</div>'
 
 
-def _open_in(row: dict) -> str:
-    """`· also open in main:3.1`, when the row is live somewhere.
 
-    Metadata, not a command. Where a session is open now is a fact about the
-    row that decays the moment the pane closes, so it reads as a note beside
-    the name rather than as the thing you copy.
+_SEP = '<span class="sep">·</span>'
+
+
+def _facts(row: dict) -> str:
+    """The metadata, in four lines rather than nine.
+
+    A label per fact was the right instinct and the wrong dose: nine labelled
+    rows made a short session taller than the thing it described. Only two
+    facts actually need naming — the id, because it is an opaque string, and
+    where, because a path and a pane target look alike. Everything else says
+    what it is by how it reads: an agent is a coloured name, a count is a
+    count.
+
+    So: counts and age ride beside the heading as a quiet indicator, identity
+    is one inline run, and the two labelled rows carry what is left.
     """
-    target = (row.get("reentry") or {}).get("target")
-    return f' · also open in {_html.escape(target)}' if target else ""
+    e = _html.escape
+    out = []
+
+    ident = []
+    if row.get("agent"):
+        ident.append(_agent_tag(str(row["agent"])))
+    if row.get("project"):
+        ident.append(e(str(row["project"])))
+    if row.get("n_notes"):
+        ident.append(f'<span class="notes-badge" title="{row["n_notes"]} notes">'
+                     f'◆ {row["n_notes"]}</span>')
+    title = (row.get("title") or "").strip()
+    label = (row.get("name") or "").strip()
+    # A session named by /rename gets a title recording that rename, so this
+    # was printing the heading back verbatim on every renamed row.
+    if title and not (label and label.lower() in title.lower()):
+        ident.append(f'<span class="dimmer">{_clip(title, 60)}</span>')
+    if ident:
+        out.append(f'<div class="ident">{_SEP.join(ident)}</div>')
+
+    pairs = []
+    if row.get("id"):
+        pairs.append(("id", f'<span class="mono">{e(str(row["id"]))}</span>'))
+    where = []
+    if row.get("cwd"):
+        where.append(f'<span class="mono">{_clip(str(row["cwd"]), 52)}</span>')
+    target = (row.get("reentry") or {}).get("target") or row.get("target") or ""
+    if target:
+        where.append(f'<span class="mono">{e(str(target))}</span>')
+    if where:
+        pairs.append(("where", _SEP.join(where)))
+    if pairs:
+        cells = "".join(f'<dt>{e(k)}</dt><dd>{v}</dd>' for k, v in pairs)
+        out.append(f'<dl class="facts">{cells}</dl>')
+    return "".join(out)
 
 
-def _chips(row: dict) -> list[str]:
-    """The resume command, plus a demoted way to walk to a live pane.
+def _tiny(row: dict) -> str:
+    """Counts and age, beside the heading. Small enough to ignore, present
+    enough to answer "is this a big session and was it recent"."""
+    bits = []
+    when = _ago(row.get("ended"))
+    if when:
+        # Age first and brighter. How long ago something moved is what decides
+        # whether you look at it; how many turns it took is trivia by comparison.
+        bits.append(f'<span class="age">{_html.escape(when)}</span>')
+    if row.get("n_turns"):
+        bits.append(f'<span class="turns">{row["n_turns"]} turns</span>')
+    return f'<span class="tiny">{_SEP.join(bits)}</span>' if bits else ""
 
-    Order and emphasis are the whole point: the command that always works is
-    the one in the ordinary chip, and the tmux target — which cannot be
-    resolved back to a session, and is gone tomorrow — is the ghost.
+
+def session_row(row: dict, *, extra: str = "") -> str:
+    """THE row renderer. Every section calls this and nothing builds its own.
+
+    Five sections each assembled a row their own way, and every inconsistency
+    on this page came from that: two sections never got the context fold, the
+    pane action was labelled "resume" in one place and "go to pane" in another,
+    and the metadata was a different subset in each. Fixing any of them meant
+    finding all five, and twice it meant missing two.
+
+    So the shape of a row is decided once. A section chooses which rows to
+    show and in what order; it does not get an opinion about what a row is.
+
+    `extra` is the only per-section slot, for a fact that belongs to one
+    context only — what a live session is blocked on, say.
+    """
+    return _row(
+        _label(row),
+        _facts(row),
+        _actions(row),
+        pill=_pill_for(row),
+        tiny=_tiny(row),
+        extra=extra,
+        context=_context_fold(row),
+        flag=_wants_you(row),
+        project=row.get("project"),
+        agent=row.get("agent"),
+    )
+
+
+def _pill_for(row: dict) -> str:
+    """One status vocabulary. `status` when the registry reported one,
+    otherwise the derived open/maybe/closed the index computes."""
+    return row.get("status") or row.get("state") or ""
+
+
+def _wants_you(row: dict) -> bool:
+    """Whether the row is asking for a human, however that was established."""
+    return (row.get("status") == "waiting"
+            or row.get("outcome") == "awaiting-question")
+
+
+def _actions(row: dict) -> list[str]:
+    """The two things you can do with a session, named the same way everywhere.
+
+    `resume` rebuilds the conversation from disk and always works. `pane` walks
+    to where it is open now, and only exists while that is true — so it is the
+    demoted one. They were previously labelled inconsistently across sections,
+    which made the same button look like two different features.
     """
     reentry = row.get("reentry") or {}
-    chips = [_chip(reentry.get("command") or resume_command(row))]
-    if reentry.get("goto"):
-        chips.append(_chip(reentry["goto"], ghost=True))
-    return chips
+    command = reentry.get("command") or resume_command(row)
+    actions = [_chip(command, label="resume")] if command else []
+    goto = reentry.get("goto") or row.get("goto")
+    if goto:
+        actions.append(_chip(goto, ghost=True, label="pane"))
+    return actions
+
 
 
 def _agent_tag(agent: str) -> str:
@@ -1127,25 +1433,15 @@ def _open_now_html(rows: list[dict]) -> str:
     e = _html.escape
     out = []
     for r in rows:
-        bits = [_agent_tag(r.get("agent") or "claude")]
-        if r.get("indexed"):
-            bits += [e(r.get("project") or ""), f'{r.get("n_turns") or 0} turns',
-                     _ago(r.get("ended"))]
-        else:
-            # Started too recently to have been archived. Say so rather than
-            # showing zeros that look like a session which did nothing.
-            bits += [_clip(r.get("cwd") or "", 60), "not indexed yet"]
-        meta = (" · ".join(b for b in bits if b) + _notes_meta(r) + _title_meta(r)
-                + _open_in(r))
-
         extra = ""
         if r.get("waiting_for"):
             extra = f'<div class="needs">waiting on {e(str(r["waiting_for"]))}</div>'
-
-        chips = _chips(r)
-        out.append(_row(_label(r), meta, chips, pill=r.get("status") or "open",
-                        extra=extra, flag=r.get("status") == "waiting",
-                        project=r.get("project")))
+        if not r.get("indexed"):
+            # Started too recently to have been archived. Say so rather than
+            # letting the fact grid show zeros that look like a session which
+            # did nothing.
+            extra += '<div class="m">not indexed yet</div>'
+        out.append(session_row(r, extra=extra))
     return f'<div class="card">{"".join(out)}</div>'
 
 
@@ -1167,16 +1463,17 @@ def _grouped_panes_html(groups: list[dict]) -> str:
                 else:
                     title = '<span class="m">no indexed session here</span>'
                     hint = "unmatched"
-                resume = resume_command({"id": r.get("likely_id"), "cwd": r.get("cwd"),
-                                          "agent": r.get("agent"), "kind": "main"}) \
-                    if r.get("likely_id") else ""
-                rows.append(_row(
-                    title,
-                    f'{_agent_tag(r["agent"])} {e(r.get("version") or "")} · '
-                    f'{e(r["target"])} · {hint} · {_ago(r.get("last_activity"))}',
-                    [_chip(r["goto"]), _chip(resume, ghost=True)],
-                    project=r.get("project"),
-                ))
+                # A pane is not a session, but the row a human reads is the
+                # same object: give it the session shape and let the one
+                # renderer decide what a row looks like.
+                rows.append(session_row({
+                    "id": r.get("likely_id"), "name": r.get("likely_name"),
+                    "title": r.get("likely_title"), "outcome": r.get("likely_outcome"),
+                    "cwd": r.get("cwd"), "agent": r.get("agent"), "kind": "main",
+                    "project": r.get("project"), "ended": r.get("last_activity"),
+                    "first_text": r.get("first_text"), "last_text": r.get("last_text"),
+                    "goto": r.get("goto"), "target": r.get("target"),
+                }, extra=f'<div class="m">{hint}</div>' if not r.get("likely_id") else ""))
             cwds = ", ".join(sorted({r.get("cwd") for r in w["panes"] if r.get("cwd")}))
             head = (f'<span class="clip" title="{e(cwds)}" data-full="{e(cwds)}" '
                     f'onclick="expand(event, this)">{e(w["label"] or w["target"])}</span>'
@@ -1213,9 +1510,10 @@ def _context_fold(r: dict) -> str:
         body += f'<p class="fold-part"><span class="fold-tag">opened</span>{e(first)}</p>'
     if last and last != first:
         body += f'<p class="fold-part"><span class="fold-tag">last</span>{e(last)}</p>'
-    cut = head[:_FOLD_HEAD]
-    ell = "…" if len(head) > _FOLD_HEAD else ""
-    return (f'<details class="ctx"><summary>{e(cut)}{ell}</summary>{body}</details>')
+    # No truncation here: the box is as tall as the row already is, and CSS
+    # clamps the preview to the lines that fit. Cutting the string first meant
+    # the clamp had nothing to clamp and the stretched box sat empty.
+    return f'<details class="ctx"><summary>{e(head)}</summary>{body}</details>' 
 
 
 def _waiting_rows_html(rows: list[dict]) -> str:
@@ -1228,17 +1526,7 @@ def _waiting_rows_html(rows: list[dict]) -> str:
         extra = ""
         if r.get("needs"):
             extra += f'<div class="needs">{e(str(r["needs"]))}</div>'
-        extra += _context_fold(r)
-        chips = _chips(r)
-        out.append(_row(
-            _label(r),
-            f'{_agent_tag(r.get("agent") or "")} · {e(r.get("project") or "")} · '
-            f'{r.get("n_turns") or 0} turns · {_ago(r.get("ended"))}'
-            f'{_title_meta(r)}{_open_in(r)}',
-            chips, pill=r.get("status", ""), extra=extra,
-            flag=r.get("outcome") == "awaiting-question",
-            project=r.get("project"),
-        ))
+        out.append(session_row(r, extra=extra))
     return f'<div class="card">{"".join(out)}</div>'
 
 
@@ -1252,15 +1540,8 @@ def _grouped_closed_html(groups: list[dict]) -> str:
         rows = []
         for r in g["rows"]:
             extra = f'<div class="needs">{e(str(r["needs"]))}</div>' if r.get("needs") else ""
-            extra += _context_fold(r)
-            rows.append(_row(
-                _label(r),
-                f'{_agent_tag(r.get("agent") or "")} · {r.get("n_turns") or 0} turns · '
-                f'{_ago(r.get("ended"))}{_title_meta(r)}',
-                [_chip(resume_command(r))], extra=extra,
-                flag=r.get("outcome") == "awaiting-question",
-                project=r.get("project") or g["project"],
-            ))
+            rows.append(session_row({**r, "project": r.get("project") or g["project"]},
+                                    extra=extra))
         out.append(_card(e(g["project"]),
                          f'{len(g["rows"])} waiting · {_ago(g["last_activity"])}', rows))
     return "".join(out)
