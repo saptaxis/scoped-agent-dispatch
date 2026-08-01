@@ -684,16 +684,24 @@ _PAGE = """<!doctype html>
  h2 {{ font-size: .74rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em;
        color: var(--dim); margin: 2.4rem 0 .9rem; }}
  h2 .n {{ color: var(--faint); font-weight: 500; }}
- .card {{ background: var(--card); border: 1px solid var(--line); border-radius: 10px;
-          margin-bottom: .8rem; overflow: hidden; }}
- .card > .head {{ display: flex; align-items: baseline; gap: .6rem; padding: .7rem .9rem;
-                  border-bottom: 1px solid var(--line); }}
+ /* The container is a stack, not a surface. A hairline between rows was fine
+    when a row was one line; a row is now two columns several lines tall, and a
+    1px rule between two of them reads as one continuous block of text. So the
+    row is the card and the gap does the separating. */
+ .card {{ display: flex; flex-direction: column; gap: var(--s2);
+          margin-bottom: var(--s4); }}
+ .card > .head {{ display: flex; align-items: baseline; gap: .6rem;
+                  padding: 0 .2rem var(--s1); }}
  .card > .head b {{ font-weight: 620; font-size: .93rem; }}
  .card > .head .meta {{ color: var(--faint); font-size: .78rem; margin-left: auto; }}
+ /* ONE rule for the row. There were three, spread across the stylesheet, and
+    twice a later one silently cancelled an earlier one -- the same collision
+    that made the preview a single line for a day. */
  .row {{ display: grid; grid-template-columns: minmax(0,1fr) minmax(0,1.25fr);
          gap: var(--s4); align-items: stretch;
-         padding: .65rem .9rem; border-top: 1px solid var(--line); }}
- .row:first-of-type {{ border-top: 0; }}
+         padding: var(--s3) .9rem; background: var(--card);
+         border: 1px solid var(--line); border-left-width: 3px;
+         border-radius: 10px; box-shadow: var(--shadow); }}
  .row .who {{ min-width: 0; }}
  /* The recessed panel. Two columns of plain text on one background read as
     one run-on paragraph; giving the quoted text its own surface says "this is
@@ -707,7 +715,6 @@ _PAGE = """<!doctype html>
     palette already names each family, so a rail turns the list into something
     you can scan by colour without reading — the same axis the agent filter
     works on, made visible. 3px, and nothing else on the page competes. */
- .row {{ border-left: 3px solid transparent; padding-left: .7rem; }}
  .row[data-agent="claude"] {{ border-left-color: var(--claude); }}
  .row[data-agent="codex"]  {{ border-left-color: var(--codex); }}
  .row[data-agent="kimi"]   {{ border-left-color: var(--kimi); }}
@@ -735,7 +742,6 @@ _PAGE = """<!doctype html>
  .facts dd {{ margin: 0; color: var(--dim); min-width: 0; overflow-wrap: anywhere; }}
  .mono {{ font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
           font-size: .72rem; color: var(--ink); }}
- .card {{ box-shadow: var(--shadow); }}
  .row.nocontext {{ grid-template-columns: minmax(0,1fr); }}
  .row.nocontext .ctx-col {{ display: none; }}
  @media (max-width: 820px) {{
@@ -871,7 +877,7 @@ _PAGE = """<!doctype html>
  /* Anything waiting on you is the reason to click a tab at all. */
  .tab.hot .n {{ color: var(--ask); }}
  .tab.on.hot .n {{ color: var(--bg); opacity: 1; }}
- .row.top {{ border-top: 0; }}
+
  #gen {{ font-weight: 600; }}
  #gen.stale {{ color: var(--ask); }}
 </style>
@@ -1049,10 +1055,9 @@ function applyScope() {{
     const rs = [...card.querySelectorAll(".row")];
     const vis = rs.filter(r => !r.hidden);
     card.hidden = rs.length > 0 && vis.length === 0;
-    // The first row draws no top border. Which row is first changes with
-    // the scope, so the rule cannot be :first-of-type alone.
-    rs.forEach(r => r.classList.remove("top"));
-    if (vis.length) vis[0].classList.add("top");
+    // Nothing to patch up per-row any more: rows are separated by a gap, not
+    // by a border the first one has to suppress, so which row is first stopped
+    // mattering when the filter changes it.
   }});
   document.querySelectorAll("section[data-sec]").forEach(sec => {{
     if (sec.dataset.sec === "all") return;      // drawn from DATA, see draw()
