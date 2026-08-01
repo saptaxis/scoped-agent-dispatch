@@ -714,8 +714,9 @@ _PAGE = """<!doctype html>
  .row:hover {{ background: color-mix(in srgb, var(--chip) 55%, transparent); }}
 
  /* Inside an open fold, the two ends of a conversation are separate facts. */
+ .fold-part {{ margin: 0; }}
  .fold-part + .fold-part {{ border-top: 1px solid var(--surface-line);
-                            padding-top: .45rem; margin-top: .45rem; }}
+                            padding-top: var(--s2); margin-top: var(--s2); }}
  .fold-tag {{ color: var(--faint); }}
  /* Labelled pairs. The label column is fixed so values line up down the page. */
  .facts {{ display: grid; grid-template-columns: 3.2rem minmax(0,1fr);
@@ -746,13 +747,10 @@ _PAGE = """<!doctype html>
  .t {{ display: flex; align-items: baseline; gap: .45rem; flex-wrap: wrap; }}
  /* Two lines of the opener before the fold, rather than one clipped line —
     the column is wide and a single truncated line wastes it. */
- .ctx[open] > summary {{ -webkit-line-clamp: unset; overflow: visible; }}
+ .ctx[open] > summary {{ color: var(--ink); }}
  /* A clipped preview should say so. The fade sits over the last line only when
     closed, so a short session that fits shows no fade and needs no explaining. */
- .ctx:not([open]) {{ position: relative; }}
- .ctx:not([open])::after {{ content: ""; position: absolute; left: 0; right: 0;
-    bottom: 0; height: 1.4em; pointer-events: none;
-    background: linear-gradient(to bottom, transparent, var(--surface)); }}
+
  .ctx > summary:hover {{ color: var(--ink); }}
  .cmd {{ font: inherit; font-size: .72rem; font-family: ui-monospace, monospace;
          padding: .1rem .45rem; border-radius: 5px; cursor: pointer;
@@ -827,13 +825,18 @@ _PAGE = """<!doctype html>
  /* ONE rule for the closed summary. There were two, and the later one set
     white-space:nowrap, so the line-clamp above it never applied and the
     preview was a single clipped line inside a box sized for six. */
- .ctx > summary {{ cursor: pointer; color: var(--dim); list-style: none;
-                   white-space: normal; overflow: hidden;
-                   display: -webkit-box; -webkit-box-orient: vertical;
-                   -webkit-line-clamp: var(--preview-lines, 6); }}
+ /* The summary holds both ends. The clamp is per block, not on the summary,
+    so each gets its own opening lines instead of the first swallowing the
+    space and the second falling off the bottom. */
+ .ctx > summary {{ cursor: pointer; list-style: none; color: var(--dim); }}
+ .ctx:not([open]) .fold-part {{ display: -webkit-box; -webkit-box-orient: vertical;
+                                -webkit-line-clamp: 3; overflow: hidden; }}
+ .ctx[open] .fold-part {{ display: block; }}
  .ctx > summary::-webkit-details-marker {{ display: none; }}
- .ctx > summary::before {{ content: "▸ "; }}
- .ctx[open] > summary::before {{ content: "▾ "; }}
+ .ctx > summary::after {{ content: "▸ more"; display: block; margin-top: var(--s1);
+                          font-size: var(--label); letter-spacing: .06em;
+                          text-transform: uppercase; color: var(--faint); }}
+ .ctx[open] > summary::after {{ content: "▾ less"; }}
  .ctx[open] > summary {{ color: var(--ink); }}
  .fold-part {{ margin: .35rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
  .fold-tag {{ display: inline-block; min-width: 3.2rem; color: var(--faint);
@@ -957,11 +960,10 @@ const label = r => r.name || r.id.slice(0, 12);
 function ctxFold(r) {{
   const first = (r.first_text || "").trim(), last = (r.last_text || "").trim();
   if (!first && !last) return '';
-  const head = first || last, tag = first ? 'opened' : 'last';
-  let body = '';
-  if (last && last !== head) body += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
-  return '<details class="ctx"><summary><span class="fold-tag">' + tag + '</span>' +
-         esc(head) + '</summary>' + body + '</details>';
+  let blocks = '';
+  if (first) blocks += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
+  if (last && last !== first) blocks += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
+  return '<details class="ctx"><summary>' + blocks + '</summary></details>';
 }}
 
 function rows(list) {{
@@ -1519,13 +1521,19 @@ def _context_fold(r: dict) -> str:
     # No truncation: the box is as tall as the row already is and CSS clamps
     # the preview to the lines that fit. Cutting the string first meant the
     # clamp had nothing to clamp and the stretched box sat empty.
-    head, tag = (first, "opened") if first else (last, "last")
-    body = ""
-    if last and last != head:
-        body = f'<p class="fold-part"><span class="fold-tag">last</span>{e(last)}</p>'
-    return (f'<details class="ctx">'
-            f'<summary><span class="fold-tag">{tag}</span>{e(head)}</summary>'
-            f'{body}</details>')
+    parts = []
+    if first:
+        parts.append(("opened", first))
+    if last and last != first:
+        parts.append(("last", last))
+    blocks = "".join(
+        f'<p class="fold-part"><span class="fold-tag">{tag}</span>{e(text)}</p>'
+        for tag, text in parts)
+    # Both ends live in the summary so both are visible without opening
+    # anything: "what did I start this for" and "where did it get to" are two
+    # questions, and answering only the first until you click made the second
+    # invisible on a page you scan. CSS clamps each block; opening lifts both.
+    return f'<details class="ctx"><summary>{blocks}</summary></details>' 
 
 
 def _waiting_rows_html(rows: list[dict]) -> str:
