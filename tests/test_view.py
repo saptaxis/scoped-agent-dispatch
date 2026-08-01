@@ -1182,16 +1182,25 @@ class TestTabCountsMatchTheSections:
         _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
         html = render(gather(conn, [], set()))
         assert 'r.hidden = !matches(r);' in html
-        assert 'SCOPE === "" ||' in html and 'AGENT === "" ||' in html
+        # Each axis must treat empty as match-all. Asserted per axis rather
+        # than by pinning one expression: the predicate has been rewritten
+        # twice for reasons unrelated to this invariant, and broke both times.
+        assert 'SCOPE !== "" && (el.dataset.project || "") !== SCOPE' in html
+        assert 'AGENT !== "" && (el.dataset.agent || "") !== AGENT' in html
 
-    def test_project_and_agent_narrow_together(self, tmp_path):
-        """The two axes AND. A session has exactly one project and one agent,
-        so composing them narrows; it can never contradict."""
+    def test_project_agent_and_text_narrow_together(self, tmp_path):
+        """Three axes ANDing in one predicate. The text box previously drove
+        only the client-rendered list, so typing a query filtered `All
+        sessions` and left every other section showing rows that did not
+        match — while the summary line reported the narrowed count."""
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
         html = render(gather(conn, [], set()))
-        assert ('(SCOPE === "" || (el.dataset.project || "") === SCOPE)\n'
-                '      && (AGENT === "" || (el.dataset.agent || "") === AGENT)') in html
+        # All three axes are consulted by one predicate, so they compose by AND
+        # and every section obeys all of them.
+        for axis in ("dataset.project", "dataset.agent", "f.value"):
+            assert axis in html
+        assert "return !q || (el.textContent" in html
 
     def test_every_row_declares_its_agent(self, tmp_path):
         """One selector for the whole page, so a new section cannot forget to

@@ -836,8 +836,9 @@ _PAGE = """<!doctype html>
  .ctx[open] > summary::before {{ content: "▾ "; }}
  .ctx[open] > summary {{ color: var(--ink); }}
  .fold-part {{ margin: .35rem 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }}
- .fold-tag {{ display: inline-block; min-width: 3.6rem; color: var(--dim);
-              text-transform: uppercase; font-size: .68rem; letter-spacing: .04em; }}
+ .fold-tag {{ display: inline-block; min-width: 3.2rem; color: var(--faint);
+              text-transform: uppercase; font-size: var(--label);
+              letter-spacing: .08em; }}
  .snip {{ color: var(--dim); font-size: .82rem; margin-top: .25rem;
           display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
  .empty {{ color: var(--faint); font-size: .85rem; padding: .9rem; background: var(--card);
@@ -956,11 +957,11 @@ const label = r => r.name || r.id.slice(0, 12);
 function ctxFold(r) {{
   const first = (r.first_text || "").trim(), last = (r.last_text || "").trim();
   if (!first && !last) return '';
-  const head = first || last;
+  const head = first || last, tag = first ? 'opened' : 'last';
   let body = '';
-  if (first) body += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
-  if (last && last !== first) body += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
-  return '<details class="ctx"><summary>' + esc(head) + '</summary>' + body + '</details>';
+  if (last && last !== head) body += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
+  return '<details class="ctx"><summary><span class="fold-tag">' + tag + '</span>' +
+         esc(head) + '</summary>' + body + '</details>';
 }}
 
 function rows(list) {{
@@ -1010,7 +1011,7 @@ const draw = () => {{
   if (n) n.textContent = list.length;
   renderSummary(list.length, DATA.all.length);
 }};
-f.addEventListener("input", draw);
+f.addEventListener("input", applyScope);
 
 // Which project the page is scoped to. "" is All — the page as it has always
 // looked. Everything is already in the document, so a tab only hides rows:
@@ -1023,8 +1024,14 @@ let SCOPE = "";
 let AGENT = "";
 
 function matches(el) {{
-  return (SCOPE === "" || (el.dataset.project || "") === SCOPE)
-      && (AGENT === "" || (el.dataset.agent || "") === AGENT);
+  if (SCOPE !== "" && (el.dataset.project || "") !== SCOPE) return false;
+  if (AGENT !== "" && (el.dataset.agent || "") !== AGENT) return false;
+  const q = f.value.trim().toLowerCase();
+  // Searched against the row's own text, which is everything the row shows:
+  // name, id, project, path, pane, and what the session actually said. The
+  // box promises "anything said in the session" and the fold puts that text
+  // in the row, so the simplest reading is also the honest one.
+  return !q || (el.textContent || "").toLowerCase().includes(q);
 }}
 
 function scopeLabel() {{
@@ -1504,16 +1511,21 @@ def _context_fold(r: dict) -> str:
     last = " ".join(str(r.get("last_text") or "").split())
     if not first and not last:
         return ""
-    head = first or last
+    # The summary IS the opener, carried in full — `<details>` keeps it on
+    # screen when open, so repeating it in the body printed the same paragraph
+    # twice the moment anyone expanded a row. The body therefore holds only
+    # what the summary does not: the last word.
+    #
+    # No truncation: the box is as tall as the row already is and CSS clamps
+    # the preview to the lines that fit. Cutting the string first meant the
+    # clamp had nothing to clamp and the stretched box sat empty.
+    head, tag = (first, "opened") if first else (last, "last")
     body = ""
-    if first:
-        body += f'<p class="fold-part"><span class="fold-tag">opened</span>{e(first)}</p>'
-    if last and last != first:
-        body += f'<p class="fold-part"><span class="fold-tag">last</span>{e(last)}</p>'
-    # No truncation here: the box is as tall as the row already is, and CSS
-    # clamps the preview to the lines that fit. Cutting the string first meant
-    # the clamp had nothing to clamp and the stretched box sat empty.
-    return f'<details class="ctx"><summary>{e(head)}</summary>{body}</details>' 
+    if last and last != head:
+        body = f'<p class="fold-part"><span class="fold-tag">last</span>{e(last)}</p>'
+    return (f'<details class="ctx">'
+            f'<summary><span class="fold-tag">{tag}</span>{e(head)}</summary>'
+            f'{body}</details>')
 
 
 def _waiting_rows_html(rows: list[dict]) -> str:
