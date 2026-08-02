@@ -5,7 +5,7 @@ credentials staged, and one or more agents running inside it.
 
 ## Model
 
-**Run = environment.** A running Docker container with repos, venv, credentials, and skills set up, identified by a run id. The entrypoint does setup and waits. Nothing runs until work is injected.
+**Run = environment.** A running Docker container with repos, venv, credentials, skills and Claude plugins set up, identified by a run id. The entrypoint does setup and waits. Nothing runs until work is injected.
 
 **Injection = work.** Claude processes sent into a running run via `docker exec`. Can be interactive (tmux window) or headless (`claude -p`). One at a time or N in parallel. Each one is a **job**, and each job produces one agent **session** — its trace, which `scad session ls|show|read` reads. A run hosts many jobs, so `run` and `session` are never interchangeable.
 
