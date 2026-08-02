@@ -130,9 +130,19 @@ class TestTheCommandIsAlwaysTheResumeCommand:
         r = reentry_for(row(), panes, set())
         assert r.command == "cd /Users/vsr/code/scad && claude --resume S1"
 
-    def test_a_running_container_does_not_displace_it_either(self):
+    def test_a_container_session_offers_its_run_instead(self):
+        """Superseded intent. This asserted that a running container must not
+        displace the resume command -- correct for the live-first bug it was
+        written against, and wrong about container sessions specifically: a
+        session with a `scad_run_id` has its transcript under
+        `~/.scad/runs/<id>/claude/projects/`, not `~/.claude/projects/`, so a
+        host resume cannot find it whatever the cwd. The run is the way in.
+
+        The original point still holds for host sessions -- see the pane test
+        above, where a live pane does not displace the command."""
         r = reentry_for(row(scad_run_id="demo-Jul28-1200"), [], {"demo-Jul28-1200"})
-        assert r.command == "cd /Users/vsr/code/scad && claude --resume S1"
+        assert "claude --resume" not in r.command
+        assert r.command == "scad run attach demo-Jul28-1200"
 
     def test_kind_still_says_which_section_the_row_belongs_to(self):
         """The page selects its live section on `kind`, so it must survive."""
@@ -1373,3 +1383,34 @@ class TestWhatASessionWasAbout:
                    if r["id"] == "S1")
         assert row["first_text"] == "port the parser"
         assert row["last_text"] == "done"
+
+
+class TestAContainerSessionCannotBeResumedOnTheHost:
+    """A session that ran inside a scad container has a `/workspace/...` cwd
+    that does not exist on the host, and its transcript lives in the run's
+    bind-mounted claude dir rather than `~/.claude`.
+
+    `cd /workspace/orglens && claude --resume <id>` therefore fails, and it
+    failed while looking exactly like every other row's command. The way back
+    into a container session is its run.
+    """
+
+    ROW = {"id": "C1", "agent": "claude", "kind": "main",
+           "cwd": "/workspace/orglens", "scad_run_id": "orglens-p07-Aug03-0045"}
+
+    def test_no_host_resume_is_offered(self):
+        from scad.view import resume_command
+
+        assert "claude --resume" not in resume_command(self.ROW)
+
+    def test_the_run_is_the_way_back_in(self):
+        from scad.view import _actions
+
+        cmds = " ".join(_actions({**self.ROW, "reentry": {}}))
+        assert "scad run attach orglens-p07-Aug03-0045" in cmds
+
+    def test_an_ordinary_host_session_is_untouched(self):
+        from scad.view import resume_command
+
+        host = {"id": "H1", "agent": "claude", "kind": "main", "cwd": "/repo"}
+        assert resume_command(host) == "cd /repo && claude --resume H1"

@@ -458,3 +458,83 @@ class TestFindPane:
         from scad.live import find_pane
 
         assert find_pane("main:1.2", [TmuxPane("main:1.2", "/repo", "zsh")]) is None
+
+
+class TestSessionsInsideScadsOwnContainers:
+    """A run bind-mounts `~/.scad/runs/<id>/claude` to the container's
+    `~/.claude`, so the container writes the same `<pid>.json` registry there.
+    scad only ever read the host's, so an agent running in a scad container --
+    the thing scad itself started -- was the one kind of session the live view
+    could not see.
+
+    The host reader cannot simply be pointed at those paths. Both of the checks
+    that make it exact are host-relative: `os.kill(pid, 0)` would test an
+    unrelated host process, and `procStart` is the container's clock. Liveness
+    comes instead from the run's container being up, which docker answers
+    exactly, so nothing here is correlated or guessed.
+    """
+
+    CONTAINER_ENTRY = {
+        "pid": 219, "sessionId": "c00831dd", "cwd": "/workspace/orglens",
+        "startedAt": 1785698128628, "procStart": "54564", "version": "2.1.220",
+        "kind": "interactive", "entrypoint": "cli", "name": "orglens-b5",
+        "status": "busy",
+    }
+
+    def _run(self, tmp_path, run_id, entry):
+        import json
+        d = tmp_path / run_id / "claude" / "sessions"
+        d.mkdir(parents=True)
+        (d / f"{entry['pid']}.json").write_text(json.dumps(entry))
+        return tmp_path
+
+    def test_the_host_parser_rejects_a_container_entry(self, tmp_path):
+        """Pinned because it is the reason this needs its own reader: a
+        container's procStart is not a UTC ctime, so the host parser returns
+        nothing and pointing it at run dirs would silently find zero."""
+        import json
+        from scad.live import _read_entry
+
+        p = tmp_path / "219.json"
+        p.write_text(json.dumps(self.CONTAINER_ENTRY))
+        assert _read_entry(p) is None
+
+    def test_a_running_run_yields_its_sessions(self, tmp_path):
+        from scad.live import container_live_sessions
+
+        root = self._run(tmp_path, "run-a", self.CONTAINER_ENTRY)
+        found = container_live_sessions({"run-a"}, runs_root=root)
+
+        assert [s.session_id for s in found] == ["c00831dd"]
+        assert found[0].status == "busy"
+        assert found[0].name == "orglens-b5"
+        assert found[0].cwd == "/workspace/orglens"
+
+    def test_a_run_whose_container_is_gone_yields_nothing(self, tmp_path):
+        """The registry file outlives the container. Liveness is the container,
+        so a stale run dir contributes nothing rather than a dead session."""
+        from scad.live import container_live_sessions
+
+        root = self._run(tmp_path, "run-a", self.CONTAINER_ENTRY)
+        assert container_live_sessions(set(), runs_root=root) == []
+        assert container_live_sessions({"other-run"}, runs_root=root) == []
+
+    def test_the_run_id_travels_with_the_session(self, tmp_path):
+        """`cwd` inside a container is `/workspace/...`, which does not exist on
+        the host, so the run id is the only thing that can resolve a project."""
+        from scad.live import container_live_sessions
+
+        root = self._run(tmp_path, "run-a", self.CONTAINER_ENTRY)
+        assert container_live_sessions({"run-a"}, runs_root=root)[0].run_id == "run-a"
+
+    def test_a_bad_file_costs_its_own_entry_and_no_others(self, tmp_path):
+        from scad.live import container_live_sessions
+
+        root = self._run(tmp_path, "run-a", self.CONTAINER_ENTRY)
+        (root / "run-a" / "claude" / "sessions" / "7.json").write_text("{not json")
+        assert len(container_live_sessions({"run-a"}, runs_root=root)) == 1
+
+    def test_a_missing_runs_root_is_empty_not_an_error(self, tmp_path):
+        from scad.live import container_live_sessions
+
+        assert container_live_sessions({"run-a"}, runs_root=tmp_path / "nope") == []

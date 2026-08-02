@@ -21,6 +21,7 @@ from scad.live import (
     TmuxPane,
     agent_panes,
     claude_live_sessions,
+    container_live_sessions,
     is_agent_command,
 )
 
@@ -240,6 +241,13 @@ def resume_command(row: dict) -> str:
     be resolved to a session when the same project opens in the same window
     every time. This is what you actually paste.
     """
+    # A session that ran inside a scad container has a `/workspace/...` cwd
+    # that does not exist here, and its transcript lives in the run's
+    # bind-mounted claude dir rather than `~/.claude`. A host resume fails --
+    # and failed while looking exactly like every other row's command. The way
+    # back in is the run; see `_actions`.
+    if row.get("scad_run_id"):
+        return ""
     argv = resume_argv(row)
     if not argv:
         return ""
@@ -332,9 +340,13 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
                            target=matches[0].target, goto=_goto(matches[0].target))
 
     run_id = row.get("scad_run_id")
-    if run_id and run_id in running:
-        return Reentry("container", resume, target=run_id,
-                       goto=f"scad run attach {run_id}")
+    if run_id:
+        # `resume` is empty for these: the transcript is in the run dir, not
+        # `~/.claude`, so a host resume cannot find it. Attaching to the run is
+        # the command, not a demoted alternative to one.
+        attach = f"scad run attach {run_id}"
+        kind = "container" if run_id in running else "resume"
+        return Reentry(kind, attach, target=run_id, goto=attach)
 
     return Reentry("resume", resume)
 
@@ -373,6 +385,20 @@ def _live_sessions(injected) -> list[ClaudeSession]:
         return list(injected)
     try:
         return list(claude_live_sessions())
+    except Exception:
+        return []
+
+
+def _container_sessions(running) -> list[ClaudeSession]:
+    """Agents inside scad's own running containers. Same contract: never raises.
+
+    Read separately from the host registry because the host one is at a fixed
+    path and these are distributed -- one `~/.claude` per run, bind-mounted
+    into `~/.scad/runs/<run-id>/claude`. Without this, the sessions scad itself
+    started were the only ones the live view could not see.
+    """
+    try:
+        return list(container_live_sessions(running))
     except Exception:
         return []
 
@@ -540,6 +566,11 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     """
     cutoff = int((time.time() - days * 86400) * 1000)
     sessions = _live_sessions(live_sessions)
+    if live_sessions is None:
+        # Additive, and never a duplicate: a container session's id cannot also
+        # appear in the host registry, since the two registries are different
+        # files written by different processes.
+        sessions = sessions + _container_sessions(running)
     # The registry names sessions exactly, which is what finally lets status_for
     # answer `open` rather than `maybe-open` for a claude session.
     live_ids = set(live_ids or ()) | {s.session_id for s in sessions}
@@ -734,6 +765,8 @@ _PAGE = """<!doctype html>
  .age {{ color: var(--dim); font-variant-numeric: tabular-nums; }}
  .turns {{ font-size: var(--label); color: var(--faint); }}
  .notes-badge {{ color: var(--ask); }}
+ .pill.runbadge {{ background: transparent; color: var(--codex);
+                   border: 1px solid currentColor; }}
  /* Every dot on the page. Faded so the facts carry the weight, and spaced --
     without this the run read as one word: "0m ago·645 turns". */
  .sep {{ color: var(--faint); opacity: .55; margin: 0 .45rem; }}
@@ -1208,7 +1241,8 @@ def _clip(text: str, n: int) -> str:
 
 def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
          extra: str = "", flag: bool = False, project: str | None = None,
-         agent: str | None = None, context: str = "", tiny: str = "") -> str:
+         agent: str | None = None, context: str = "", tiny: str = "",
+         run: bool = False) -> str:
     """One row, identical in every section.
 
     Every section previously built its own `<table>`, so each computed column
@@ -1222,6 +1256,12 @@ def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
     and the two compose by AND without either knowing about the other.
     """
     pill_html = f'<span class="pill {pill}">{_html.escape(pill)}</span>' if pill else ""
+    # Says the session is not on this machine's terms: a container cwd, a
+    # transcript in the run dir, and `scad run attach` as the only way in.
+    # Beside the status pill because it is the same kind of fact -- what this
+    # row IS, before anything about what it says.
+    badge = ('<span class="pill runbadge" title="runs inside a scad container">'
+             'container</span>') if run else ""
     scope = _html.escape(project or "")
     who = _html.escape(agent or "")
     ctx = context or ""
@@ -1238,7 +1278,7 @@ def _row(title: str, meta: str, chips: list[str], *, pill: str = "",
         f'<div class="row{" q" if flag else ""}{blank}" data-project="{scope}" '
         f'data-agent="{who}">'
         f'<div class="who">'
-        f'<div class="t">{title}{pill_html}{tiny}</div>'
+        f'<div class="t">{title}{pill_html}{badge}{tiny}</div>'
         f'<div class="m">{meta}</div>{extra}'
         f'<div class="acts">{"".join(chips)}</div>'
         f'</div>'
@@ -1313,10 +1353,14 @@ def _facts(row: dict) -> str:
     if row.get("cwd"):
         where.append(f'<span class="mono">{_clip(str(row["cwd"]), 52)}</span>')
     target = (row.get("reentry") or {}).get("target") or row.get("target") or ""
-    if target:
+    if target and not row.get("scad_run_id"):
         where.append(f'<span class="mono">{e(str(target))}</span>')
     if where:
         pairs.append(("where", _SEP.join(where)))
+    if row.get("scad_run_id"):
+        # Its own label rather than folded into `where`: this is the argument to
+        # `scad run attach`, and it is the only handle a container session has.
+        pairs.append(("run", f'<span class="mono">{e(str(row["scad_run_id"]))}</span>'))
     if pairs:
         cells = "".join(f'<dt>{e(k)}</dt><dd>{v}</dd>' for k, v in pairs)
         out.append(f'<dl class="facts">{cells}</dl>')
@@ -1358,6 +1402,7 @@ def session_row(row: dict, *, extra: str = "") -> str:
         _actions(row),
         pill=_pill_for(row),
         tiny=_tiny(row),
+        run=bool(row.get("scad_run_id")),
         extra=extra,
         context=_context_fold(row),
         flag=_wants_you(row),
@@ -1387,6 +1432,10 @@ def _actions(row: dict) -> list[str]:
     which made the same button look like two different features.
     """
     reentry = row.get("reentry") or {}
+    run_id = row.get("scad_run_id")
+    if run_id:
+        # One way in, and it is not a resume: attach to the run.
+        return [_chip(f"scad run attach {run_id}", label="attach")]
     command = reentry.get("command") or resume_command(row)
     actions = [_chip(command, label="resume")] if command else []
     goto = reentry.get("goto") or row.get("goto")

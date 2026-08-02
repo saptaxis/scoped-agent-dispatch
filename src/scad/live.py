@@ -217,6 +217,10 @@ class ClaudeSession:
     session_id: str
     pid: int
     cwd: str = ""
+    # Set only for a session inside a scad container. Its `cwd` is a
+    # `/workspace/...` path that does not exist on the host, so the run id is
+    # the only thing that can resolve a project for it.
+    run_id: str = ""
     name: str = ""
     status: str = ""       # idle | busy | waiting
     waiting_for: str = ""
@@ -344,6 +348,86 @@ def _read_entry(path: Path) -> tuple[ClaudeSession, float] | None:
         entrypoint=text("entrypoint"),
         version=text("version"),
     ), proc_start
+
+
+def _runs_root() -> Path:
+    from scad.config import get_scad_home
+
+    return get_scad_home() / "runs"
+
+
+def _read_container_entry(path: Path, run_id: str) -> ClaudeSession | None:
+    """One registry file from inside a container -> a session, or None.
+
+    Deliberately not `_read_entry`. That one proves two things about the host:
+    the pid is alive, and it is the same process the file was written for. Both
+    are meaningless here -- the pid belongs to the container's namespace, so
+    `os.kill` would ask about an unrelated host process, and `procStart` is the
+    container's clock and does not parse as a UTC ctime at all. Pointing the
+    host reader at these paths returns nothing, silently.
+
+    What replaces those checks is stronger: the caller only passes run ids
+    whose container docker says is up.
+    """
+    try:
+        record = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict):
+        return None
+    session_id = record.get("sessionId")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    try:
+        pid = int(record.get("pid") or 0)
+    except (TypeError, ValueError):
+        pid = 0
+
+    def text(key: str) -> str:
+        value = record.get(key)
+        return value if isinstance(value, str) else ""
+
+    try:
+        started_at = int(record.get("startedAt") or 0)
+    except (TypeError, ValueError):
+        started_at = 0
+
+    return ClaudeSession(
+        session_id=session_id, pid=pid, cwd=text("cwd"), name=text("name"),
+        status=text("status"), waiting_for=text("waitingFor"),
+        started_at=started_at, kind=text("kind"), entrypoint=text("entrypoint"),
+        version=text("version"), run_id=run_id,
+    )
+
+
+def container_live_sessions(run_ids, runs_root: Path | None = None) -> list[ClaudeSession]:
+    """Agents running inside scad's own containers, right now.
+
+    The same registry Claude writes on the host, distributed: a run bind-mounts
+    `~/.scad/runs/<run-id>/claude` to the container's `~/.claude`, so the
+    container writes its `<pid>.json` there. scad only ever read the host's,
+    which made an agent in a scad container -- the thing scad itself started --
+    the one kind of session the live view could not see.
+
+    `run_ids` are the runs whose containers are up. A registry file outlives
+    its container, so liveness is the container, not the file.
+
+    Empty on every failure, per the module contract.
+    """
+    root = Path(runs_root) if runs_root is not None else _runs_root()
+    found = []
+    for run_id in sorted(run_ids or ()):
+        directory = root / run_id / "claude" / "sessions"
+        try:
+            paths = sorted(directory.glob("*.json"))
+        except OSError:
+            continue
+        for path in paths:
+            session = _read_container_entry(path, run_id)
+            if session is not None:
+                found.append(session)
+    found.sort(key=lambda s: s.started_at, reverse=True)
+    return found
 
 
 def claude_live_sessions(registry: Path | str | None = None) -> list[ClaudeSession]:
