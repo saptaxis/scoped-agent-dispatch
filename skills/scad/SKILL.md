@@ -1,129 +1,91 @@
 ---
 name: scad
 description: >
-  Use when dispatching work to Docker containers, running Claude sessions
-  in isolation, managing headless jobs, or when the user mentions scad,
-  run inject, container execution, or isolated agent dispatch.
+  Run and find agent sessions. Use when dispatching work to isolated Docker
+  containers (scad dispatch, run inject, batch, harvest); when launching an
+  interactive claude, codex or kimi session at a directory and resuming it
+  later; or when asking which sessions exist, what is running, what is waiting
+  on you, what a past session was about, or where work happened. Also for the
+  session index, full-text search across turns, the browsable view page, and
+  project attribution. Triggers on scad, container execution, isolated agent
+  dispatch, session launch, resume that session, which sessions, what am I
+  running, and what did I work on.
+compatibility: Requires tmux. Container features additionally require Docker.
 ---
 
-# Scad — Isolated Agent Dispatch
+# scad
 
-**Announce at start:** "I'm using the scad skill to manage container runs."
+**Announce at start:** "I'm using the scad skill."
+
+scad does two things that share one vocabulary: it **runs** agents, and it
+**finds** them afterwards. Most confusion comes from mixing the two, so the
+model below is worth reading before any command.
 
 ## Model
 
-**Run = environment.** A running Docker container with repos, venv, credentials, and plugins set up, identified by a run id. The entrypoint does setup and waits. Nothing runs until work is injected.
+**Run = environment.** A Docker container with repos, venv, credentials and
+skills set up, identified by a run id. Nothing happens in it until work is
+injected.
 
-**Injection = work.** Claude processes sent into a running run via `docker exec`. Can be interactive (tmux window) or headless (`claude -p`). One at a time or N in parallel. Each one is a **job**, and each job produces one agent **session** — its trace, which `scad session ls|show|read` reads. A run hosts many jobs, so `run` and `session` are never interchangeable.
+**Job = work.** One agent process inside a run. A run hosts many jobs, so `run`
+and `session` are never interchangeable.
 
-**Workspace = unified mount.** Single bind mount at `/workspace/`. Git repos cloned into it (managed). Everything else symlinked (unmanaged).
+**Session = the trace.** What an agent actually did, identified by that agent's
+own session id. Every session on the machine is indexed — container or host,
+claude or codex or kimi, whether scad started it or merely observed it.
 
-## When NOT to Use
+The asymmetry that matters: **scad launches only what you ask it to, but sees
+everything.** A session you started by hand in a terminal is in the index
+beside one a container produced.
 
-- Local-only tasks that don't need container isolation
-- Quick edits to a single file
-- When the user explicitly says they don't want containers
+## Which page do you need
 
-## Common Workflows
+| You want to | Read |
+|---|---|
+| Run work in an isolated container | [references/dispatch.md](references/dispatch.md) |
+| Start an interactive agent here, or resume one | [references/launch.md](references/launch.md) |
+| Find a session, read it, or browse them | [references/sessions.md](references/sessions.md) |
 
-| Workflow | Commands | When |
-|----------|----------|------|
-| Interactive dispatch | `scad dispatch <config> --tag t --prompt "task"` | "Do this task interactively" |
-| Interactive + attach | `scad dispatch <config> --tag t --attach --prompt "task"` | "I want to work with Claude" |
-| Execute a plan | `scad dispatch <config> --tag t --plan plan.md` | "Run this implementation plan" |
-| Headless dispatch | `scad dispatch <config> --tag t --headless --prompt "task"` | "Do this, give me results" |
-| Fire and forget | `scad dispatch <config> --tag t --headless --no-wait --prompt "task"` | "Start this, I'll check later" |
-| Parallel batch | `scad batch <config> --tag t --prompt-file prompts.txt` | "Run these N tasks in parallel" |
-| Get results back | `scad harvest <run-id>` | "What did Claude produce?" |
-| Done with a run | `scad finish <run-id>` | "Save work, tear down" |
-| Add more work | `scad run inject <run-id> --prompt "more work"` | "Do this too in the same run" |
-| Send to running Claude | `scad run send <run-id> "message"` | "Tell Claude something mid-conversation" |
-| Monitor | `scad run jobs <run-id>` then `scad run logs <run-id> --job <id>` | "What's happening?" |
+Load one. They do not depend on each other.
 
-## Quick Reference
+## The commands, at a glance
 
-### Composites (start here)
+Enough to recognise what exists; the reference pages carry the flags.
 
 ```bash
-scad dispatch <config> --tag <tag> --prompt "..."            # interactive (default)
-scad dispatch <config> --tag <tag> --prompt "..." --attach   # interactive + attach to tmux
-scad dispatch <config> --tag <tag> --plan plan.md            # execute plan file
-scad dispatch <config> --tag <tag> --prompt "..." --headless # headless + wait
-scad dispatch <config> --tag <tag> --prompt "..." --fetch    # headless + wait + auto-fetch
-scad batch <config> --tag <tag> --prompt-file prompts.txt    # parallel headless jobs
-scad harvest <run-id>                                        # fetch + git log summary
-scad harvest <run-id> --diff                                 # fetch + full diff
-scad finish <run-id>                                         # fetch + clean
+# run work in a container
+scad dispatch <config> --tag t --prompt "..."   # build, start, inject, wait
+scad batch <config> --tag t --prompt-file f     # N jobs in parallel
+scad harvest <run-id>                           # fetch branches + summary
+scad finish <run-id>                            # fetch + tear down
+
+# run an agent here, on the host
+scad session launch --agent codex --cwd .       # interactive, in tmux
+scad session resume <id>                        # attach if open, resume if not
+
+# find what ran
+scad session ls                                 # every indexed session
+scad search "phrase"                            # full text across turns
+scad view                                       # the browsable page
+scad notes ls                                   # the authored tier
+scad where                                      # what project resolves here
 ```
 
-### Run Lifecycle
+## When NOT to use scad
 
-```bash
-scad run start <config> --tag <tag>            # start container (no work)
-scad run start <config> --tag <tag> --prompt "..." # start + inject
-scad run inject <run-id> --prompt "..."         # inject interactive work
-scad run inject <run-id> --prompt "..." --headless  # inject headless
-scad run inject <run-id> --prompt "..." --wait  # block until done
-scad run send <run-id> "message"               # send to running Claude
-scad run attach <run-id>                        # attach to tmux
-scad run jobs <run-id>                          # list jobs
-scad run logs <run-id> --job <id>               # job result
-scad run logs <run-id> --job <id> --stream      # raw stream.jsonl
-scad run stop <run-id>                          # stop container
-scad run clean <run-id>                         # destroy everything
-scad run ls                                     # running runs
-scad run ls --all                               # full history
-```
+- A local edit that needs no isolation and no record.
+- Writing or catching up on notes — that is the `remember` and `recall` skills.
+- Reaching another model family for a one-off opinion — that is the `codex`
+  skill, which needs no scad at all.
 
-### Code Management
+## Rules that hold everywhere
 
-```bash
-scad code fetch <run-id>        # fetch branches to host repos
-scad code sync <run-id>         # push host changes into clones
-scad code diff <run-id>         # diff clones vs source repos
-scad code branch <run-id> <name> # create/switch branch in all clones
-scad code add <run-id> --path ~/data --name data    # add to workspace
-scad code remove <run-id> --name data               # remove from workspace
-scad run refresh <run-id>   # push fresh credentials
-```
-
-### Infrastructure
-
-```bash
-scad build <config>             # build Docker image
-scad config list                # list configs
-scad config info <config>       # environment summary
-scad config new <name>          # scaffold config
-scad run ls                     # running runs
-scad run ls <config> --cost     # project overview with cost
-scad gc                         # find orphans (dry-run)
-scad gc --force                 # clean orphans
-```
-
-## Environment (inside container)
-
-| Item | Value |
-|------|-------|
-| User | `scad` (non-root) |
-| Working dir | `/workspace/<workdir-key>` |
-| Python venv | `/opt/venv` (auto-activated) |
-| Repos | `/workspace/<key>` |
-| Git branch | `scad-{config}-{tag}-{MonDD}-{HHMM}` |
-| Tmux session | `scad` (one session, windows per interactive job) |
-| Credentials | Copied from host at startup |
-| Timezone | Matches host |
-
-## Gotchas
-
-- **`--wait` is headless only.** Interactive jobs can't block — they're in tmux. Use `--headless --wait` or just `--wait` (implies headless).
-- **`--fetch` implies `--wait`.** Can't fetch results from unfinished work.
-- **Detaching tmux returns to host shell.** This is expected — the container keeps running. Reattach with `scad run attach`.
-- **`scad run clean` is destructive.** No undo. Fetch branches first (`scad harvest`) or use `scad finish` which fetches automatically.
-- **Credentials expire ~8h.** Use `scad run refresh <run-id>` to push fresh creds. `scad run ls` warns when <2h remaining.
-
-<HARD-GATE>
-NEVER construct Docker commands manually when scad has a command for it.
-ALWAYS use `scad run inject` to send work — not raw `docker exec`.
-ALWAYS use `scad code fetch` to get branches — not manual git commands.
-If a scad command fails, report the error — do not bypass with Docker/git.
-</HARD-GATE>
+- **Never construct Docker commands by hand** when scad has one. Use
+  `scad run inject`, not `docker exec`; `scad code fetch`, not manual git. If a
+  scad command fails, report the error rather than bypassing it.
+- **`scad run clean` is destructive** and has no undo. Fetch first, or use
+  `scad finish`, which fetches for you.
+- **`reindex --rebuild` is for derivation-rule changes, never for new data.**
+  The incremental pass handles new sessions and growth.
+- **Measure, never cite.** Trace and skill locations have contradicted their
+  own documentation repeatedly. Check the machine before trusting a path.

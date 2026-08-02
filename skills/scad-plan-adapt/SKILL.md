@@ -94,6 +94,6 @@ Write the adapted plan back to the same file (or offer to write to a new file wi
 - **Working directory:** `/workspace/<workdir-key>` (set by entrypoint)
 - **Venv:** `/opt/venv` (auto-activated by entrypoint, no need to source)
 - **Repos:** Mounted at `/workspace/<key>` (rw for worktree repos, ro otherwise)
-- **Claude:** Pre-configured with permissions, plugins, and settings
+- **Claude:** Pre-configured with permissions, skills, and settings
 - **Git:** Configured with host's gitconfig, on a branch named `scad-{config}-{tag}-{MonDD}-{HHMM}`
 - **Timezone:** Matches host (IANA timezone)
