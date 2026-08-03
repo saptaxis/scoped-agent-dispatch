@@ -1,24 +1,38 @@
 ---
 name: remember
 description: >
-  Capture what was just worked out — an intent-driven summary appended to
-  this session's note file. Use when the user says remember, capture this,
-  note this down, or wants the current span of work written to the durable
-  notes store. Accepts an optional angle or guidance to narrow the capture.
+  Capture what this session worked out and could not be recovered from the
+  repo — findings, decisions and their rejected alternatives, where the goal
+  turned, and what is still uncertain. Appends one record to this session's
+  note file. Use when the user says remember, capture this, note this down, or
+  wants the current span written to the durable notes store. Takes an optional
+  angle; with none, select for what the diff and the docs cannot say.
 ---
 
 You are running the capture skill **inside the current session**. You already hold the conversation context — **use it directly. Do NOT re-read the transcript, re-open files, or re-ingest logs.** This must be cheap: one in-context generation plus one append.
 
-Optional guidance from the user arrives as this skill's arguments. It may be empty — if so, capture the span on your own reading of it.
+Optional guidance from the user arrives as this skill's arguments. Treat it as the *angle*, never as the whole brief — the human supplies the angle, you hold the material. Vague guidance ("something useful") is the same as none.
 
 ## What to capture
 
-Summarize what has been worked out **since the last capture** in this session. If guidance was given, use it as the *angle* — the human supplies the angle, you hold the material.
+Cover the span **since the last capture** in this session. But a note is not a work log, and the selection matters more than the coverage.
+
+**The test: would this be lost?** The repo already records what changed — git has the diff, the code says what it now does, the docs say what it is for. A note holds what none of them can:
+
+- **Findings that cost something to learn.** A measurement, a trap, a thing that contradicted the documentation or your own expectation. Include the number or the observation, not just the conclusion.
+- **Why a decision went the way it did** — and especially **what was rejected**, with the condition that would reverse it. A rejection is a first-class capture; it is the thing that stops the same idea being rebuilt in three weeks.
+- **Where the conversation turned.** A goal that changed mid-session, a premise that collapsed, an ask that turned out to be a different ask. The turn is often the most useful line in the note, and it exists nowhere else.
+- **Corrections.** Where something believed earlier *in this session* turned out wrong. Say what was believed, what it actually is, and what caught it.
+- **What is still uncertain**, marked as uncertain.
+
+**Leave out what is recoverable.** A list of files touched, a restatement of what a function now does, a paraphrase of a spec, or a step-by-step of the work in the order it happened. If someone could get it by reading the diff or the doc, it is costing context for nothing.
+
+**Nothing qualifying is a valid outcome.** A span that was mechanical — a rename, a green test run, applying a decision already recorded — deserves a Frame and two lines, or an honest "nothing here that the diff does not already say". An inflated note is worse than a short one, because it teaches the reader that notes are noise.
 
 ## Discipline — anti-inflation (important)
 
 - Present tentative thinking as tentative. Do **not** launder exploration into conclusions.
-- A decision **not** taken (something evaluated and rejected) is a first-class capture — record it *with the condition that would reverse it*.
+- Attribute honestly. "Measured X" and "assumed X" are different claims, and only one of them survives contact with a future session.
 - Scale structure to content: a small span is a Frame plus a line or two; a substantive one uses the narrative sections below.
 
 ## Steps
