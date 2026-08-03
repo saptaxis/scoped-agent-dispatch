@@ -93,7 +93,7 @@ scad vm stop       # stop; containers are preserved
 scad vm delete     # destroy the VM and everything in it
 ```
 
-`build`, `session start`, `dispatch`, and `batch` all start the VM automatically if it is down, so `scad vm start` is rarely needed by hand.
+`build`, `run start`, `dispatch`, and `batch` all start the VM automatically if it is down, so `scad vm start` is rarely needed by hand.
 
 Size the VM in `~/.scad/settings.yml` (defaults shown):
 
@@ -110,7 +110,7 @@ Sizing applies at VM creation. To resize: `scad vm delete && scad vm start`.
 
 **macOS caveats**
 
-- Host paths **outside `$HOME`** (external drives, `/Volumes/…`, `/data`) are not visible to the VM by default. scad reconciles this for you at `session start` — it adds any such `mounts:` or repo paths to the VM and restarts it, but only when the set actually changed.
+- Host paths **outside `$HOME`** (external drives, `/Volumes/…`, `/data`) are not visible to the VM by default. scad reconciles this for you at `run start` — it adds any such `mounts:` or repo paths to the VM and restarts it, but only when the set actually changed.
 - `scad code add` of a non-`$HOME` path **cannot** hot-add: a VM mount is only addable at restart. scad warns and offers to restart (`--restart-vm` to skip the prompt); the restart stops running sessions, and scad restarts the target session afterwards.
 - `gpu: true` is **unsupported** on macOS — there is no NVIDIA runtime in a Lima VM. It errors clearly. GPU passthrough stays Linux-only.
 - Docker Desktop and Podman are not supported targets. Colima is *the* macOS provider.
@@ -217,8 +217,10 @@ scad view [--days N] [--no-open] [--refresh] [--output PATH]   # render the inde
 
 # Notes — the authored tier
 scad session note --current                        # append a record (JSON on stdin); /remember calls this
-scad session notes <id>                            # read a session's notes back
-scad search <query> --notes                        # search topic, title, tags, entities
+scad session notes <id>                            # read a session's notes back, from the FILE
+scad notes ls [--project X] [--limit N] [--json]   # every note, newest first
+scad notes read <id> [--last | --idx N]            # one session's notes
+scad search <query> --notes                        # topic, title, tags, entities — NOT bodies
 ```
 
 ## Quick start
