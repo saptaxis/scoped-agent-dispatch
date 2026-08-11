@@ -223,7 +223,22 @@ def upsert_session(
             -- from `cwd` and is the join key for retrieval, so a wandering cwd
             -- silently moves a session between projects.
             cwd              = COALESCE(sessions.cwd, excluded.cwd),
-            project          = excluded.project,
+            -- Pinned the SAME way, and this is the other half of the fix above.
+            -- `project` is derived from the cwd of the record a pass happened to
+            -- parse, so assigning it plainly let the label keep wandering while
+            -- `cwd` no longer did — leaving the two columns of one row
+            -- contradicting each other. Observed on the very session the comment
+            -- above cites: cwd `.../scoped-agent-dispatch`, project
+            -- `traitful-docs`, and `resolve_project(stored cwd)` disagreeing with
+            -- both. Because `project` is the retrieval join key, that session's
+            -- notes fell out of its own project's listing.
+            --
+            -- Safe to pin: `scad_run_id` is derived from the archive path and is
+            -- identical on every pass, so no later pass knows better. The one
+            -- thing it gives up is a marker dropped mid-session taking effect on
+            -- the next append — and re-attribution already required `--rebuild`,
+            -- since the pass is mtime-based and never re-reads unchanged files.
+            project          = COALESCE(sessions.project, excluded.project),
             title            = COALESCE(excluded.title, sessions.title),
             -- COALESCE, not assignment. Two writers share this column (see the
             -- schema), and an incremental pass parses only the tail — which

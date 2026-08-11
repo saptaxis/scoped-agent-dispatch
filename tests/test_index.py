@@ -1245,6 +1245,29 @@ class TestCwdIsTheSessionsOwnDirectory:
         store(conn, rec(cwd="/repo/real"), parsed_offset=99)
         assert session_row(conn, "S1")["cwd"] == "/repo/real"
 
+    def test_the_label_cannot_drift_either(self, tmp_path):
+        """`project` is a SEPARATE column, and pinning cwd alone did not pin it.
+
+        The original fix stopped `cwd` moving and left `project = excluded.project`
+        one line below, so the label kept wandering with whatever cwd the tail of
+        a pass happened to start on — leaving one row whose two columns disagreed.
+        Because `project` is the retrieval join key, that is the half that
+        actually loses work: a session's notes drop out of its project's listing.
+        """
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(cwd="/repo/real"), project="real")
+        store(conn, rec(cwd="/somewhere/else"), project="else", parsed_offset=99)
+        row = session_row(conn, "S1")
+        assert row["cwd"] == "/repo/real"
+        assert row["project"] == "real"
+
+    def test_a_missing_project_is_still_filled_in_later(self, tmp_path):
+        """Same carve-out as cwd: only drift is refused, never first arrival."""
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(cwd=None), project=None)
+        store(conn, rec(cwd="/repo/real"), project="real", parsed_offset=99)
+        assert session_row(conn, "S1")["project"] == "real"
+
 
 CODEX_HEAD = [
     {"timestamp": "2026-07-31T12:22:08.000Z", "type": "session_meta",
