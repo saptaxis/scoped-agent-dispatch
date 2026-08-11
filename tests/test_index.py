@@ -825,7 +825,9 @@ class TestReindexReadsRenames:
 
 # --- notes: the tier that is never rederivable --------------------------------
 
-from scad.index import SOURCE_NOTE, append_notes, index_notes, session_notes  # noqa: E402
+from scad.index import (  # noqa: E402
+    SOURCE_NOTE, append_notes, index_notes, search_notes, session_notes,
+)
 from scad.notes import append_note  # noqa: E402
 from scad.readers import read_notes  # noqa: E402
 
@@ -838,7 +840,7 @@ def noted(tmp_path, monkeypatch):
     return tmp_path
 
 
-NOTE = {"topic": "notes-store", "relation": "continue", "title": "first",
+NOTE = {"topic": "notes-store", "title": "first",
         "text": "body", "tags": ["notes", "jsonl"], "entities": ["session-index.md"],
         "cwd_at_write": "/repo"}
 
@@ -982,6 +984,198 @@ class TestIndexNotes:
         append_note({**NOTE, "title": "second"}, session_id="S1")
         index_notes(conn)
         assert [r["title"] for r in session_notes(conn, "S1")] == ["first", "second"]
+
+
+class TestNotesSchemaMoved:
+    """`kind` and `project` in, stored `relation` out."""
+
+    def test_the_columns_exist_on_a_fresh_index(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+        assert {"kind", "project"} <= cols
+        assert "relation" not in cols     # derived per query, never stored
+
+    def test_an_index_built_before_them_gains_them_on_connect(self, tmp_path):
+        """ALTER, via _ADDED_COLUMNS. Without it the columns would exist only on
+        machines that had never indexed anything."""
+        path = tmp_path / "i.sqlite"
+        older = sqlite3.connect(path)
+        older.execute(
+            "CREATE TABLE notes (session_id TEXT NOT NULL, idx INTEGER NOT NULL, "
+            "ts INTEGER, topic TEXT, relation TEXT, parent TEXT, title TEXT, "
+            "tags TEXT, entities TEXT, note_path TEXT NOT NULL, "
+            "PRIMARY KEY (session_id, idx))")
+        older.execute("INSERT INTO notes (session_id, idx, topic, relation, note_path) "
+                      "VALUES ('OLD', 0, 'a-topic', 'continue', '/n')")
+        older.commit()
+        older.close()
+
+        conn = connect(path)
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+        assert {"kind", "project"} <= cols
+        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        # ALTER does not backfill, and the notes pass resumes from notes_offset,
+        # so an existing row stays NULL until something re-reads its file.
+        assert (row["kind"], row["project"]) == (None, None)
+
+    def test_an_unbackfilled_row_still_answers_as_the_default_kind(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="S1"))
+        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, note_path) "
+                     "VALUES ('S1', 0, 1, 'a-topic', '/n')")
+        conn.commit()
+        assert session_notes(conn, "S1")[0]["kind"] == "info"
+
+    def test_kind_and_project_are_stored_from_the_record(self, noted):
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note({**NOTE, "kind": "bug", "project": "orglens"}, session_id="S1")
+        append_notes(conn, "S1", read_notes(p)[0], str(p))
+        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        assert (row["kind"], row["project"]) == ("bug", "orglens")
+
+
+class TestBackfillingTheNewColumns:
+    """What actually populates `kind` / `project` on notes indexed before them.
+
+    ALTER does not backfill and the notes pass resumes from `notes_offset`, so a
+    row that predates the columns keeps NULL through any number of ordinary
+    reindexes. Only re-reading the files fixes it — and the files are truth and
+    are never touched, so both routes are safe.
+    """
+
+    def _stale(self, noted):
+        """An index whose note row is there but predates kind/project."""
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note({**NOTE, "kind": "handoff", "project": "orglens"},
+                        session_id="S1")
+        index_notes(conn)
+        conn.execute("UPDATE notes SET kind = NULL, project = NULL")
+        conn.commit()
+        return conn, p
+
+    def test_an_ordinary_reindex_does_not_fix_it(self, noted):
+        conn, _ = self._stale(noted)
+        index_notes(conn)
+        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        assert (row["kind"], row["project"]) == (None, None)
+
+    def test_clearing_the_rows_and_the_offset_repopulates_them(self, noted):
+        conn, _ = self._stale(noted)
+        conn.executescript(
+            "DELETE FROM notes; UPDATE sessions SET notes_offset = 0;")
+        conn.commit()
+        index_notes(conn)
+        rows = conn.execute("SELECT kind, project FROM notes").fetchall()
+        assert [(r["kind"], r["project"]) for r in rows] == [("handoff", "orglens")]
+
+    def test_a_rebuild_repopulates_them_too(self, noted):
+        conn, _ = self._stale(noted)
+        arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        reindex(conn, rebuild=True)
+        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        assert (row["kind"], row["project"]) == ("handoff", "orglens")
+
+    def test_resetting_the_offset_without_clearing_would_duplicate(self, noted):
+        """Why the recipe is DELETE *and* reset, not reset alone: idx continues
+        from the maximum, so the same records come back as new rows."""
+        conn, _ = self._stale(noted)
+        conn.execute("UPDATE sessions SET notes_offset = 0")
+        conn.commit()
+        index_notes(conn)
+        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 2
+
+
+class TestRelationIsDerived:
+    """The rule: parent -> branch; topic seen earlier -> continue; else shift."""
+
+    def _thread(self, tmp_path, records):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="S1"))
+        for i, r in enumerate(records):
+            conn.execute(
+                "INSERT INTO notes (session_id, idx, ts, kind, topic, parent, note_path) "
+                "VALUES ('S1', ?, ?, 'info', ?, ?, '/n')",
+                (i, i, r.get("topic"), r.get("parent")))
+        conn.commit()
+        return conn
+
+    def test_a_new_topic_with_no_parent_is_a_shift(self, tmp_path):
+        conn = self._thread(tmp_path, [{"topic": "notes-schema"}])
+        assert [r["relation"] for r in session_notes(conn, "S1")] == ["shift"]
+
+    def test_a_topic_seen_earlier_in_the_thread_is_a_continue(self, tmp_path):
+        conn = self._thread(tmp_path, [{"topic": "notes-schema"},
+                                       {"topic": "notes-schema"}])
+        assert [r["relation"] for r in session_notes(conn, "S1")] == ["shift", "continue"]
+
+    def test_a_parent_makes_it_a_branch(self, tmp_path):
+        conn = self._thread(tmp_path, [{"topic": "notes-schema"},
+                                       {"topic": "kind-enum", "parent": "notes-schema"}])
+        assert [r["relation"] for r in session_notes(conn, "S1")] == ["shift", "branch"]
+
+    def test_a_parent_outside_this_session_is_still_a_branch(self, tmp_path):
+        # `parent` legitimately names a topic in ANOTHER session's note file, so
+        # the rule must not require the parent to be resolvable here.
+        conn = self._thread(tmp_path, [{"topic": "kind-enum",
+                                        "parent": "written-in-some-other-session"}])
+        assert [r["relation"] for r in session_notes(conn, "S1")] == ["branch"]
+
+    def test_parent_beats_a_topic_that_also_appeared_earlier(self, tmp_path):
+        conn = self._thread(tmp_path, [{"topic": "notes-schema"},
+                                       {"topic": "notes-schema", "parent": "elsewhere"}])
+        assert session_notes(conn, "S1")[1]["relation"] == "branch"
+
+    def test_a_later_note_never_changes_an_earlier_one(self, tmp_path):
+        # Only rows BEFORE this one count, or every first note would turn into a
+        # continue as soon as its topic came up again.
+        conn = self._thread(tmp_path, [{"topic": "t"}, {"topic": "t"}, {"topic": "t"}])
+        assert [r["relation"] for r in session_notes(conn, "S1")] == [
+            "shift", "continue", "continue"]
+
+    def test_the_derivation_is_the_same_one_the_file_reader_uses(self, tmp_path):
+        # Two implementations of one rule (SQL over rows, Python over records)
+        # must not drift. Same thread, same answers.
+        from scad.notes import hydrate_notes
+        records = [{"topic": "t"}, {"topic": "t"}, {"topic": "u", "parent": "t"},
+                   {"topic": "v"}]
+        conn = self._thread(tmp_path, records)
+        assert [r["relation"] for r in session_notes(conn, "S1")] == \
+               [r["relation"] for r in hydrate_notes(records)]
+
+
+class TestNoteProjectOverridesTheSessions:
+    """COALESCE(n.project, s.project) — the cross-capture case."""
+
+    def _cross(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="S1"), project="alpha")
+        conn.execute("INSERT INTO notes (session_id, idx, ts, kind, topic, project, "
+                     "title, tags, entities, note_path) "
+                     "VALUES ('S1',0,2,'bug','a-bug-in-beta','beta','filed elsewhere',"
+                     "'[]','[]','/n')")
+        conn.execute("INSERT INTO notes (session_id, idx, ts, kind, topic, project, "
+                     "title, tags, entities, note_path) "
+                     "VALUES ('S1',1,1,'info','ordinary',NULL,'stays home',"
+                     "'[]','[]','/n')")
+        conn.commit()
+        return conn
+
+    def test_search_reports_the_notes_project_not_the_sessions(self, tmp_path):
+        hits = {h["topic"]: h["project"] for h in search_notes(self._cross(tmp_path), "a")}
+        assert hits["a-bug-in-beta"] == "beta"
+        assert hits["ordinary"] == "alpha"
+
+    def test_search_matches_the_authored_project_name(self, tmp_path):
+        # "beta" appears in no topic, title, tag or entity — only in `project`.
+        hits = search_notes(self._cross(tmp_path), "beta")
+        assert [h["topic"] for h in hits] == ["a-bug-in-beta"]
+
+    def test_search_does_not_turn_a_projects_name_into_a_listing(self, tmp_path):
+        # Matching the RESOLVED project would make every note in alpha a hit for
+        # "alpha", which answers a different question than search asks.
+        assert search_notes(self._cross(tmp_path), "alpha") == []
 
 
 class TestReindexArchivesFirst:

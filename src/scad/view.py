@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from scad.index import NOTE_KIND_SQL, NOTE_PROJECT_SQL, NOTE_RELATION_SQL
 from scad.live import (
     ClaudeSession,
     TmuxPane,
@@ -624,10 +625,11 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     # Notes are the authored tier — the only thing here that can never be
     # re-derived — and until now they were write-only from the page's side.
     notes = [dict(r) for r in conn.execute(
-        "SELECT n.session_id, n.idx, n.ts, n.topic, n.relation, n.parent, n.title, "
-        "       n.tags, n.entities, n.note_path, s.project, s.name, s.agent, s.cwd "
-        "FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
-        "ORDER BY n.ts DESC"
+        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
+        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       n.note_path, {NOTE_PROJECT_SQL}, s.name, s.agent, s.cwd "
+        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"ORDER BY n.ts DESC"
     ).fetchall()]
 
     # Notes belong ON the row, not only in their own section. A session with

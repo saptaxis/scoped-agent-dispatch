@@ -28,6 +28,7 @@ from scad.records import (
     SessionRecord,
     TurnRecord,
 )
+from scad.notes import DEFAULT_KIND
 
 # Claude line types that carry no conversation. ~45% of a real transcript.
 _CLAUDE_SKIP_TYPES = {
@@ -392,9 +393,13 @@ def read_notes(path: Path, start_offset: int = 0) -> tuple[list[NoteRecord], int
             continue                      # None from a malformed line, or a bare scalar
         notes.append(NoteRecord(
             ts=_epoch_ms(rec.get("ts")),
+            # A record written before `kind` existed has one all the same: the
+            # default is part of the shape, so absent means `info` rather than
+            # unknown. `relation` is not read at all — it is derived per query.
+            kind=rec.get("kind") or DEFAULT_KIND,
             topic=rec.get("topic"),
-            relation=rec.get("relation"),
             parent=rec.get("parent"),
+            project=rec.get("project"),
             title=rec.get("title"),
             tags=_as_list(rec.get("tags")),
             entities=_as_list(rec.get("entities")),

@@ -697,10 +697,10 @@ from scad.readers import read_notes  # noqa: E402
 
 NOTE = {
     "ts": "2026-07-29T11:00:00+05:30",
-    "span": "since-last",
+    "kind": "info",
     "topic": "notes-store",
-    "relation": "continue",
     "parent": None,
+    "project": None,
     "title": "Built the notes store",
     "text": "**Frame**\nsomething\n",
     "tags": ["notes", "jsonl", "append-only"],
@@ -726,9 +726,20 @@ class TestReadNotes:
     def test_indexed_fields_are_carried(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
         n = read_notes(p)[0][0]
-        assert (n.topic, n.relation, n.parent) == ("notes-store", "continue", None)
+        assert (n.kind, n.topic, n.parent) == ("info", "notes-store", None)
         assert n.tags == ["notes", "jsonl", "append-only"]
         assert n.entities == ["session-index.md"]
+
+    def test_the_authored_project_is_carried_and_defaults_to_nothing(self, tmp_path):
+        # NULL is not "no project" — it means "the writing session's project",
+        # which only the index can resolve. A value here overrides that.
+        p = write_jsonl(tmp_path / "S1.jsonl", [NOTE, {**NOTE, "project": "orglens"}])
+        assert [n.project for n in read_notes(p)[0]] == [None, "orglens"]
+
+    def test_a_record_written_before_kind_existed_reads_as_the_default(self, tmp_path):
+        older = {k: v for k, v in NOTE.items() if k != "kind"}
+        p = write_jsonl(tmp_path / "S1.jsonl", [older])
+        assert read_notes(p)[0][0].kind == "info"
 
     def test_cwd_at_write_is_carried_so_the_project_survives_the_trace(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])

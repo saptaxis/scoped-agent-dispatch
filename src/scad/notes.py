@@ -30,10 +30,10 @@ from scad.config import get_scad_home
 # by humans as often as by code.
 NOTE_FIELDS = (
     "ts",            # ISO8601, when the capture was made
-    "span",          # what it covers — "since-last" or a short description
+    "kind",          # info | handoff | bug | request | verification
     "topic",         # semantic subject, kebab
-    "relation",      # continue | shift | branch | return
-    "parent",        # the earlier topic, on branch / return
+    "parent",        # the earlier topic this hangs off, when it hangs off one
+    "project",       # override the writing session's project; None = that project
     "title",         # one-line label
     "text",          # adaptive narrative, markdown
     "tags",          # dense keywords — the search index
@@ -43,7 +43,22 @@ NOTE_FIELDS = (
     "cwd_at_write",  # where the session was working; keeps `project` derivable
 )
 
-RELATIONS = ("continue", "shift", "branch", "return")
+# What the record IS, on an axis that used to leak into free text — two notes in
+# the corpus said `span: "handoff"` and two more prefixed their title
+# "HANDOFF —", which no listing and no search could see. Exactly five, and
+# `decision` is deliberately not among them: a decision is already a body
+# section (**Concluded** / **Rejected**), and promoting it to a kind would
+# invite a note per decision.
+KINDS = ("info", "handoff", "bug", "request", "verification")
+
+DEFAULT_KIND = "info"
+
+# What `relation` may come out as. Derived at read time, never authored and
+# never stored — see `derived_relation`. `return` is absent because the rule
+# cannot produce it: nothing in the record distinguishes resuming an earlier
+# topic from continuing it, and a value only a human could assign is a value
+# that gets assigned wrongly.
+RELATIONS = ("continue", "shift", "branch")
 
 _LIST_FIELDS = ("tags", "entities", "sessions")
 
@@ -137,7 +152,7 @@ def normalize_note(record: dict, *, cwd: str | None = None) -> dict:
     out.update({k: v for k, v in record.items() if k not in NOTE_FIELDS})
 
     out["ts"] = record.get("ts") or datetime.now().astimezone().isoformat(timespec="seconds")
-    out["span"] = record.get("span") or "since-last"
+    out["kind"] = record.get("kind") or DEFAULT_KIND
     out["cwd_at_write"] = record.get("cwd_at_write") or cwd or os.getcwd()
     for field in _LIST_FIELDS:
         if out.get(field) is None:
@@ -344,4 +359,47 @@ def read_note_file(path: Path, start_offset: int = 0) -> list[dict]:
                 continue
             if isinstance(rec, dict):
                 out.append(rec)
+    return out
+
+
+def derived_relation(record: dict, earlier: list[dict]) -> str:
+    """Where this note sits in its thread — computed, never authored.
+
+    Authoring it asked the writer to recall the thread it is in and to pick a
+    word for it, which is the kind of judgment a model gets wrong quietly. The
+    two facts the answer actually needs are already on the record: whether it
+    names a `parent`, and whether its `topic` has been seen before in this
+    thread. So:
+
+        parent set                      -> branch
+        topic already appeared earlier  -> continue
+        otherwise                       -> shift
+
+    `parent` wins outright, and deliberately: a note that names a parent is
+    hanging off that topic whether or not the topic also appears earlier in
+    this file, and a `parent` legitimately points at a topic in a *different*
+    session's notes — which nothing local could ever check.
+    """
+    if record.get("parent"):
+        return "branch"
+    topic = record.get("topic")
+    if topic and any(e.get("topic") == topic for e in earlier):
+        return "continue"
+    return "shift"
+
+
+def hydrate_notes(records: list[dict]) -> list[dict]:
+    """Fill the read-time fields on a file's records, oldest first.
+
+    `relation` is derived here and `kind` defaults here, so a record written
+    before either existed reads back the same shape as one written today.
+    Copies rather than mutates: the caller may be holding the records it just
+    read off disk, and the file is truth.
+    """
+    out = []
+    for i, record in enumerate(records):
+        hydrated = dict(record)
+        hydrated["kind"] = record.get("kind") or DEFAULT_KIND
+        hydrated["relation"] = derived_relation(record, records[:i])
+        out.append(hydrated)
     return out

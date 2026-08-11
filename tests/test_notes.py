@@ -6,10 +6,15 @@ from pathlib import Path
 import pytest
 
 from scad.notes import (
+    DEFAULT_KIND,
+    KINDS,
     PROJECT_DIR_CAP,
     NOTE_FIELDS,
+    RELATIONS,
     append_note,
+    derived_relation,
     encode_cwd,
+    hydrate_notes,
     note_path,
     notes_root,
     read_note_file,
@@ -109,17 +114,33 @@ class TestAppendNote:
         p = append_note({"title": "t"}, session_id="S1", cwd="/Users/vsr/code/orglens")
         assert json.loads(p.read_text())["cwd_at_write"] == "/Users/vsr/code/orglens"
 
-    def test_defaults_fill_ts_and_span(self, home):
+    def test_defaults_fill_ts_and_kind(self, home):
         rec = json.loads(append_note({"title": "t"}, session_id="S1").read_text())
-        assert rec["span"] == "since-last"
+        assert rec["kind"] == "info"
         assert rec["ts"] and rec["ts"][:2] == "20"
 
-    def test_caller_supplied_ts_and_span_win(self, home):
+    def test_caller_supplied_ts_and_kind_win(self, home):
         rec = json.loads(append_note(
-            {"title": "t", "ts": "2026-01-01T00:00:00", "span": "the whole plan"},
+            {"title": "t", "ts": "2026-01-01T00:00:00", "kind": "handoff"},
             session_id="S1").read_text())
         assert rec["ts"] == "2026-01-01T00:00:00"
-        assert rec["span"] == "the whole plan"
+        assert rec["kind"] == "handoff"
+
+    def test_span_and_relation_are_no_longer_part_of_the_record(self, home):
+        # span was written on every record and read by nothing; relation is now
+        # derived from parent and the thread. Neither is asked for any more, so
+        # neither may be invented by the store.
+        rec = json.loads(append_note({"title": "t"}, session_id="S1").read_text())
+        assert "span" not in rec and "relation" not in rec
+
+    def test_project_is_absent_unless_the_caller_files_one(self, home):
+        # Omitted means "this session's project", which only the index can
+        # resolve — so the store must not guess a value here.
+        rec = json.loads(append_note({"title": "t"}, session_id="S1").read_text())
+        assert rec["project"] is None
+        filed = json.loads(append_note(
+            {"title": "t", "project": "orglens"}, session_id="S2").read_text())
+        assert filed["project"] == "orglens"
 
     def test_appending_never_disturbs_the_earlier_bytes(self, home):
         p = append_note({"title": "first"}, session_id="S1")
@@ -170,6 +191,73 @@ class TestReadNoteFile:
             fh.write("{not json\n")
         append_note({"title": "also good"}, session_id="S1")
         assert [r["title"] for r in read_note_file(p)] == ["good", "also good"]
+
+
+class TestDerivedRelation:
+    """`relation` is computed from the record and the thread, never authored."""
+
+    def test_a_first_note_on_a_new_topic_is_a_shift(self):
+        assert derived_relation({"topic": "notes-schema"}, []) == "shift"
+
+    def test_a_topic_already_in_the_thread_is_a_continue(self):
+        earlier = [{"topic": "notes-schema"}]
+        assert derived_relation({"topic": "notes-schema"}, earlier) == "continue"
+
+    def test_a_parent_is_a_branch(self):
+        assert derived_relation({"topic": "kind-enum", "parent": "notes-schema"},
+                                [{"topic": "notes-schema"}]) == "branch"
+
+    def test_a_parent_naming_a_topic_this_file_has_never_seen_is_still_a_branch(self):
+        # Lineage crosses session files: `parent` routinely points at a topic
+        # written in a different session, which nothing here can resolve.
+        assert derived_relation({"topic": "kind-enum", "parent": "another-sessions-topic"},
+                                [{"topic": "unrelated"}]) == "branch"
+
+    def test_parent_wins_over_a_repeated_topic(self):
+        assert derived_relation({"topic": "t", "parent": "elsewhere"},
+                                [{"topic": "t"}]) == "branch"
+
+    def test_a_note_with_no_topic_at_all_is_a_shift_not_a_continue(self):
+        # Two topicless records are not "the same topic" — treating absent as a
+        # match would chain every malformed note into one thread.
+        assert derived_relation({}, [{}]) == "shift"
+
+    def test_the_derived_values_are_the_declared_ones(self):
+        assert set(RELATIONS) == {"continue", "shift", "branch"}
+
+
+class TestHydrateNotes:
+    def test_each_record_is_placed_against_the_ones_before_it(self):
+        records = [{"topic": "a"}, {"topic": "a"}, {"topic": "b", "parent": "a"},
+                   {"topic": "c"}]
+        assert [r["relation"] for r in hydrate_notes(records)] == [
+            "shift", "continue", "branch", "shift"]
+
+    def test_a_record_written_before_kind_existed_reads_as_info(self):
+        assert hydrate_notes([{"topic": "a"}])[0]["kind"] == "info"
+
+    def test_an_authored_kind_is_kept(self):
+        assert hydrate_notes([{"topic": "a", "kind": "handoff"}])[0]["kind"] == "handoff"
+
+    def test_the_records_it_was_given_are_not_mutated(self):
+        # The caller is holding what it just read off disk, and the file is truth.
+        records = [{"topic": "a"}]
+        hydrate_notes(records)
+        assert records == [{"topic": "a"}]
+
+    def test_an_empty_file_hydrates_to_nothing(self):
+        assert hydrate_notes([]) == []
+
+
+class TestKindEnum:
+    def test_the_five_values_and_the_default(self):
+        assert KINDS == ("info", "handoff", "bug", "request", "verification")
+        assert DEFAULT_KIND == "info"
+
+    def test_decision_is_deliberately_not_a_kind(self):
+        # It is already a body section (**Concluded** / **Rejected**); a kind for
+        # it would invite one note per decision.
+        assert "decision" not in KINDS
 
 
 # --- --current: which session's trace is being written in this cwd right now ---

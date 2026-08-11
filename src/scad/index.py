@@ -18,7 +18,7 @@ import click
 
 from scad.archive import STATE_HISTORY_NAME, archive_all, archive_root
 from scad.config import get_scad_home
-from scad.notes import notes_root
+from scad.notes import DEFAULT_KIND, notes_root
 from scad.project import resolve_project
 from scad.readers import (
     read_claude_any,
@@ -108,13 +108,18 @@ CREATE TABLE IF NOT EXISTS turns (
   PRIMARY KEY (session_id, idx)
 );
 
+-- No `relation` column: it is derived per query from `parent` and the topics
+-- already in the thread (NOTE_RELATION_SQL). Older indexes still carry the
+-- column with its authored values in it — nothing reads it, and dropping it
+-- would be the one destructive act this file otherwise refuses.
 CREATE TABLE IF NOT EXISTS notes (
   session_id TEXT NOT NULL,
   idx        INTEGER NOT NULL,
   ts         INTEGER,
+  kind       TEXT,
   topic      TEXT,
-  relation   TEXT,
   parent     TEXT,
+  project    TEXT,               -- authored override; NULL = the session's project
   title      TEXT,
   tags       TEXT,
   entities   TEXT,
@@ -146,6 +151,16 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "sessions": {
         "name": "TEXT", "harness_state": "TEXT", "needs": "TEXT", "needs_detail": "TEXT",
     },
+    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass resumes from
+    # `notes_offset` — so on an index that already has rows, these stay NULL
+    # through any number of ordinary reindexes. Only re-reading the note files
+    # fills them: `scad reindex --rebuild`, or `DELETE FROM notes; UPDATE
+    # sessions SET notes_offset = 0;` followed by `scad reindex`. Both halves of
+    # that second recipe are needed — resetting the offset alone re-appends the
+    # same records under fresh idx values. Meanwhile queries read `kind` through
+    # COALESCE(kind,'info'), so an un-backfilled row answers as the default
+    # rather than as nothing.
+    "notes": {"kind": "TEXT", "project": "TEXT"},
 }
 
 
@@ -332,6 +347,37 @@ def apply_job_state(conn, job: JobStateRecord) -> bool:
     return True
 
 
+# --- the two notes columns that are computed, not stored ---
+#
+# Both expect the `notes` table to be aliased `n`, and the project one expects
+# `sessions` aliased `s`. They live here rather than inline so the CLI, the
+# search and the view page cannot drift into three different answers to the
+# same question.
+
+# `relation` in SQL, and the same rule as notes.derived_relation. The EXISTS
+# looks at the whole session's rows rather than at insert order, so an
+# incremental pass that appends one note gets the same answer a rebuild does.
+NOTE_RELATION_SQL = (
+    "CASE WHEN COALESCE(n.parent, '') <> '' THEN 'branch' "
+    "     WHEN EXISTS (SELECT 1 FROM notes prior "
+    "                  WHERE prior.session_id = n.session_id AND prior.idx < n.idx "
+    "                    AND prior.topic IS NOT NULL AND prior.topic = n.topic) "
+    "     THEN 'continue' "
+    "     ELSE 'shift' END AS relation"
+)
+
+# A note's project is the writing session's project *unless* the note names one.
+# That is the cross-capture case: a session working in project A files a bug
+# against project B, and before this it was filed under A because the project
+# only ever arrived through this JOIN. Nothing is lost by letting the note win —
+# `cwd_at_write` still records where it was actually written.
+NOTE_PROJECT_RESOLVED = "COALESCE(n.project, s.project)"
+NOTE_PROJECT_SQL = f"{NOTE_PROJECT_RESOLVED} AS project"
+
+# An index row written before `kind` existed reads as the default, not as NULL.
+NOTE_KIND_SQL = f"COALESCE(n.kind, '{DEFAULT_KIND}')"
+
+
 def append_notes(
     conn, session_id: str, notes: list[NoteRecord], note_path: str
 ) -> int:
@@ -349,10 +395,11 @@ def append_notes(
     ).fetchone()[0]
     conn.executemany(
         "INSERT OR IGNORE INTO notes "
-        "(session_id, idx, ts, topic, relation, parent, title, tags, entities, note_path) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?)",
+        "(session_id, idx, ts, kind, topic, parent, project, title, tags, entities, "
+        " note_path) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         [
-            (session_id, start + i, n.ts, n.topic, n.relation, n.parent, n.title,
+            (session_id, start + i, n.ts, n.kind, n.topic, n.parent, n.project, n.title,
              json.dumps(list(n.tags)), json.dumps(list(n.entities)), note_path)
             for i, n in enumerate(notes)
         ],
@@ -419,41 +466,44 @@ def index_notes(conn) -> collections.Counter:
         return stats
 
     for shard in sorted(p for p in root.iterdir() if p.is_dir()):
-        agent = shard.name
         for path in sorted(shard.glob("*.jsonl")):
-            session_id = path.stem
-            row = session_row(conn, session_id)
-            size = path.stat().st_size
-            if row is not None and row["notes_offset"] >= size:
-                continue
-
-            start = row["notes_offset"] if row is not None else 0
-            try:
-                notes, end = read_notes(path, start)
-            except Exception as exc:      # a note we cannot read must not stop the pass
-                click.echo(f"[scad] skipped note {path.name}: {exc}")
-                stats["skipped_files"] += 1
-                continue
-
-            if row is None:
-                cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
-                _ensure_note_session(conn, session_id, agent, cwd)
-
-            stats["notes"] += append_notes(conn, session_id, notes, str(path))
-            conn.execute(
-                "UPDATE sessions SET notes_offset = ? WHERE id = ?", (end, session_id))
-            conn.commit()
+            stats += index_note_file(conn, path, shard.name)
 
     return stats
 
 
-def session_notes(conn, session_id: str):
-    """A session's note rows, oldest first — the order they were captured in."""
-    return conn.execute(
-        "SELECT idx, ts, topic, relation, parent, title, tags, entities, note_path "
-        "FROM notes WHERE session_id = ? ORDER BY idx",
-        (session_id,),
-    ).fetchall()
+def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
+    """Index one note file from wherever its offset left off.
+
+    Split out of the pass above so the WRITE path can index the record it just
+    appended without a second implementation of the offset rule. That rule is
+    the whole reason this is shared: reading rows in without advancing
+    `notes_offset` makes the next pass re-append the same records under fresh
+    `idx` values, which is a duplicate that looks like a real second note.
+    """
+    stats = collections.Counter()
+    session_id = path.stem
+    row = session_row(conn, session_id)
+    size = path.stat().st_size
+    if row is not None and row["notes_offset"] >= size:
+        return stats
+
+    start = row["notes_offset"] if row is not None else 0
+    try:
+        notes, end = read_notes(path, start)
+    except Exception as exc:          # a note we cannot read must not stop the pass
+        click.echo(f"[scad] skipped note {path.name}: {exc}")
+        stats["skipped_files"] += 1
+        return stats
+
+    if row is None:
+        cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
+        _ensure_note_session(conn, session_id, agent, cwd)
+
+    stats["notes"] += append_notes(conn, session_id, notes, str(path))
+    conn.execute("UPDATE sessions SET notes_offset = ? WHERE id = ?", (end, session_id))
+    conn.commit()
+    return stats
 
 
 def session_row(conn, session_id: str):
@@ -695,32 +745,57 @@ def _fts_query(raw: str) -> str:
 def session_notes(conn, session_id: str) -> list[dict]:
     """A session's notes, oldest first — the order they were written."""
     rows = conn.execute(
-        "SELECT idx, ts, topic, relation, parent, title, tags, entities, note_path "
-        "FROM notes WHERE session_id = ? ORDER BY idx",
+        f"SELECT n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, {NOTE_RELATION_SQL}, "
+        f"       n.parent, n.project, n.title, n.tags, n.entities, n.note_path "
+        f"FROM notes n WHERE n.session_id = ? ORDER BY n.idx",
         (session_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
 def search_notes(conn, query: str, *, limit: int = 20) -> list[dict]:
-    """Search notes by topic, title and tags.
+    """Search notes by topic, title, tags, entities and the note's own project.
 
     Deliberately not FTS. Notes are the authored tier and there are few of them;
-    a LIKE over four short columns is exact enough and needs no second index to
+    a LIKE over five short columns is exact enough and needs no second index to
     keep in sync with `turns_fts`. If the note count ever reaches the thousands
     this becomes an FTS table over `notes.title`.
+
+    `n.project` is matched, not the resolved one: matching the JOINed project
+    would make every note in a project a hit for that project's name, which
+    turns a search for a subject into a listing. The authored value is a
+    deliberate label and is worth finding by.
     """
     like = f"%{query.lower()}%"
     rows = conn.execute(
-        "SELECT n.session_id, n.idx, n.ts, n.topic, n.relation, n.title, n.tags, "
-        "       n.entities, n.note_path, s.project, s.name, s.agent "
-        "FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
-        "WHERE lower(COALESCE(n.topic,'')) LIKE ? OR lower(COALESCE(n.title,'')) LIKE ? "
-        "   OR lower(COALESCE(n.tags,'')) LIKE ? OR lower(COALESCE(n.entities,'')) LIKE ? "
-        "ORDER BY n.ts DESC LIMIT ?",
-        (like, like, like, like, limit),
+        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
+        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       n.note_path, {NOTE_PROJECT_SQL}, s.name, s.agent "
+        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"WHERE lower(COALESCE(n.topic,'')) LIKE ? OR lower(COALESCE(n.title,'')) LIKE ? "
+        f"   OR lower(COALESCE(n.tags,'')) LIKE ? OR lower(COALESCE(n.entities,'')) LIKE ? "
+        f"   OR lower(COALESCE(n.project,'')) LIKE ? "
+        f"ORDER BY n.ts DESC LIMIT ?",
+        (like, like, like, like, like, limit),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+def known_projects(conn) -> set[str]:
+    """Every project name the index has seen, from sessions and from notes.
+
+    The write path uses this to tell a caller its `project` looks unfamiliar.
+    Sessions alone would be the wrong set twice over: `scad project ls` counts
+    sessions, so a real project nobody has opened a session in yet is missing
+    from it, and a note that already named a project is itself evidence the
+    name is in use.
+    """
+    rows = conn.execute(
+        "SELECT DISTINCT project FROM sessions WHERE COALESCE(project,'') <> '' "
+        "UNION "
+        "SELECT DISTINCT project FROM notes WHERE COALESCE(project,'') <> ''"
+    ).fetchall()
+    return {r[0] for r in rows}
 
 
 def search_turns(conn, query: str, *, project=None, kind=None, limit: int = 20):

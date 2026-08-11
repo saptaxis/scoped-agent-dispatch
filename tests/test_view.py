@@ -797,15 +797,15 @@ class TestNotesSection:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/repo")
         row = {"session_id": "S1", "idx": 0, "ts": int(time.time() * 1000),
-               "topic": "notes-store", "relation": "shift", "parent": None,
+               "kind": "info", "topic": "notes-store", "parent": None, "project": None,
                "title": "Built the notes store", "tags": '["append-only","jsonl"]',
                "entities": '["notes.py"]', "note_path": "/n/S1.jsonl"}
         row.update(over)
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, topic, relation, parent, title, "
-            "tags, entities, note_path) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            tuple(row[k] for k in ("session_id", "idx", "ts", "topic", "relation",
-                                   "parent", "title", "tags", "entities", "note_path")))
+            "INSERT INTO notes (session_id, idx, ts, kind, topic, parent, project, "
+            "title, tags, entities, note_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            tuple(row[k] for k in ("session_id", "idx", "ts", "kind", "topic", "parent",
+                                   "project", "title", "tags", "entities", "note_path")))
         conn.commit()
         return conn
 
@@ -821,12 +821,15 @@ class TestNotesSection:
         assert 'class="tag">jsonl<' in html
 
     def test_topic_and_relation_are_shown(self, tmp_path):
+        # relation is derived, not stored: a first note on a fresh topic with no
+        # parent is a shift, and the page says so without the column existing.
         html = render(gather(self._with_note(tmp_path), [], set()))
         assert "notes-store" in html and "shift" in html
 
     def test_a_branch_note_shows_its_parent(self, tmp_path):
-        conn = self._with_note(tmp_path, relation="branch", parent="earlier-topic")
-        assert "earlier-topic" in render(gather(conn, [], set()))
+        conn = self._with_note(tmp_path, parent="earlier-topic")
+        html = render(gather(conn, [], set()))
+        assert "earlier-topic" in html and "branch" in html
 
     def test_notes_within_a_session_keep_write_order(self, tmp_path):
         """relation edges only mean anything in sequence."""

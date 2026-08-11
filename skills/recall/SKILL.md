@@ -27,17 +27,28 @@ repo. You are checking a short list of claims, not auditing a codebase.
 
 ## Part 1 — Notes
 
-**1. See what exists — metadata only, no bodies.**
+**1. Ask for a handoff first.** Someone stopping mid-thread marks the note they
+left for you, so this is one command and usually the whole answer:
+
+```
+scad notes ls --project <name> --kind handoff --limit 5
+```
+
+If it returns nothing, widen to everything — metadata only, no bodies:
 
 ```
 scad notes ls --project <name> --limit 10
 ```
 
 If no project was named, `scad where` announces the one for this directory.
-Every row gives you `session_id`, `[idx]`, when, `topic`, `relation`, and the
-title. That is usually enough to know which note matters.
+Every row gives you `session_id`, `[idx]`, when, project, `kind`, `relation`,
+`topic`, and the title. That is usually enough to know which note matters.
+`kind` is what the note *is* — `info` (the ordinary capture), `handoff`, `bug`,
+`request`, `verification` — and it filters: `--kind bug` is the list of what is
+known broken here without reading a single body.
 
-**2. Read the newest note in full.**
+**2. Read the newest note in full** — the newest handoff if there was one,
+otherwise the newest note.
 
 ```
 scad notes read <session-id> --last
@@ -45,15 +56,19 @@ scad notes read <session-id> --last
 
 **3. Backtrack only while the thread continues.**
 
-The `relation` field on each row is the stopping rule, and it is why you do not
-need to read everything:
+The `relation` on each row is the stopping rule, and it is why you do not need
+to read everything. It is *derived*, not something the writer chose: `parent`
+set means `branch`, a topic seen earlier in that session means `continue`, and
+anything else is `shift`.
 
 - **`continue`** — the note before it is the same thread. Worth reading if the
   newest one references it or leaves you short.
 - **`shift`** — a new, unrelated topic begins here. **Stop.** Anything older
   belongs to different work.
-- **`branch` / `return`** — the note names a `parent` topic. Read that one
-  *specifically*, by finding its row in step 1 and reading its index:
+- **`branch`** — the note names a `parent` topic. Read that one *specifically*,
+  by finding its row in step 1 and reading its index. The parent may be in
+  **another session's** notes, in which case find it by topic in step 1's
+  listing rather than assuming it is in this file:
 
 ```
 scad notes read <session-id> --idx <n>
@@ -147,11 +162,14 @@ Notes written by the `remember` skill use a fixed shape. Pay attention to:
   list drawn from the note. Reading files it never mentions means you have
   stopped recalling and started surveying — ask the human instead.
 - **Do not search notes for content.** `scad search --notes` matches
-  `topic` / `title` / `tags` / `entities` only — never the body — so it answers
-  "which note mentions X", not "what did we decide about X". Use it to
-  *locate*, then read. Ordinary code search has no such limit; use it freely
-  within the bound above.
+  `topic` / `title` / `tags` / `entities` and a note's own `project` — never
+  the body — so it answers "which note mentions X", not "what did we decide
+  about X". Use it to *locate*, then read. Ordinary code search has no such
+  limit; use it freely within the bound above.
 - **Do not treat any document as current.** Notes, backlogs, handoffs, and
   READMEs all record a past. Only the code and the git history are now.
-- **Do not resolve projects yourself.** `scad where` answers that, and the
-  project of a note comes from the session that wrote it.
+- **Do not resolve projects yourself.** `scad where` answers that. A note's
+  project is the one its session was working in — *unless* the note names a
+  project itself, which is how work noticed elsewhere gets filed here. So a
+  note listed under this project may have been written somewhere else
+  entirely; its body says where.

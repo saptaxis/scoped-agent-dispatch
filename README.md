@@ -218,9 +218,9 @@ scad view [--days N] [--no-open] [--refresh] [--output PATH]   # render the inde
 # Notes — the authored tier
 scad session note --current                        # append a record (JSON on stdin); /remember calls this
 scad session notes <id>                            # read a session's notes back, from the FILE
-scad notes ls [--project X] [--limit N] [--json]   # every note, newest first
+scad notes ls [--project X] [--kind handoff] [--limit N] [--json]   # every note, newest first
 scad notes read <id> [--last | --idx N]            # one session's notes
-scad search <query> --notes                        # topic, title, tags, entities — NOT bodies
+scad search <query> --notes                        # topic, title, tags, entities, project — NOT bodies
 ```
 
 ## Quick start
@@ -465,8 +465,9 @@ generation and no re-reading — and pipes it to `scad session note --current`, 
 `~/.scad/notes/<agent>/<session-uuid>.jsonl`, one appending file per session.
 
 ```bash
-scad session notes <id>         # read them back, from the file
-scad search "resolver" --notes  # search topic, title, tags, entities
+scad session notes <id>            # read them back, from the file
+scad notes ls --kind handoff       # what a session left for whoever comes next
+scad search "resolver" --notes     # search topic, title, tags, entities, project
 ```
 
 **Session-keyed, never project-keyed.** A project is derived and can be redefined; a path
@@ -474,9 +475,12 @@ containing one would orphan every file the moment it changed. Each record carrie
 `cwd_at_write`, so the project stays rederivable from the note alone even after every trace
 is gone.
 
-Each record is one JSON line: `topic`, `relation` (`continue` / `shift` / `branch` /
-`return`), `parent`, `title`, `text`, `tags`, `entities`. The relation edges form the
-session's semantic tree, so the notes viewer shows them in write order — a note out of
+Each record is one JSON line: `kind` (`info` / `handoff` / `bug` / `request` /
+`verification`), `topic`, `parent`, `title`, `text`, `tags`, `entities`, and an optional
+`project` for filing a note against a project other than the one the session is in.
+`relation` (`continue` / `shift` / `branch`) is **derived** when the note is read — from
+`parent` and from the topics already in the thread — rather than authored. Those edges form
+the session's semantic tree, so the notes viewer shows them in write order: a note out of
 sequence says nothing about the shape of the work.
 
 ## Config reference

@@ -81,11 +81,16 @@ from scad.resolve import ResolveConfig, announce, require, resolve as resolve_ta
 from scad.archive import archive_all, archive_root, archive_run, summarize
 from scad.project import UNFILED, project_resolution, resolve_project
 from scad.index import (
+    NOTE_KIND_SQL,
+    NOTE_PROJECT_RESOLVED,
+    NOTE_PROJECT_SQL,
+    NOTE_RELATION_SQL,
     connect as index_connect,
+    index_note_file,
+    known_projects,
     reindex as run_reindex,
     search_notes,
     search_turns,
-    session_notes as index_session_notes,
     session_notes as index_session_notes,
     session_row,
     session_turns,
@@ -105,10 +110,14 @@ from scad.live import (
     tmux_panes,
 )
 from scad.notes import (
+    DEFAULT_KIND,
+    KINDS,
     NoteTargetError,
     append_note,
     current_session_id,
+    hydrate_notes,
     note_path,
+    notes_root,
     read_note_file,
 )
 from scad.view import gather, render, resume_argv, resume_command, write_view
@@ -140,6 +149,58 @@ def _day_ms(day: str) -> int:
         return int(datetime.strptime(day, "%Y-%m-%d").timestamp() * 1000)
     except ValueError:
         raise click.ClickException(f"Invalid date {day!r}; expected YYYY-MM-DD.")
+
+
+def _fmt_ms(ms) -> str | None:
+    """Epoch MILLISECONDS -> a readable local stamp.
+
+    The `started` / `ended` columns are milliseconds, not seconds. Nothing in
+    the schema says so, and `datetime(ended,'unixepoch')` returns NULL rather
+    than erroring on them — a silent wrong answer, which is why the conversion
+    lives in one named place instead of being inlined at each call site.
+    """
+    if not ms:
+        return None
+    return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d %H:%M")
+
+
+def _fmt_span(start_ms, end_ms) -> str | None:
+    """How long a session ran, coarsely. None when either end is unknown."""
+    if not start_ms or not end_ms or end_ms < start_ms:
+        return None
+    mins = int((end_ms - start_ms) / 60000)
+    if mins < 60:
+        return f"{mins}m"
+    hours, mins = divmod(mins, 60)
+    if hours < 24:
+        return f"{hours}h {mins}m"
+    days, hours = divmod(hours, 24)
+    return f"{days}d {hours}h"
+
+
+def _fmt_ago(ts: str | None) -> str:
+    """An ISO stamp as written, plus how long ago it was.
+
+    Notes carry an ISO string rather than epoch ms — a different tier with a
+    different format — so this is deliberately not `_fmt_ms`.
+    """
+    if not ts:
+        return "?"
+    try:
+        when = datetime.fromisoformat(ts)
+    except ValueError:
+        return ts
+    now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()
+    mins = int((now - when).total_seconds() / 60)
+    if mins < 0:
+        ago = "just now"
+    elif mins < 60:
+        ago = f"{mins}m ago"
+    elif mins < 1440:
+        ago = f"{mins // 60}h ago"
+    else:
+        ago = f"{mins // 1440}d ago"
+    return f"{when.strftime('%Y-%m-%d %H:%M')} ({ago})"
 
 
 def _complete_run_ids(ctx, param, incomplete):
@@ -2031,6 +2092,13 @@ def session_show(session_id):
                   "parent_session_id", "workflow_id", "archive_path"):
         if row[field] is not None:
             click.echo(f"{field:<18} {row[field]}")
+    # When it ran. Kept next to the rest of the metadata rather than derived by
+    # the reader from a raw epoch, which is what the columns hold.
+    for label, value in (("started", _fmt_ms(row["started"])),
+                         ("ended", _fmt_ms(row["ended"])),
+                         ("ran for", _fmt_span(row["started"], row["ended"]))):
+        if value:
+            click.echo(f"{label:<18} {value}")
     # Model-written prose from the harness, not derived from the trace. Printed
     # last and labelled so it is not mistaken for structural evidence.
     for field in ("needs", "needs_detail"):
@@ -2055,7 +2123,10 @@ def session_show(session_id):
     notes = index_session_notes(conn, session_id)
     click.echo(f"{'notes':<18} {len(notes)}")
     for n in notes:
-        click.echo(f"  [{n['idx']:>3}] {n['topic'] or '?':<24} {(n['title'] or '')[:48]}")
+        # `kind` earns its column here: a handoff among a session's notes is
+        # the one you want first, and topic alone never said which was which.
+        click.echo(f"  [{n['idx']:>3}] {n['kind'] or DEFAULT_KIND:<12} "
+                   f"{n['topic'] or '?':<24} {(n['title'] or '')[:48]}")
 
 
 def _exec(argv: list[str]) -> None:
@@ -2237,24 +2308,103 @@ def session_note(session_id, current, agent):
     except ValueError as exc:
         raise click.ClickException(f"stdin is not valid JSON: {exc}") from exc
 
+    # `kind` is a closed enum and the only field here worth refusing over. It
+    # costs the caller one retry to fix, and a sixth value invented in passing
+    # would be invisible to every `--kind` query ever run afterwards.
+    if isinstance(record, dict) and record.get("kind") not in (None, *KINDS):
+        raise click.ClickException(
+            f"kind {record['kind']!r} is not one of: {', '.join(KINDS)}.")
+
     try:
         path = append_note(record, session_id=session_id, agent=agent)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
+    project = record.get("project")
+    if project and project not in _known_projects():
+        # WARN, never refuse. `scad project ls` counts sessions, so a genuinely
+        # new project — or one whose work has only ever been dispatched — does
+        # not appear in it yet, and a real note would be lost to a name the
+        # index simply has not met. A wrong label costs a listing; a refused
+        # note costs the note, and nothing can rebuild it.
+        click.echo(f"[scad] warning: no project named {project!r} in the index "
+                   f"— the note is written and filed under it anyway. "
+                   f"Check the name with: scad project ls")
+
+    # Index it NOW rather than leaving it for the next `scad reindex`. The write
+    # path is the only moment we know a note exists, and until it is indexed
+    # nothing can find it — `notes ls`, `search` and `view` all read the index.
+    # That gap is worst for a cross-filed note, whose whole purpose is that
+    # someone working in the *other* project picks it up, and who has no reason
+    # to know a reindex is owed. Costs one row: the notes tier is ~20 records
+    # against 39,000 turns, nothing like the pass that makes `reindex` a
+    # deliberate command.
+    #
+    # AFTER the warning above, deliberately: indexing inserts this note's own
+    # project, so checking afterwards would find the name known because we had
+    # just written it and the warning would never fire.
+    try:
+        index_note_file(index_connect(), path, agent)
+    except Exception as exc:
+        # Never fatal. The file is truth and `reindex` will pick it up; a locked
+        # or absent index must not turn a successful capture into an error.
+        click.echo(f"[scad] note written but not indexed ({exc}); "
+                   f"run: scad reindex")
+
     # Confirm, do not echo: the caller just wrote the record and printing it back
     # into the transcript would double its cost in context for no information.
-    rel = record.get("relation") or "?"
+    # `relation` is absent on purpose — it is derived when the note is read, and
+    # claiming one here would be guessing at the thread from a single record.
+    head = [f"[scad] noted {session_id}", record.get("kind") or DEFAULT_KIND,
+            record.get("topic") or "?"]
     if record.get("parent"):
-        rel += f" <- {record['parent']}"
-    click.echo(f"[scad] noted {session_id}  {record.get('topic') or '?'}  "
-               f"{rel}  {len(record.get('tags') or [])} tags")
+        head.append(f"<- {record['parent']}")
+    if project:
+        head.append(f"project={project}")
+    head.append(f"{len(record.get('tags') or [])} tags")
+    click.echo("  ".join(head))
     click.echo(f"[scad] {path}")
+
+
+def _known_projects() -> set[str]:
+    """Project names the index knows, or an empty set if it cannot be read.
+
+    Swallowing the failure is the point: this only decides whether to print a
+    warning, and a note must never be lost to a database that would not open.
+    """
+    try:
+        return known_projects(index_connect())
+    except Exception:
+        return set()
+
+
+def _resolve_note_path(session_id: str, agent: str):
+    """The named agent's shard, or whichever shard actually holds this session.
+
+    The store is sharded by agent because a session id is only unique within
+    one, but a LISTING does not make you type the agent — so following a row
+    from `scad notes ls` with the obvious read command used to answer "No notes
+    for <id>" about a note that plainly exists. The id is unambiguous in
+    practice, so searching the other shards costs one directory scan and
+    removes a wrong answer. The named agent still wins when it has the file.
+    """
+    path = note_path(session_id, agent)
+    if path.exists():
+        return path
+    root = notes_root()
+    if root.is_dir():
+        for shard in sorted(p for p in root.iterdir() if p.is_dir()):
+            if shard.name == agent:
+                continue
+            candidate = shard / f"{session_id}.jsonl"
+            if candidate.exists():
+                return candidate
+    return path                       # unchanged, so the error still names the shard asked for
 
 
 @session.command("notes")
 @click.argument("session_id")
-@click.option("--agent", default="claude", help="Which agent's shard to read.")
+@click.option("--agent", default="claude", help="Which agent's shard to read first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the records as written.")
 def session_notes_cmd(session_id, agent, as_json):
     """Print a session's notes, oldest first.
@@ -2263,8 +2413,11 @@ def session_notes_cmd(session_id, agent, as_json):
     readable before anything has been indexed and after a --rebuild has dropped
     every row.
     """
-    path = note_path(session_id, agent)
-    records = read_note_file(path)
+    path = _resolve_note_path(session_id, agent)
+    # Hydrated, not raw: `relation` is computed from the records around it and
+    # `kind` has a default, so a consumer reading --json gets the same shape
+    # whatever version wrote the file.
+    records = hydrate_notes(read_note_file(path))
 
     if as_json:
         click.echo(json.dumps(records, ensure_ascii=False, default=str))
@@ -2275,9 +2428,12 @@ def session_notes_cmd(session_id, agent, as_json):
 
     click.echo(f"[scad] {path}")
     for i, r in enumerate(records):
-        head = f"[{i:>3}] {r.get('ts') or '?'}  {r.get('topic') or '?'}"
+        head = (f"[{i:>3}] {_fmt_ago(r.get('ts'))}  {r.get('kind') or DEFAULT_KIND}  "
+                f"{r.get('topic') or '?'}")
         if r.get("relation"):
             head += f"  ({r['relation']}" + (f" <- {r['parent']}" if r.get("parent") else "") + ")"
+        if r.get("project"):
+            head += f"  project={r['project']}"
         click.echo(head)
         click.echo(f"      {r.get('title') or ''}")
         if r.get("text"):
@@ -2307,11 +2463,13 @@ def notes():
 
 @notes.command("ls")
 @click.option("--project", "project_name", default=None,
-              help="Only notes from sessions in this project.")
+              help="Only notes filed under this project.")
 @click.option("--session", "session_id", default=None, help="Only this session's notes.")
+@click.option("--kind", "kind", type=click.Choice(KINDS), default=None,
+              help="Only notes of this kind (handoff is the catch-up query).")
 @click.option("--limit", default=20, help="How many, newest first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
-def notes_ls(project_name, session_id, limit, as_json):
+def notes_ls(project_name, session_id, kind, limit, as_json):
     """List notes, newest first.
 
     Metadata only — the body is not in the index at all, so this can say what
@@ -2320,16 +2478,23 @@ def notes_ls(project_name, session_id, limit, as_json):
     conn = index_connect()
     where, params = [], []
     if project_name:
-        where.append("s.project = ?")
+        # The note's own project first, the writing session's second. Filtering
+        # on `s.project` alone is what hid a cross-captured note: filed against
+        # B, listed only under A, findable by nobody looking for either.
+        where.append(f"{NOTE_PROJECT_RESOLVED} = ?")
         params.append(project_name)
     if session_id:
         where.append("n.session_id = ?")
         params.append(session_id)
+    if kind:
+        where.append(f"{NOTE_KIND_SQL} = ?")
+        params.append(kind)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = [dict(r) for r in conn.execute(
-        "SELECT n.session_id, n.idx, n.ts, n.topic, n.relation, n.title, n.tags, "
-        "       s.project, s.name, s.agent "
-        "FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
+        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, "
+        f"       {NOTE_PROJECT_SQL}, s.name, s.agent "
+        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
         f"{clause} ORDER BY n.ts DESC LIMIT ?", (*params, limit))]
 
     if as_json:
@@ -2347,8 +2512,16 @@ def notes_ls(project_name, session_id, limit, as_json):
         when = (datetime.fromtimestamp(r["ts"] / 1000).strftime("%m-%d %H:%M")
                 if r.get("ts") else "?")
         # The session id leads because it is the argument to the next command.
+        # `kind` and `relation` are both here: kind says what the note IS, and
+        # relation says whether the note before it belongs to the same thread —
+        # which is the whole stopping rule for backtracking.
+        # `agent` is shown because the store is sharded by it: without this
+        # column you cannot tell which `--agent` a row wants, and reading a
+        # non-claude note reported that it did not exist.
         click.echo(f'{r["session_id"]}  [{r["idx"]}]  {when:>14}  '
-                   f'{(r.get("project") or "-"):22}  {(r.get("topic") or "-"):20}  '
+                   f'{(r.get("agent") or "-"):7}  '
+                   f'{(r.get("project") or "-"):22}  {(r.get("kind") or "-"):12}  '
+                   f'{(r.get("relation") or "-"):9}  {(r.get("topic") or "-"):20}  '
                    f'{r.get("title") or ""}')
     click.echo(f"\n[scad] {len(rows)} note(s). Read one: scad notes read <session-id>")
 
@@ -2375,7 +2548,10 @@ def notes_read(ctx, session_id, last, idx, agent, as_json):
         ctx.invoke(session_notes_cmd, session_id=session_id, agent=agent, as_json=as_json)
         return
 
-    records = read_note_file(note_path(session_id, agent))
+    # Hydrated over the WHOLE file even when one note is wanted: `relation` is a
+    # statement about the notes before it, so a single record cannot answer it.
+    resolved = _resolve_note_path(session_id, agent)
+    records = hydrate_notes(read_note_file(resolved))
     if not records:
         click.echo(f"[scad] No notes for {session_id}.")
         return
@@ -2391,11 +2567,14 @@ def notes_read(ctx, session_id, last, idx, agent, as_json):
         click.echo(json.dumps(record, ensure_ascii=False, default=str))
         return
 
-    click.echo(f"[scad] {note_path(session_id, agent)}  [{want}] of {len(records)}")
-    head = f"[{want:>3}] {record.get('ts') or '?'}  {record.get('topic') or '?'}"
+    click.echo(f"[scad] {resolved}  [{want}] of {len(records)}")
+    head = (f"[{want:>3}] {_fmt_ago(record.get('ts'))}  {record.get('kind') or DEFAULT_KIND}  "
+            f"{record.get('topic') or '?'}")
     if record.get("relation"):
         head += (f"  ({record['relation']}"
                  + (f" <- {record['parent']}" if record.get("parent") else "") + ")")
+    if record.get("project"):
+        head += f"  project={record['project']}"
     click.echo(head)
     click.echo(f"      {record.get('title') or ''}")
     if record.get("text"):

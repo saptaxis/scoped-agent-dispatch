@@ -112,10 +112,14 @@ class NoteRecord:
 
     Deliberately NOT the whole record. The note file is truth; this carries only
     what makes a note *findable* (`sessions tagged X` as a query rather than a
-    grep), so `text` and `span` are read off disk when someone actually wants
-    them. That asymmetry is the point: losing this table costs a reindex, while
-    losing the file costs the note, and a schema that copied everything would
-    blur which of the two is the artifact.
+    grep), so `text` is read off disk when someone actually wants it. That
+    asymmetry is the point: losing this table costs a reindex, while losing the
+    file costs the note, and a schema that copied everything would blur which of
+    the two is the artifact.
+
+    `relation` is absent on purpose: it is derived from `parent` and from the
+    topics already in the thread (see `notes.derived_relation`), so storing it
+    would be storing an answer the query can compute.
 
     `cwd_at_write` is the exception, and the reason it exists at all: it is not
     a `notes` column but the note's only statement of where it happened, so the
@@ -123,9 +127,10 @@ class NoteRecord:
     """
 
     ts: int | None = None
+    kind: str | None = None           # info | handoff | bug | request | verification
     topic: str | None = None
-    relation: str | None = None       # continue | shift | branch | return
     parent: str | None = None
+    project: str | None = None        # authored override; NULL = the session's project
     title: str | None = None
     tags: tuple | list = ()
     entities: tuple | list = ()

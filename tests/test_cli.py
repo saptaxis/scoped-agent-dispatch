@@ -2260,14 +2260,55 @@ class TestSessionNotes:
         assert result.exit_code == 0
         assert "notes" in result.output
 
-    def test_reindex_reports_the_note_count(self, runner, tmp_path, monkeypatch):
+    def test_session_show_lists_each_note_kind(self, runner, tmp_path, monkeypatch):
+        # A handoff among a session's notes is the one you want first, and the
+        # listing used to show only topic and title -- so nothing said which.
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps({**self.NOTE, "kind": "handoff",
+                                        "topic": "where-this-stands"}))
+        runner.invoke(main, ["reindex", "--no-archive"])
+        result = runner.invoke(main, ["session", "show", "S1"])
+        assert result.exit_code == 0
+        assert "handoff" in result.output
+
+    def test_notes_read_shows_a_readable_stamp(self, runner, tmp_path, monkeypatch):
+        # The raw ISO string is in the file; a reader wants to know how old it
+        # is without doing the subtraction.
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["notes", "read", "S1", "--last"])
+        assert result.exit_code == 0
+        assert "ago)" in result.output
+
+    def test_reindex_reports_notes_it_had_not_already_seen(
+            self, runner, tmp_path, monkeypatch):
         # Drift must be visible: a pass that indexed a note and said nothing
         # would leave "did /remember work?" answerable only by opening sqlite.
+        #
+        # The note is placed on disk directly rather than through `session note`,
+        # because that verb now indexes as it writes — so a note it wrote is
+        # legitimately NOT news to the next pass. What must still be reported is
+        # a note that arrived some other way: another machine, a restored
+        # backup, a shard synced in.
+        home = self._home(tmp_path, monkeypatch)
+        shard = home / "notes" / "claude"
+        shard.mkdir(parents=True)
+        (shard / "S9.jsonl").write_text(
+            json.dumps({**self.NOTE, "ts": "2026-08-05T10:00:00+05:30"}) + "\n")
+        result = runner.invoke(main, ["reindex", "--no-archive"])
+        assert "notes: 1" in result.output
+
+    def test_a_note_written_here_is_not_news_to_the_next_pass(
+            self, runner, tmp_path, monkeypatch):
+        # The other half of the same rule: indexing at write must advance the
+        # offset, so the pass has nothing left to do.
         self._home(tmp_path, monkeypatch)
         runner.invoke(main, ["session", "note", "--session", "S1"],
                       input=json.dumps(self.NOTE))
         result = runner.invoke(main, ["reindex", "--no-archive"])
-        assert "notes: 1" in result.output
+        assert "notes: 1" not in result.output
 
 
 class TestRememberSkillIsAThinCaller:
@@ -2598,6 +2639,240 @@ class TestNotesForHandoff:
                      "text": "THE FULL BODY GOES HERE"}, session_id="S1", agent="claude")
         result = runner.invoke(main, ["notes", "read", "S1"])
         assert "THE FULL BODY GOES HERE" in result.output
+
+
+class TestNotesCrossCapture:
+    """A note may be filed against a project other than its session's.
+
+    Before this the project only ever arrived through the sessions JOIN, so a
+    bug noticed while working elsewhere was filed where nobody would look.
+    """
+
+    def _index(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        conn.execute(
+            "INSERT INTO sessions (id, kind, agent, machine, grade, source, project) "
+            "VALUES ('S1','main','claude','m','full','claude-transcript','alpha')")
+        conn.execute(
+            "INSERT INTO notes (session_id, idx, ts, kind, topic, project, title, "
+            "tags, entities, note_path) VALUES "
+            "('S1',0,300,'bug','beta-crash','beta','BETA IS BROKEN','[]','[]','/n')")
+        conn.execute(
+            "INSERT INTO notes (session_id, idx, ts, kind, topic, project, title, "
+            "tags, entities, note_path) VALUES "
+            "('S1',1,200,'info','alpha-work',NULL,'ORDINARY ALPHA NOTE','[]','[]','/n')")
+        conn.commit()
+        conn.close()
+
+    def test_a_note_filed_against_another_project_lists_under_it(
+            self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--project", "beta"])
+        assert result.exit_code == 0, result.output
+        assert "BETA IS BROKEN" in result.output
+        assert "ORDINARY ALPHA NOTE" not in result.output
+
+    def test_it_no_longer_lists_under_the_session_that_wrote_it(
+            self, runner, tmp_path, monkeypatch):
+        # The override is an override, not an addition: two projects claiming
+        # one note is the ambiguity the field exists to remove.
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--project", "alpha"])
+        assert "ORDINARY ALPHA NOTE" in result.output
+        assert "BETA IS BROKEN" not in result.output
+
+    def test_a_note_with_no_project_still_follows_its_session(
+            self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        rows = json.loads(runner.invoke(
+            main, ["notes", "ls", "--project", "alpha", "--json"]).output)
+        assert [r["project"] for r in rows] == ["alpha"]
+
+    def test_search_finds_the_cross_captured_note_under_its_own_project(
+            self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["search", "beta", "--notes"])
+        assert result.exit_code == 0, result.output
+        assert "BETA IS BROKEN" in result.output
+
+
+class TestNotesKindFilter:
+    def _index(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        conn.execute(
+            "INSERT INTO sessions (id, kind, agent, machine, grade, source, project) "
+            "VALUES ('S1','main','claude','m','full','claude-transcript','alpha')")
+        for idx, (kind, title) in enumerate((
+                ("handoff", "WHERE WE STOPPED"), ("bug", "SOMETHING BROKE"),
+                ("info", "AN ORDINARY NOTE"))):
+            conn.execute(
+                "INSERT INTO notes (session_id, idx, ts, kind, topic, title, tags, "
+                "entities, note_path) VALUES ('S1',?,?,?,'t',?,'[]','[]','/n')",
+                (idx, 100 - idx, kind, title))
+        # Written before `kind` existed: NULL in the column, `info` by default.
+        conn.execute(
+            "INSERT INTO notes (session_id, idx, ts, topic, title, tags, entities, "
+            "note_path) VALUES ('S1',9,50,'t','A LEGACY NOTE','[]','[]','/n')")
+        conn.commit()
+        conn.close()
+
+    def test_kind_handoff_is_the_catch_up_query(self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--kind", "handoff"])
+        assert result.exit_code == 0, result.output
+        assert "WHERE WE STOPPED" in result.output
+        assert "SOMETHING BROKE" not in result.output
+        assert "AN ORDINARY NOTE" not in result.output
+
+    def test_kind_combines_with_project(self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(
+            main, ["notes", "ls", "--project", "alpha", "--kind", "bug"])
+        assert "SOMETHING BROKE" in result.output
+        assert "WHERE WE STOPPED" not in result.output
+
+    def test_a_note_written_before_kind_existed_answers_as_info(
+            self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--kind", "info"])
+        assert "A LEGACY NOTE" in result.output
+        assert "AN ORDINARY NOTE" in result.output
+
+    def test_a_kind_outside_the_five_is_refused_by_the_flag(
+            self, runner, tmp_path, monkeypatch):
+        self._index(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--kind", "decision"])
+        assert result.exit_code != 0
+        assert "decision" in result.output
+
+
+class TestSessionNoteValidatesKindAndProject:
+    """The write path: refuse a bad `kind`, never refuse the note over a project."""
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return tmp_path / ".scad"
+
+    def _known(self, tmp_path, project="alpha"):
+        from scad.index import connect
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        conn.execute(
+            "INSERT INTO sessions (id, kind, agent, machine, grade, source, project) "
+            "VALUES ('OTHER','main','claude','m','full','claude-transcript',?)",
+            (project,))
+        conn.commit()
+        conn.close()
+
+    def _note(self, scad_home, session="S1"):
+        return scad_home / "notes" / "claude" / f"{session}.jsonl"
+
+    def test_an_unknown_kind_is_refused_and_nothing_is_written(
+            self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps({"kind": "decision", "title": "t"}))
+        assert result.exit_code != 0
+        assert "decision" in result.output
+        assert not self._note(scad_home).exists()
+
+    def test_each_of_the_five_kinds_is_accepted(self, runner, tmp_path, monkeypatch):
+        from scad.notes import KINDS
+        scad_home = self._home(tmp_path, monkeypatch)
+        for kind in KINDS:
+            result = runner.invoke(main, ["session", "note", "--session", kind],
+                                   input=json.dumps({"kind": kind, "title": "t"}))
+            assert result.exit_code == 0, result.output
+            assert json.loads(self._note(scad_home, kind).read_text())["kind"] == kind
+
+    def test_omitting_kind_is_fine_and_lands_as_info(self, runner, tmp_path, monkeypatch):
+        scad_home = self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps({"title": "t"}))
+        assert result.exit_code == 0, result.output
+        assert json.loads(self._note(scad_home).read_text())["kind"] == "info"
+
+    def test_the_confirmation_line_shows_the_kind(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps({"kind": "handoff", "topic": "x",
+                                                 "title": "t", "text": "**Frame**"}))
+        assert "handoff" in result.output
+        assert "**Frame**" not in result.output      # still confirms, does not echo
+
+    def test_an_unknown_project_warns_and_the_note_is_still_written(
+            self, runner, tmp_path, monkeypatch):
+        # A note is authored data with no second copy. `scad project ls` counts
+        # sessions, so a real new project is missing from it — refusing here
+        # would lose notes over a name the index has merely not met yet.
+        scad_home = self._home(tmp_path, monkeypatch)
+        self._known(tmp_path, project="alpha")
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps({"title": "t", "project": "nowhere"}))
+        assert result.exit_code == 0, result.output
+        assert "nowhere" in result.output
+        assert "warning" in result.output.lower()
+        assert json.loads(self._note(scad_home).read_text())["project"] == "nowhere"
+
+    def test_a_known_project_does_not_warn(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        self._known(tmp_path, project="alpha")
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps({"title": "t", "project": "alpha"}))
+        assert result.exit_code == 0, result.output
+        assert "warning" not in result.output.lower()
+
+    def test_a_project_only_another_note_has_used_counts_as_known(
+            self, runner, tmp_path, monkeypatch):
+        # The first cross-capture into a new project warns; the second should
+        # not, or the warning becomes noise on deliberate, established use.
+        self._home(tmp_path, monkeypatch)
+        self._known(tmp_path, project="alpha")
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps({"title": "t", "project": "beta"}))
+        runner.invoke(main, ["reindex", "--no-archive"])
+        result = runner.invoke(main, ["session", "note", "--session", "S2"],
+                               input=json.dumps({"title": "t", "project": "beta"}))
+        assert "warning" not in result.output.lower()
+
+    def test_omitting_project_never_warns(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+                               input=json.dumps({"title": "t"}))
+        assert "warning" not in result.output.lower()
+
+
+class TestNotesReadDerivesRelation:
+    """`relation` is not in the file, so reading must compute it."""
+
+    def _store(self, tmp_path, monkeypatch, records):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        from scad.notes import append_note
+        for r in records:
+            append_note(r, session_id="S1", agent="claude")
+
+    def test_the_json_output_carries_a_relation_the_file_does_not(
+            self, runner, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch, [
+            {"topic": "a", "title": "one"}, {"topic": "a", "title": "two"},
+            {"topic": "b", "parent": "a", "title": "three"}])
+        raw = (tmp_path / ".scad" / "notes" / "claude" / "S1.jsonl").read_text()
+        assert "relation" not in raw
+
+        rows = json.loads(runner.invoke(main, ["session", "notes", "S1", "--json"]).output)
+        assert [r["relation"] for r in rows] == ["shift", "continue", "branch"]
+
+    def test_reading_one_note_still_places_it_in_its_thread(
+            self, runner, tmp_path, monkeypatch):
+        self._store(tmp_path, monkeypatch, [
+            {"topic": "a", "title": "one"}, {"topic": "a", "title": "two"}])
+        row = json.loads(runner.invoke(
+            main, ["notes", "read", "S1", "--last", "--json"]).output)
+        assert row["relation"] == "continue"
 
 
 class TestNotesReadIsProgressive:
@@ -3118,3 +3393,104 @@ class TestLaunchChecksAttribution:
                                       "--cwd", str(repo)])
         assert "unfiled" not in result.output
         assert "myproj" in result.output
+
+
+class TestTimestampFormatting:
+    """The columns are epoch MILLISECONDS and nothing in the schema says so."""
+
+    def test_session_span_is_rendered_from_milliseconds(self):
+        from scad.cli import _fmt_ms, _fmt_span
+        start = 1785676230299          # a real value out of the index
+        end = start + (90 * 60 * 1000)  # ninety minutes later
+        assert _fmt_ms(start).startswith("20")   # a year, not 1970
+        assert _fmt_span(start, end) == "1h 30m"
+
+    def test_missing_or_reversed_ends_render_as_nothing(self):
+        from scad.cli import _fmt_ms, _fmt_span
+        assert _fmt_ms(None) is None
+        assert _fmt_span(None, 5) is None
+        assert _fmt_span(1785676230299, 1785676230000) is None
+
+    def test_multi_day_span_does_not_report_hundreds_of_hours(self):
+        from scad.cli import _fmt_span
+        start = 1785676230299
+        assert _fmt_span(start, start + (50 * 3600 * 1000)) == "2d 2h"
+
+    def test_note_stamp_carries_how_long_ago(self):
+        from datetime import datetime, timedelta
+        from scad.cli import _fmt_ago
+        recent = (datetime.now().astimezone() - timedelta(hours=3)).isoformat()
+        assert "3h ago" in _fmt_ago(recent)
+
+    def test_unparseable_note_stamp_is_passed_through(self):
+        from scad.cli import _fmt_ago
+        assert _fmt_ago("not-a-date") == "not-a-date"
+        assert _fmt_ago(None) == "?"
+
+
+class TestNoteWriteIndexesImmediately:
+    """A note nothing can find is a note that was not really captured."""
+
+    NOTE = {"topic": "t", "title": "first", "tags": ["a"]}
+
+    def test_a_written_note_is_listable_without_a_reindex(
+            self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["notes", "ls"])
+        assert result.exit_code == 0
+        assert "S1" in result.output
+
+    def test_write_then_reindex_does_not_duplicate(self, runner, tmp_path, monkeypatch):
+        # Indexing at write must ALSO advance notes_offset -- otherwise the next
+        # pass re-appends the same record under a fresh idx, a duplicate that
+        # reads as a real second note.
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        runner.invoke(main, ["session", "note", "--session", "S1"],
+                      input=json.dumps(self.NOTE))
+        runner.invoke(main, ["reindex", "--no-archive"])
+        result = runner.invoke(main, ["notes", "ls", "--json"])
+        rows = json.loads(result.output)
+        assert len([r for r in rows if r["session_id"] == "S1"]) == 1
+
+
+class TestNoteReadFindsTheRightShard:
+    """The listing does not make you type the agent; reading must not either."""
+
+    NOTE = {"topic": "t", "title": "from another agent", "tags": ["a"]}
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+    def test_read_falls_back_to_the_shard_that_has_it(
+            self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "K1", "--agent", "kimi"],
+                      input=json.dumps(self.NOTE))
+        # No --agent: the default shard is claude and the note is under kimi.
+        result = runner.invoke(main, ["notes", "read", "K1"])
+        assert result.exit_code == 0
+        assert "from another agent" in result.output
+
+    def test_named_agent_still_wins_when_it_has_the_file(
+            self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "D1", "--agent", "kimi"],
+                      input=json.dumps({**self.NOTE, "title": "kimi one"}))
+        runner.invoke(main, ["session", "note", "--session", "D1", "--agent", "claude"],
+                      input=json.dumps({**self.NOTE, "title": "claude one"}))
+        result = runner.invoke(main, ["notes", "read", "D1", "--agent", "kimi"])
+        assert "kimi one" in result.output
+        assert "claude one" not in result.output
+
+    def test_listing_shows_which_agent_wrote_each_note(
+            self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "note", "--session", "K2", "--agent", "kimi"],
+                      input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["notes", "ls"])
+        assert "kimi" in result.output
