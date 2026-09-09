@@ -3259,12 +3259,30 @@ class TestSessionLaunch:
         it, or a cosmetic change to an echo becomes a silent break elsewhere."""
         self._home(tmp_path, monkeypatch)
         self._fake(monkeypatch)
-        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
-                                      "--cwd", str(tmp_path), "--json"])
-        assert result.exit_code == 0, result.output
-        payload = json.loads(result.output.strip().splitlines()[-1])
+        # The WHOLE of stdout must parse. Taking the last line would pass
+        # while a preamble sat in front of the record -- which is exactly what
+        # shipped, and what this assertion is written to catch.
+        r = CliRunner().invoke(
+            main, ["session", "launch", "--agent", "codex",
+                   "--cwd", str(tmp_path), "--json"])
+        assert r.exit_code == 0, r.output
+        payload = json.loads(r.stdout)
         assert payload["session_id"] == "CX1"
         assert payload["resume"] == "cd /repo && codex resume CX1"
+
+    def test_json_keeps_the_human_lines_off_stdout(
+            self, runner, tmp_path, monkeypatch):
+        """An unfiled cwd prints a warning and a fix. Neither may land on the
+        data channel: stdout is the contract, stderr is for people."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        unfiled = tmp_path / "no-marker-here"
+        unfiled.mkdir()
+        r = CliRunner().invoke(
+            main, ["session", "launch", "--agent", "codex",
+                   "--cwd", str(unfiled), "--json"])
+        assert json.loads(r.stdout)["session_id"] == "CX1"
+        assert "[scad]" not in r.stdout
 
     def test_json_still_fails_loudly_when_no_id_was_resolved(
             self, runner, tmp_path, monkeypatch):

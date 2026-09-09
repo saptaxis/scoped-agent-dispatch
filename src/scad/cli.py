@@ -2166,21 +2166,30 @@ def session_launch(agent, cwd, prompt, attach, as_json):
       codex    read off the rollout that the first turn creates
     """
     target_cwd = Path(cwd) if cwd else Path.cwd()
+
+    # Under --json, stdout is a data channel and nothing else may be on it.
+    # Every human-facing line goes to stderr instead — the warning below, the
+    # project line, and whatever the launcher narrates. Emitting the record
+    # after a preamble on the same stream is not JSON output, it is JSON at the
+    # end of some text, and a caller then has to guess where it starts.
+    def note(msg: str) -> None:
+        click.echo(msg, err=as_json)
+
     project, _res = project_resolution(target_cwd)
     if project == UNFILED:
         # Not a block: the session is valid, it will just be hard to find by
         # project later. `scad where` explains it; the marker is the fix.
-        click.echo(f"[scad] warning: {target_cwd} is {UNFILED} — this session "
-                   f"will not group under any project.")
-        click.echo(f"[scad] fix: touch "
-                   f"{shlex.quote(str(target_cwd / '.scad-project'))}  "
-                   f"(then: scad where)")
+        note(f"[scad] warning: {target_cwd} is {UNFILED} — this session "
+             f"will not group under any project.")
+        note(f"[scad] fix: touch "
+             f"{shlex.quote(str(target_cwd / '.scad-project'))}  "
+             f"(then: scad where)")
     else:
-        click.echo(f"[scad] project: {project}")
+        note(f"[scad] project: {project}")
 
     try:
         record = launch_agent(agent, target_cwd, prompt=prompt,
-                              say=lambda msg: click.echo(f"[scad] {msg}"))
+                              say=lambda msg: note(f"[scad] {msg}"))
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc
 
