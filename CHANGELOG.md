@@ -2,9 +2,62 @@
 
 ## [Unreleased]
 
-Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-repo pip install.
+## [0.4.0] — 2026-09-09
+
+**The release where scad stopped being only a container dispatcher.** 0.3.0 could put a Claude
+agent in a container and get a branch back. This one adds a second tier that reads rather than
+runs: every agent trace on the machine is archived before it can be pruned, indexed into sqlite,
+and made searchable and browsable — for claude, codex and kimi alike, including sessions scad
+never launched. It also adds the one tier nothing can re-derive: durable notes written by
+`/remember`.
+
+The two tiers share a project key and little else, and they are deliberately asymmetric: the read
+tier is multi-agent, the container tier remains Claude-only.
+
+**Breaking:** the container verbs moved off `session` (`session start` → `run start`, `scad status`
+→ `scad run ls`); the old paths survive as hidden aliases. scad is no longer distributed as a
+Claude Code plugin. The `/remember` record shape changed — `span` and an authored `relation` are
+gone.
+
+### Added — the read tier
+
+- `scad archive` — an append-only copy of every agent trace, taken *before* an agent prunes its
+  own history. Mirrors the source layout under `~/.scad/archive/` and carries a `DO-NOT-DELETE.md`
+  saying why. Reads claude, codex and kimi; a family that is absent from the machine is normal,
+  not an error
+- `scad reindex` — sqlite over `sessions` and `turns`, with FTS5 on turn text. Incremental by size
+  and mtime, resuming from `parsed_offset`, so an ordinary pass costs about a second.
+  `--rebuild` re-derives every table from the archive and refuses when any session's raw is
+  missing — the guard that stops a rebuild silently emptying the corpus
+- `scad session ls|show|read` — the indexed traces of every session on the machine, whether scad
+  started it or merely observed it. Filters for project, agent, kind, machine, grade, outcome and
+  date; `--json` throughout
+- `scad search <query>` — full-text search across every indexed turn. `--notes` searches the
+  authored tier instead, matching metadata rather than bodies
+- `scad view` — a static HTML browser over the index, answering the two questions worth asking:
+  who is waiting on you, and how do you get back in. A `file://` page with no server by design
+- `scad resolve`, `scad where`, `scad project ls|show` — a domain-free resolver by fixed
+  precedence, the project key computed from it, and an explanation of how any directory resolved.
+  `scad where` reports which rung answered, so a wrong answer is checkable rather than mysterious
+- **Durable notes.** `scad session note` appends one `/remember` capture to
+  `~/.scad/notes/<agent>/<session>.jsonl` — session-keyed, project-free, append-only, and the only
+  tier that cannot be re-derived from anything. `scad notes ls|read` browse them; the store is
+  indexed but the file is truth, readable before anything is indexed and after a `--rebuild`
+- Notes are classified by `kind` — `info`, `handoff`, `bug`, `request`, `verification` — with
+  `scad notes ls --kind handoff` as the "where did this leave off" query. An authored `project`
+  files a note against a *different* project than the session it was written in, so a bug noticed
+  while working elsewhere reaches the people looking for it
+- `scad session launch --agent claude|codex|kimi` — start an interactive agent at a directory and
+  learn which session it became, with the exact resume command handed back. tmux is required and
+  not as a convenience: a non-TTY stdout alone makes Claude stamp a session `sdk-cli`, which its
+  own `/resume` picker then hides permanently
+- `scad session resume <id>` — attach if the session is open, resume it if not
+- `scad session launch --json` — the launch record on stdout and nothing else, so a caller reads
+  the session id from a contract rather than by scraping human-facing lines. Human output moves to
+  stderr under this flag; a launch that resolves no id still exits non-zero
 
 ### Added
+
 - Skills install into **every** agent, not just Claude — `install.sh` now calls `npx skills add -g -a '*'`, which routes to `~/.agents/skills` (Codex, Kimi, and the shared convention) and `~/.claude/skills` (Claude, which does not read the shared one). Falls back to symlinking those two directories when node is absent. `--no-skills` opts out; `--no-plugin` still works, undocumented
 - `/remember` is a skill (`skills/remember/SKILL.md`), not a Claude Code command. The frontmatter `name` maps to the invocation, so `/remember` is unchanged — and it now works in Codex (`$remember`) and anything else following the convention
 - `scad view --refresh` — archive and index new traces before rendering. Opt-in, so plain `scad view` stays the read-only renderer its spec promises
@@ -25,11 +78,48 @@ Post-0.3.0 features (Mar–Apr 2026): GPU passthrough, submodule support, per-re
 - `harvest --merge` / `finish --merge` — fast-forward-only merge of fetched branches per repo
 
 ### Changed
+- **BREAKING — the container verbs moved off `session`.** `session start|stop|clean|attach|inject|
+  jobs|logs|send|refresh` are now `run …`, and `scad status` is `scad run ls`. A run is a
+  container and a session is a trace; one noun could not keep meaning both. The old paths remain
+  as **hidden aliases** — working, absent from `--help`
+- **BREAKING — the `/remember` record changed shape.** `span` is gone (it was written on every
+  record and read by no machine), and `relation` is no longer authored: it is derived at read time
+  from `parent` and the topics already in the thread. `kind` and an optional `project` take their
+  place. Older records keep working — `kind` reads through a default and `relation` is computed
+  per query — but a writer must stop emitting the two removed fields
 - **scad is no longer a Claude Code plugin.** `plugin.json`, `marketplace.json` and `register_claude_plugin()` are gone; skills reach every agent instead of one. The plugin never installed the binary — `install.sh` always did that — so nothing moves but distribution. Install *deregisters* any existing plugin first: plugin skills and directory skills **stack** rather than override, so a machine carrying both offered every skill twice under two names
 - `scad session note --current` resolves the session from the id the agent exports (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) rather than by scanning directories and comparing mtimes — exact instead of inferred, and it settles the case of several sessions sharing one cwd by removing the ambiguity rather than arbitrating it. Selected by `--agent`; the cwd scan remains a fallback
 - `gpu: true` now errors on macOS — no GPU passthrough into a Lima VM
 
 ### Fixed
+- **A session's project label wandered even after cwd was pinned.** The earlier fix stopped `cwd`
+  moving and left `project = excluded.project` one line below — a plain assignment from the cwd of
+  whatever record a pass happened to parse. One row could therefore contradict itself: cwd in one
+  repository, project in another. Because `project` is the retrieval join key, a session's notes
+  fell out of their own project's listing. Both columns are now pinned the same way
+- **A session scad had just launched was invisible until the next `reindex`.** Launch wrote its
+  record and told the index nothing, so `session show` denied a session started minutes earlier
+  and checking your own run meant leaving scad for `tmux capture-pane`. Launch now seeds a
+  skeleton row; the archive pass upserts onto the same row and upgrades it
+- **A note was unfindable until someone reindexed.** `session note` wrote the file and left
+  indexing to the next pass — worst for a note cross-filed against another project, whose whole
+  purpose is that someone working elsewhere picks it up. Notes now index as they are written,
+  advancing the offset so the next pass does not re-append them
+- **`notes read` denied notes it had just listed.** It defaulted to the claude shard, so a codex or
+  kimi note answered "No notes for <id>" one line after appearing in `notes ls`. It now falls back
+  to whichever shard holds the session, and the listing shows the agent
+- **The `codex` skill told Codex to consult Codex.** Its *When NOT to Use* never said "you are
+  Codex", so a Codex session launched as an independent reviewer matched the skill and spawned
+  `codex exec` against itself — the same weights answering their own question. Surfaced by skills
+  shipping to every agent rather than to Claude alone
+- **`session launch --json` emitted a preamble before the record.** Human-facing `[scad]` lines
+  shared stdout with the JSON, so the output was not parseable as a whole
+- `session show` now reports when a session started, ended and how long it ran. The columns are
+  epoch **milliseconds**, and `datetime(ended,'unixepoch')` returns NULL rather than erroring on
+  them, so the conversion lives in one named place
+- Removed a dead `session_notes` in `index.py` that a second definition had been shadowing — the
+  two returned different types, so deleting the wrong one would have quietly changed every
+  caller's rows to dicts
 - `--current` no longer files a note against another agent's session. Environment variables are inherited, so codex or kimi launched from a Claude session sees `CLAUDE_CODE_SESSION_ID`; resolution now refuses when the requested agent's own variable is absent instead of silently using the parent's id — wrong attribution in the one tier that can never be re-derived
 - Cumulative counters (`n_interrupts`, `n_tool_denials`, `n_errors`) survive an incremental reindex. They were overwritten with the tail's counts, so a session that was interrupted and then grew quietly reported zero; the values were recoverable only while raw survived
 - The test suite no longer depends on the developer's ambient git config — 17 tests failed on any machine with no global `user.email`
