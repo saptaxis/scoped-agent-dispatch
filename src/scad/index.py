@@ -49,6 +49,10 @@ SOURCE_JOBSTATE = "claude-jobstate"
 # ...and some exist only as a note. See index_notes for why that is a row.
 SOURCE_NOTE = "scad-note"
 
+# ...and some exist only because scad started them and nothing has been
+# archived yet. See ensure_launched_session.
+SOURCE_LAUNCH = "scad-launch"
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS sessions (
   id                TEXT PRIMARY KEY,
@@ -458,6 +462,51 @@ def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> 
         (session_id, KIND_MAIN, agent, platform.node(), cwd,
          resolve_project(cwd), GRADE_SKELETON, SOURCE_NOTE, EXTRACTOR_VERSION),
     )
+
+
+def ensure_launched_session(
+    conn, session_id: str, agent: str, cwd: str | None, started_ms: int | None = None
+) -> bool:
+    """Record a session at the moment scad launches it. Returns True if inserted.
+
+    Standard practice, and the gap it closes was visible: `session show` denied
+    a session scad had started minutes earlier, because launch wrote
+    `~/.scad/launches/<id>.json` and told the index nothing. Checking on your
+    own run meant leaving scad for `tmux capture-pane`.
+
+    Not a second row. `sessions.id` is the primary key and the pass upserts
+    `ON CONFLICT(id)`, so the archive-derived parse lands on THIS row and
+    upgrades it — the same skeleton -> full path `history.jsonl` has always
+    used. Indexing a whole sweep here would be the wrong tool anyway: at launch
+    the transcript is empty or absent, so the only facts that exist are the
+    ones scad itself just chose.
+
+    Which makes attribution better, not merely faster. `cwd` and `project` are
+    pinned to the first value seen and never reassigned, and today that first
+    value is whatever record a pass happened to parse — how a session with 1664
+    records in one repo came to be labelled with another. The cwd named at
+    launch is the intended one, so seeding it here pins the right answer.
+
+    `raw_present=1` for the same reason the note row uses it: a 0 makes
+    `--rebuild` refuse forever over a row with nothing to lose. On a rebuild
+    this row is dropped and re-derived from the trace; if the agent died before
+    writing one, it does not come back, which is the honest outcome.
+    """
+    if session_row(conn, session_id) is not None:
+        return False                      # never downgrade a row a transcript filled
+    conn.execute(
+        """
+        INSERT INTO sessions (
+            id, kind, agent, machine, cwd, project, grade, source,
+            started, parsed_offset, raw_present, extractor_version
+        ) VALUES (?,?,?,?,?,?,?,?,?,0,1,?)
+        """,
+        (session_id, KIND_MAIN, agent, platform.node(), cwd,
+         resolve_project(cwd), GRADE_SKELETON, SOURCE_LAUNCH, started_ms,
+         EXTRACTOR_VERSION),
+    )
+    conn.commit()
+    return True
     conn.commit()
 
 

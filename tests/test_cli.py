@@ -3253,6 +3253,40 @@ class TestSessionLaunch:
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
 
+    def test_json_emits_the_record_and_nothing_to_parse(
+            self, runner, tmp_path, monkeypatch):
+        """The id is a contract. A consumer must not regex the human lines for
+        it, or a cosmetic change to an echo becomes a silent break elsewhere."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path), "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output.strip().splitlines()[-1])
+        assert payload["session_id"] == "CX1"
+        assert payload["resume"] == "cd /repo && codex resume CX1"
+
+    def test_json_still_fails_loudly_when_no_id_was_resolved(
+            self, runner, tmp_path, monkeypatch):
+        # A caller reading session_id off stdout must not also have to decide
+        # what a missing one means -- the exit status has to say it.
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch, session_id=None, problem="no rollout appeared")
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path), "--json"])
+        assert result.exit_code != 0
+
+    def test_launching_puts_the_session_in_the_index_immediately(
+            self, runner, tmp_path, monkeypatch):
+        """`session show` used to deny a session scad had just started."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "codex",
+                             "--cwd", str(tmp_path)])
+        shown = runner.invoke(main, ["session", "show", "CX1"])
+        assert shown.exit_code == 0, shown.output
+        assert "codex" in shown.output
+
     def test_it_hands_back_the_resume_command(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         self._fake(monkeypatch)
@@ -3494,3 +3528,48 @@ class TestNoteReadFindsTheRightShard:
                       input=json.dumps(self.NOTE))
         result = runner.invoke(main, ["notes", "ls"])
         assert "kimi" in result.output
+
+
+class TestLaunchRecordsTheSessionItStarted:
+    """Record the job when you start it — the index should not need a sweep."""
+
+    def test_a_launched_session_is_in_the_index_without_a_reindex(self, tmp_path):
+        from scad.index import connect, ensure_launched_session, session_row
+        conn = connect(tmp_path / "i.sqlite")
+        assert ensure_launched_session(conn, "L1", "codex", "/repo") is True
+        row = session_row(conn, "L1")
+        assert row is not None
+        assert row["agent"] == "codex"
+        assert row["grade"] == "skeleton"      # no turns exist yet, and that is honest
+
+    def test_the_archive_pass_upgrades_that_row_rather_than_adding_one(self, tmp_path):
+        # The whole point: sessions.id is the primary key and the pass upserts
+        # ON CONFLICT(id), so a launch-seeded row and the later parse are one row.
+        from scad.index import connect, ensure_launched_session, session_row, upsert_session
+        from scad.records import SessionRecord, GRADE_FULL
+        conn = connect(tmp_path / "i.sqlite")
+        ensure_launched_session(conn, "L1", "codex", "/repo")
+        upsert_session(
+            conn,
+            SessionRecord(id="L1", kind="main", agent="codex", source="codex-rollout",
+                          cwd="/repo", grade=GRADE_FULL),
+            machine="m", project="proj", archive_path="/arc/L1.jsonl",
+            source_size=10, source_mtime=1, parsed_offset=10,
+        )
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 1
+        row = session_row(conn, "L1")
+        assert row["grade"] == "full"
+
+    def test_it_never_overwrites_a_row_a_transcript_already_filled(self, tmp_path):
+        from scad.index import connect, ensure_launched_session, session_row, upsert_session
+        from scad.records import SessionRecord, GRADE_FULL
+        conn = connect(tmp_path / "i.sqlite")
+        upsert_session(
+            conn,
+            SessionRecord(id="L1", kind="main", agent="codex", source="codex-rollout",
+                          cwd="/real", grade=GRADE_FULL),
+            machine="m", project="proj", archive_path="/arc/L1.jsonl",
+            source_size=10, source_mtime=1, parsed_offset=10,
+        )
+        assert ensure_launched_session(conn, "L1", "codex", "/elsewhere") is False
+        assert session_row(conn, "L1")["cwd"] == "/real"

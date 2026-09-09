@@ -86,6 +86,7 @@ from scad.index import (
     NOTE_PROJECT_SQL,
     NOTE_RELATION_SQL,
     connect as index_connect,
+    ensure_launched_session,
     index_note_file,
     known_projects,
     reindex as run_reindex,
@@ -2146,7 +2147,10 @@ def _exec(argv: list[str]) -> None:
               help="Where the session works (default: here).")
 @click.option("--prompt", default=None, help="The session's first turn.")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
-def session_launch(agent, cwd, prompt, attach):
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit the launch record as JSON. The session id is a contract; "
+                   "do not scrape it from the human-facing lines.")
+def session_launch(agent, cwd, prompt, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the resume command and the pane, and leaves your
@@ -2181,6 +2185,34 @@ def session_launch(agent, cwd, prompt, attach):
         raise click.ClickException(str(exc)) from exc
 
     pane = record.get("tmux") or ""
+    if record.get("session_id"):
+        # Tell the index now. Standard practice — record the job when you start
+        # it — and the gap was real: `session show` denied a session scad had
+        # just started, so checking your own run meant leaving scad for tmux.
+        # Not a second row: the archive-derived parse upserts ON CONFLICT(id)
+        # and upgrades this one, exactly as history.jsonl skeletons have always
+        # been upgraded. Never fatal; the launch succeeded either way.
+        try:
+            ensure_launched_session(
+                index_connect(), record["session_id"], agent, str(target_cwd))
+        except Exception as exc:
+            click.echo(f"[scad] launched, but not recorded in the index "
+                       f"({exc}); run: scad reindex", err=True)
+
+    if as_json:
+        # The whole record, not a parsed line. This exists because a consumer
+        # would otherwise regex the human-facing output for the id, making a
+        # cosmetic change to an echo a silent breakage in another repository.
+        click.echo(json.dumps(record, ensure_ascii=False, default=str))
+        if attach and pane:
+            _exec(attach_argv(pane))
+        # Same exit status as the human path. A caller reading `session_id`
+        # from stdout must not also have to decide what a missing one means:
+        # no id is a failure, and it says so where a shell can see it.
+        if not record.get("session_id"):
+            raise SystemExit(1)
+        return
+
     click.echo(f"[scad] pane: {pane}")
     if record.get("session_id"):
         click.echo(f"[scad] session: {record['session_id']}  "
