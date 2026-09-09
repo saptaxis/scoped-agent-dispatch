@@ -3253,6 +3253,23 @@ class TestSessionLaunch:
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
 
+    def test_a_blocked_launch_fails_loudly_instead_of_reporting_success(
+            self, runner, tmp_path, monkeypatch):
+        """A launch stopped at a gate is not a launch. It must exit non-zero
+        and say what to do, rather than print a resume command for a session
+        that is sitting at an unanswered dialog."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch, blocked=True,
+                   problem="Claude Code is asking whether you trust this folder.")
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "cannot launch" in result.output
+        assert "trust this folder" in result.output
+        assert "no key was pressed" in result.output
+        # and it must NOT have offered the session as usable
+        assert "resume:" not in result.output
+
     def test_json_emits_the_record_and_nothing_to_parse(
             self, runner, tmp_path, monkeypatch):
         """The id is a contract. A consumer must not regex the human lines for

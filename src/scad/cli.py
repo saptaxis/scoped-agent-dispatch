@@ -2194,6 +2194,20 @@ def session_launch(agent, cwd, prompt, attach, as_json):
         raise click.ClickException(str(exc)) from exc
 
     pane = record.get("tmux") or ""
+
+    # A launch that stopped at a gate scad may not answer is not a launch.
+    # Say what is wanted, where, and how to finish it — then exit non-zero, so
+    # a caller (and a shell) sees a failure rather than a half-started session.
+    if record.get("blocked"):
+        if as_json:
+            click.echo(json.dumps(record, ensure_ascii=False, default=str))
+        click.echo(f"[scad] cannot launch: {record.get('problem')}", err=True)
+        click.echo(f"[scad] the pane is live and waiting for you: "
+                   f"{shlex.join(attach_argv(pane))}", err=True)
+        click.echo(f"[scad] answer it once, then run this launch again. "
+                   f"Nothing was sent and no key was pressed.", err=True)
+        raise SystemExit(1)
+
     if record.get("session_id"):
         # Tell the index now. Standard practice — record the job when you start
         # it — and the gap was real: `session show` denied a session scad had

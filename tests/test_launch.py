@@ -780,3 +780,57 @@ class TestRefusingToLaunch:
 
         with pytest.raises(LaunchError):
             launch("claude", tmp_path / "nope")
+
+
+TRUST_DIALOG = """ Accessing workspace:
+
+ /Users/vsr/code/docspatial
+
+ Quick safety check: Is this a project you created or one you trust?
+
+ > No, exit
+   Yes, I trust this folder
+
+ Enter to confirm . Esc to cancel"""
+
+
+class TestAGateScadMayNotAnswer:
+    """The folder-trust dialog killed a session by being unrecognised.
+
+    It is an ARROW menu, so the numbered-option matcher found nothing, and it
+    says "Enter to confirm" rather than "Press enter to continue", so the gate
+    marker missed too. The pane read as READY, the priming turn was typed into
+    it, and the Enter that submits answered the highlighted default -- `No,
+    exit`. Claude quit, no transcript was written, and the session was missing
+    from /resume as well.
+    """
+
+    def test_the_trust_dialog_is_not_mistaken_for_a_ready_pane(self):
+        from scad.launch import pane_state, GATE
+        assert pane_state(TRUST_DIALOG) == GATE
+
+    def test_it_is_reported_as_something_only_a_human_can_answer(self):
+        from scad.launch import blocking_gate
+        reason = blocking_gate(TRUST_DIALOG)
+        assert reason and "trust" in reason.lower()
+
+    def test_scad_never_picks_an_option_in_it(self):
+        # gate_choice exists to clear NUMBERED gates. It must find nothing here:
+        # choosing on the human's behalf is the whole thing being refused.
+        from scad.launch import gate_choice
+        assert gate_choice(TRUST_DIALOG) is None
+
+    def test_an_ordinary_pane_is_still_ready(self):
+        from scad.launch import pane_state, READY, blocking_gate
+        ordinary = "? for shortcuts\n> "
+        assert pane_state(ordinary) == READY
+        assert blocking_gate(ordinary) is None
+
+    def test_a_numbered_gate_is_still_cleared(self):
+        # The refusal must not swallow the gates scad legitimately answers.
+        from scad.launch import gate_choice
+        update = ("A new version is available\n"
+                  "  1. Update now\n"
+                  "› 2. Skip\n"
+                  "Press enter to continue")
+        assert gate_choice(update) == "2"

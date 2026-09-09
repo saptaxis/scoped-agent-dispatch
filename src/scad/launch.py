@@ -286,6 +286,37 @@ _OPTION = re.compile(r"^[\s›>*]*(\d+)\.\s+(.*?)\s*$")
 _SAFE_OPTION = re.compile(r"^(skip|yes)\b", re.I)
 _NEVER = re.compile(r"update now", re.I)
 
+# A gate scad must never answer, because the safe reply is not scad's to give.
+# The folder-trust dialog is an ARROW menu, not a numbered list — `_OPTION`
+# matches nothing in it and `_GATE_MARKER` is absent, so it read as READY and a
+# priming turn went straight into it. Its highlighted default is `No, exit`, so
+# the Enter that submits the prompt answered "no" and Claude quit: the pane fell
+# back to a shell, no transcript was ever written, and the session was therefore
+# absent from `/resume` too. Recognised by the two strings the dialog owns.
+_BLOCKING_GATES = (
+    ("Yes, I trust this folder",
+     "Claude Code is asking whether you trust this folder. scad will not answer "
+     "that for you — its highlighted default is `No, exit`, and pressing Enter "
+     "blind is what kills the session."),
+    ("Do you trust the files in this folder",
+     "Claude Code is asking whether you trust this folder. scad will not answer "
+     "that for you."),
+)
+
+
+def blocking_gate(text: str) -> str | None:
+    """Why scad must not touch this pane, or None if nothing is blocking.
+
+    Separate from `gate_choice`, which picks a safe numbered answer. These have
+    no safe answer scad is entitled to choose: trusting a directory is the
+    human's call, and getting it wrong in either direction is worse than
+    stopping.
+    """
+    for marker, reason in _BLOCKING_GATES:
+        if marker in text:
+            return reason
+    return None
+
 
 def gate_options(text: str) -> list[tuple[str, str]]:
     """The numbered options a gate is offering, in the order it lists them."""
@@ -315,6 +346,8 @@ def pane_state(text: str) -> str:
     """`starting`, `gate` or `ready` — what the pane is doing."""
     if not text.strip():
         return STARTING
+    if blocking_gate(text):
+        return GATE
     if _GATE_MARKER in text and gate_options(text):
         return GATE
     return READY
@@ -537,7 +570,13 @@ def _resolve_kimi(target, cwd, since, prompt, say) -> tuple:
     if len(candidates) == 1:
         problem = None
         if prompt:
-            settle_pane(target)
+            state, text = settle_pane(target, clear_gates=True)
+            reason = blocking_gate(text)
+            if reason:
+                # No key is pressed at a gate scad may not answer, so the turn
+                # is not sent. The session still exists — kimi's id comes from
+                # its index line, not from the turn.
+                return candidates[0], TUI_NATIVE, reason, {"blocked": True}
             _first_turn(target, prompt, "kimi")
             problem = _turn_undispatched(target, "kimi")
             if problem:
@@ -567,6 +606,9 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
     say("waiting for the codex TUI")
     state, text = settle_pane(target, clear_gates=True)
     if state != READY:
+        reason = blocking_gate(text)
+        if reason:
+            return None, UNRESOLVED, reason, {"blocked": True}
         return None, UNRESOLVED, (
             f"the codex TUI did not come up clean — no turn was sent and no "
             f"key was pressed. The pane is showing:\n{text.strip()}"), {}
@@ -637,10 +679,19 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
 
     extra: dict = {}
     problem = None
+    blocked = False
     if agent == "claude":
         provenance = MINTED
-        if prompt:
-            settle_pane(target)
+        # Check the pane BEFORE touching it. This return value used to be
+        # discarded and the turn sent regardless, which is how a priming
+        # prompt got typed into the folder-trust dialog and answered it `No`.
+        state, text = settle_pane(target, clear_gates=True)
+        if state != READY:
+            problem = blocking_gate(text) or (
+                f"the claude TUI did not come up clean. The pane is showing:"
+                f"\n{text.strip()}")
+            blocked = True
+        elif prompt:
             _first_turn(target, prompt)
     elif agent == "kimi":
         session_id, provenance, problem, extra = _resolve_kimi(
@@ -662,6 +713,11 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
     record.update(extra)
     if problem:
         record["problem"] = problem
+    if blocked or extra.get("blocked"):
+        # A launch that stopped at a gate is NOT a successful launch. The pane
+        # is live and the human can answer it, but nothing was sent and the
+        # caller must not treat this as ready to use.
+        record["blocked"] = True
 
     write_record(record, key=session_id or f"unresolved-{name}")
     return record

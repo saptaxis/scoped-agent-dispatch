@@ -92,6 +92,14 @@ gone.
 - `gpu: true` now errors on macOS — no GPU passthrough into a Lima VM
 
 ### Fixed
+- **Launching into an untrusted directory killed the session.** Claude Code's folder-trust dialog
+  is an arrow menu, so the numbered-option matcher found nothing and the gate marker missed too —
+  the pane read as ready, the priming turn was typed into the dialog, and the Enter that submits a
+  prompt answered its highlighted default, `No, exit`. Claude quit, and because no transcript was
+  written the session was absent from `/resume` as well. Compounding it, only the codex leg
+  consulted the pane state at all; claude and kimi discarded it and sent regardless. All three legs
+  now stop, and `session launch` exits non-zero naming the dialog, the live pane, and the fact that
+  nothing was sent and no key was pressed
 - **A session's project label wandered even after cwd was pinned.** The earlier fix stopped `cwd`
   moving and left `project = excluded.project` one line below — a plain assignment from the cwd of
   whatever record a pass happened to parse. One row could therefore contradict itself: cwd in one
