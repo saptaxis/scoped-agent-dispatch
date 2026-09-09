@@ -5,7 +5,8 @@ description: >
   adversarial/peer code review, challenging a design, a debugging second
   opinion, a persistent consult companion, or generating/editing images —
   or when the user mentions codex, "ask codex", peer review, a second
-  opinion, or image generation.
+  opinion, or image generation. Not for Codex itself — this skill is how
+  another agent reaches Codex, and Codex consulting Codex is an echo.
 ---
 
 # Codex — Peer Agent via CLI
@@ -29,6 +30,12 @@ Codex is a **separate coding agent** with its own model, run through the `codex`
 
 ## When NOT to Use
 
+- **You are Codex.** This skill exists so that a *different* agent can get an
+  independent opinion. Codex consulting Codex is the same model with the same
+  weights answering its own question — an echo, not a second perspective, and
+  it costs a turn and a sub-run to learn nothing. Do the work yourself.
+  (Observed 2026-08-12: a Codex session launched as a peer reviewer read this
+  skill, matched it, and spawned `codex exec` against itself.)
 - Routine edits you can do directly — don't outsource your own work
 - Dumping the whole conversation at Codex — curate instead (see below)
 - Anything needing writes, unless the user explicitly delegates (`-s workspace-write`)
