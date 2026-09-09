@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "scad"
 version = "0.4.0"
-description = "Knows every agent session on your machine — claude, codex, kimi — archived before it is pruned, indexed, searchable. Runs them in isolated Docker containers when you want that."
+description = "Knows every claude, codex and kimi session on your machine, archives them before the agent prunes them, and makes them searchable. Runs agents in isolated Docker containers when you want that."
 requires-python = ">=3.11"
 license = "MIT"
 authors = [
