@@ -45,6 +45,9 @@ scad session launch --agent claude --cwd ~/Desktop/scad-launch-demo \
 - [ ] **Picker visibility.** In the pane, `/resume` lists this session. If it
       does not, the pty is not doing its job — check `claude --debug` for
       `Session <id> filtered from /resume: entrypoint=sdk-cli`.
+- [ ] **With the pane still open**, `scad session resume <id>` attaches to it rather
+      than starting a second `claude`. Check `~/.claude/sessions/` afterwards: one
+      `<pid>.json` names this id, not two.
 - [ ] Close the pane, then `scad session resume <id>` and ask what the phrase
       was. It answers `PURPLE-OTTER-42`.
 

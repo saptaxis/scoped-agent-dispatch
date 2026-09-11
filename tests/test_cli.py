@@ -3089,7 +3089,43 @@ class TestResumeIsLiveFirst:
         self._record(tmp_path, monkeypatch)
         self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
-        assert result.output.strip() == "cd /repo && claude --resume S1"
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+
+    def test_print_warns_on_stderr_when_the_recorded_pane_is_live(
+            self, runner, tmp_path, monkeypatch):
+        """The payload does not change, but a person at a terminal is told.
+        A second `claude --resume` on an open session writes a fork into its
+        transcript, and later resumes follow the fork until the original
+        exits (backlog, Bugs, 2026-09-11)."""
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert "main:3.1" in result.stderr
+        assert "open" in result.stderr
+
+    def test_print_warns_on_stderr_when_the_registry_proves_it_live(
+            self, runner, tmp_path, monkeypatch):
+        from scad.live import ClaudeSession
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd="/repo")])
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert "4242" in result.stderr
+        assert "open" in result.stderr
+
+    def test_print_is_silent_for_a_closed_session(
+            self, runner, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert result.stderr == ""
 
     def test_a_session_the_registry_proves_is_running_is_not_started_twice(
             self, runner, tmp_path, monkeypatch):
@@ -3270,6 +3306,21 @@ class TestSessionLaunch:
         # and it must NOT have offered the session as usable
         assert "resume:" not in result.output
 
+    def test_a_launch_hands_back_the_guarded_verb_not_the_raw_command(
+            self, runner, tmp_path, monkeypatch):
+        """The session is certainly open at this moment, which is exactly
+        when the raw resume command must not be run: it starts a second
+        process on the id and forks the transcript. `scad session resume`
+        attaches while the pane is open and resumes once it has closed."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "scad session resume CX1" in result.output
+        assert "codex resume CX1" not in result.output
+        assert "pane: scad-cx-1430:0.0" in result.output
+
     def test_json_emits_the_record_and_nothing_to_parse(
             self, runner, tmp_path, monkeypatch):
         """The id is a contract. A consumer must not regex the human lines for
@@ -3321,14 +3372,6 @@ class TestSessionLaunch:
         shown = runner.invoke(main, ["session", "show", "CX1"])
         assert shown.exit_code == 0, shown.output
         assert "codex" in shown.output
-
-    def test_it_hands_back_the_resume_command(self, runner, tmp_path, monkeypatch):
-        self._home(tmp_path, monkeypatch)
-        self._fake(monkeypatch)
-        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
-                                      "--cwd", str(tmp_path)])
-        assert result.exit_code == 0, result.output
-        assert "cd /repo && codex resume CX1" in result.output
 
     def test_it_names_the_pane_it_launched_into(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
@@ -3448,7 +3491,7 @@ class TestLaunchChecksAttribution:
         result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
                                       "--cwd", str(loose)])
         assert result.exit_code == 0, result.output
-        assert "codex resume CX1" in result.output
+        assert "scad session resume CX1" in result.output
 
     def test_a_filed_target_is_not_warned_about(self, runner, tmp_path, monkeypatch):
         import subprocess as sp

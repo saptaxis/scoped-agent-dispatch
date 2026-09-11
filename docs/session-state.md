@@ -128,6 +128,13 @@ Claude session stamped `entrypoint: cli` rather than `sdk-cli`, which is what
 keeps it in Claude's own `/resume` picker. A non-pty launch produces a session the
 picker hides, so a missing tmux refuses rather than degrading.
 
+`session resume` attaches when the session is still open and only runs the agent's
+own resume when it has closed. That distinction is not cosmetic. A second `claude
+--resume <id>` against an open session is a second process on one transcript: it
+appends its own entries, the chain forks, and until the original process exits every
+later resume follows the fork and hides the original's turns. Go through `session
+resume`, or attach to the pane, while a session is open.
+
 Gates shown in the pane are answered by matching the option label, never by
 pressing Enter, whose default on codex's update gate runs `curl ... | sh`. Gates
 with no safe answer, such as Claude Code's folder-trust dialog, stop the launch:

@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the
+  session is certainly open. A second `claude --resume` on an open session is a second process on
+  one transcript: it appends its own entries, the chain forks, and every later resume follows the
+  fork until the original process exits. It prints `scad session resume <id>` instead, which
+  attaches while the pane is open and resumes once it has closed. The launch record still carries
+  the raw command for then.
+- `session resume --print` warns on stderr when the session is open in a recorded pane or in
+  Claude's process registry. stdout is unchanged; it is what the viewer copies.
+
 ## [0.4.0] — 2026-09-09
 
 **The release where scad stopped being only a container dispatcher.** 0.3.0 could put a Claude

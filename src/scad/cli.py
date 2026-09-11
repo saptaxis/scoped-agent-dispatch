@@ -2153,7 +2153,7 @@ def _exec(argv: list[str]) -> None:
 def session_launch(agent, cwd, prompt, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
-    Detached: it prints the resume command and the pane, and leaves your
+    Detached: it prints the pane and the way back in, and leaves your
     terminal alone. `--attach` takes you in at the end.
 
     tmux is required, and not as a convenience — it supplies the pty that keeps
@@ -2240,7 +2240,12 @@ def session_launch(agent, cwd, prompt, attach, as_json):
     if record.get("session_id"):
         click.echo(f"[scad] session: {record['session_id']}  "
                    f"({record.get('provenance')})")
-        click.echo(f"[scad] resume: {record['resume']}")
+        # Not the raw resume command. The session is certainly open at this
+        # moment, and a second `claude --resume` on an open id writes a fork
+        # into its transcript that later resumes follow until the original
+        # exits. `session resume` attaches while the pane is open and resumes
+        # once it has closed; the record keeps the raw command for then.
+        click.echo(f"[scad] back in: scad session resume {record['session_id']}")
         click.echo(f"[scad] record: {record_path(record['session_id'])}")
         if attach:
             _exec(attach_argv(pane))
@@ -2258,6 +2263,22 @@ def session_launch(agent, cwd, prompt, attach, as_json):
         _exec(attach_argv(pane))
         return
     raise SystemExit(1)
+
+
+def _open_in(session_id: str, record: dict) -> str | None:
+    """Where `session_id` is open right now, or None if it is not known to be.
+
+    The two proofs `session resume` itself acts on, in the same order: the
+    launch record's pane if it still holds an agent, then Claude's own
+    process registry. Neither is inferred from cwd or time.
+    """
+    pane_target = record.get("tmux")
+    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
+        return f"pane {pane_target}"
+    live = next((s for s in claude_live_sessions() if s.session_id == session_id), None)
+    if live is not None:
+        return f"pid {live.pid}"
+    return None
 
 
 @session.command("resume")
@@ -2302,7 +2323,17 @@ def session_resume(session_id, print_only):
     command = resume_command(target)
 
     if print_only:
+        # The payload is the viewer's clipboard: a resume command, never a
+        # tmux target, because the pane is gone tomorrow and the command is
+        # not. But a person running this at a terminal while the session is
+        # open gets told, on stderr, so the payload stays clean: running it
+        # now forks the transcript.
         click.echo(command)
+        open_in = _open_in(session_id, record)
+        if open_in:
+            click.echo(f"[scad] {session_id} is open right now ({open_in}); "
+                       f"this command is for after it closes. While it is open: "
+                       f"scad session resume {session_id}", err=True)
         return
 
     # The launch record is the only thing that can name the pane a specific
