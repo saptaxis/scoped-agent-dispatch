@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+**The release where scad's index became an interface rather than a file.** 0.4.0 added the read
+tier; the first consumer of it, orglens, then reached past the CLI and queried the sqlite file
+directly, which made the schema a contract nobody had written down. This release writes it down:
+`session ls --json` carries what a consumer was fetching, `notes ls --about` answers the question
+a project join could not, and the index is in WAL mode so a reader is never stuck behind a
+reindex. It also closes the one bug 0.4.0 shipped with: the resume command a launch printed was
+the wrong command for the moment it was printed.
+
 ### Added
 
 - `session ls --json` is now the export a consumer reads instead of the index file. Rows carry
