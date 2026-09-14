@@ -12,6 +12,11 @@
   the raw command for then.
 - `session resume --print` warns on stderr when the session is open in a recorded pane or in
   Claude's process registry. stdout is unchanged; it is what the viewer copies.
+- `scad view` no longer shows one session twice when two agent panes share a directory. A
+  claude pane is matched to its session through the process tree, from the pane's shell pid to
+  the pid Claude's registry names, and a scad-launched pane through its launch record; both are
+  exact and for any pane. Only a pane neither can name falls back to the newest session in its
+  directory, and the card now says "best guess by directory" when it does.
 
 ## [0.4.0] — 2026-09-09
 

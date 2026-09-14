@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TMUX_FORMAT = ("#{session_name}:#{window_index}.#{pane_index}|#{window_name}|"
-               "#{pane_current_path}|#{pane_current_command}")
+               "#{pane_current_path}|#{pane_current_command}|#{pane_pid}")
 _TIMEOUT = 5
 
 # Slack allowed between the registry's `procStart` and the kernel's start time.
@@ -45,6 +45,7 @@ class TmuxPane:
     path: str
     command: str
     window: str = ""   # tmuxinator's window name, e.g. "scad" — the human label
+    pid: int = 0       # the pane's shell; the agent is a descendant of it
 
     @property
     def session(self) -> str:
@@ -75,10 +76,16 @@ def tmux_panes() -> list[TmuxPane]:
         # Split from both ends: a path may contain "|", the others may not.
         head, _, rest = line.partition("|")
         window, _, rest = rest.partition("|")
+        # The pid is last and all digits; a command never is. Read it only
+        # when it is there, so a line without one still parses, pid 0.
+        before, _, last = rest.rpartition("|")
+        pid = 0
+        if last.isdigit():
+            pid, rest = int(last), before
         path, _, command = rest.rpartition("|")
         if not head or not command:
             continue
-        panes.append(TmuxPane(target=head, path=path, command=command, window=window))
+        panes.append(TmuxPane(target=head, path=path, command=command, window=window, pid=pid))
     return panes
 
 
@@ -491,3 +498,63 @@ def agent_cwds(panes: list[TmuxPane] | None = None) -> set[str]:
     """
     panes = tmux_panes() if panes is None else panes
     return {p.path for p in panes if is_agent_command(p.command) and p.path}
+
+
+
+def _process_parents() -> dict[int, int]:
+    """pid -> parent pid for every process `ps` can see. Empty on any failure."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            capture_output=True, text=True, timeout=_TIMEOUT,
+        )
+    except Exception:
+        return {}
+    parents: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        pid, _, ppid = line.strip().partition(" ")
+        try:
+            parents[int(pid)] = int(ppid)
+        except ValueError:
+            continue
+    return parents
+
+
+def pane_occupants(panes: list[TmuxPane], sessions: list[ClaudeSession],
+                   parents: dict[int, int] | None = None) -> dict[str, ClaudeSession]:
+    """Which live claude session is inside which pane: pane target -> session.
+
+    A proof, not a guess. The registry names a session by the pid of the
+    process holding it; tmux names a pane by the pid of its shell; the agent
+    is a descendant of that shell. Matching on cwd instead hands the same
+    session to every agent pane in a directory, which is how one session came
+    to be shown twice.
+
+    One `ps` for the whole machine. A pane without a pid (an older fixture, or
+    a tmux that could not say) or whose tree holds no registered pid is absent
+    from the result rather than guessed at.
+    """
+    if not panes or not sessions:
+        return {}
+    if parents is None:
+        parents = _process_parents()
+    if not parents:
+        return {}
+    by_pid = {s.pid: s for s in sessions}
+    found: dict[str, ClaudeSession] = {}
+    for pane in panes:
+        if not pane.pid or not is_agent_command(pane.command):
+            continue
+        # Walk up from each registered pid; the first pane whose shell we hit
+        # owns it. Cheaper than enumerating every pane's descendants, and the
+        # tree is shallow: shell -> claude, sometimes one re-exec deeper.
+        for pid, session in by_pid.items():
+            cursor = parents.get(pid)
+            hops = 0
+            while cursor and hops < 16:
+                if cursor == pane.pid:
+                    found.setdefault(pane.target, session)
+                    break
+                cursor = parents.get(cursor)
+                hops += 1
+    return found

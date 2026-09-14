@@ -146,6 +146,16 @@ class TestAgentPanes:
         with patch("scad.live.subprocess.run", return_value=fake_run(out)):
             assert len(agent_panes()) == 3
 
+    def test_the_pane_pid_is_the_last_field(self):
+        """Added so a pane can be tied to the process inside it. Older
+        fixtures with four fields still parse, with pid 0."""
+        from scad.live import tmux_panes
+        out = "main:3.0|scad|/repo|2.1.205|2941\nmain:3.1|scad|/re|po|codex\n"
+        with patch("scad.live.subprocess.run", return_value=fake_run(out)):
+            panes = tmux_panes()
+        assert (panes[0].pid, panes[0].path, panes[0].command) == (2941, "/repo", "2.1.205")
+        assert (panes[1].pid, panes[1].path, panes[1].command) == (0, "/re|po", "codex")
+
     def test_session_name_is_derived_from_the_target(self):
         assert TmuxPane("main2:3.1", "/p", "codex").session == "main2"
 
@@ -538,3 +548,44 @@ class TestSessionsInsideScadsOwnContainers:
         from scad.live import container_live_sessions
 
         assert container_live_sessions({"run-a"}, runs_root=tmp_path / "nope") == []
+
+
+class TestPaneOccupants:
+    """Which live claude session is inside which pane, by process tree.
+
+    The registry names a session by pid; tmux names a pane by its shell's pid;
+    the claude process is a descendant of the shell. That is a proof, where
+    matching on cwd is a guess that hands the same session to every pane in
+    the directory.
+    """
+
+    def _panes(self):
+        return [TmuxPane("main:5.0", "/docs", "2.1.270", pid=100),
+                TmuxPane("main:5.1", "/docs", "2.1.270", pid=200)]
+
+    def test_each_pane_gets_the_session_whose_process_it_holds(self):
+        from scad.live import ClaudeSession, pane_occupants
+        sessions = [ClaudeSession("SA", 150, cwd="/docs"),
+                    ClaudeSession("SB", 250, cwd="/docs")]
+        parents = {150: 100, 250: 200}
+        found = pane_occupants(self._panes(), sessions, parents=parents)
+        assert {t: s.session_id for t, s in found.items()} == {"main:5.0": "SA", "main:5.1": "SB"}
+
+    def test_a_grandchild_process_still_counts(self):
+        """claude re-execs; the registry pid may sit a level below the shell's child."""
+        from scad.live import ClaudeSession, pane_occupants
+        sessions = [ClaudeSession("SA", 160, cwd="/docs")]
+        parents = {160: 150, 150: 100}
+        found = pane_occupants(self._panes(), sessions, parents=parents)
+        assert found["main:5.0"].session_id == "SA"
+        assert "main:5.1" not in found
+
+    def test_a_pane_with_no_pid_or_no_live_process_is_absent(self):
+        from scad.live import ClaudeSession, pane_occupants
+        panes = [TmuxPane("main:1.0", "/x", "2.1.270")]
+        assert pane_occupants(panes, [ClaudeSession("S", 9, cwd="/x")], parents={9: 1}) == {}
+
+    def test_discovery_never_raises(self):
+        from scad.live import pane_occupants
+        with patch("scad.live.subprocess.run", side_effect=OSError("no ps")):
+            assert pane_occupants(self._panes(), []) == {}

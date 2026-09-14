@@ -93,6 +93,22 @@ def write_record(record: dict, *, key: str | None = None) -> Path:
     return path
 
 
+def launch_records() -> list[dict]:
+    """Every launch record on disk. Unreadable ones are skipped, not fatal."""
+    root = launches_root()
+    if not root.is_dir():
+        return []
+    records = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
+
+
 def read_record(session_id: str) -> dict | None:
     """The launch record for a session, or None — unreadable counts as absent."""
     if _component(session_id) is None:

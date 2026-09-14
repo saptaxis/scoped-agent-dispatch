@@ -524,6 +524,63 @@ class TestLivePanes:
                  TmuxPane("main:3.2", "/repo", "2.1.220", window="scad")]
         assert [r["target"] for r in gather(conn, panes, set())["panes"]] == ["main:3.0", "main:3.2"]
 
+    def test_two_claude_panes_in_one_cwd_are_told_apart_by_process(self, tmp_path, monkeypatch):
+        """Reported 2026-09-15: window main:5 held two claude panes in
+        traitful-docs and the page showed the same session twice, because the
+        occupant was guessed by cwd and both panes got the newest. The
+        registry names each pane's session by pid; that is a proof."""
+        from scad.live import ClaudeSession
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "OLD", "awaiting-user", cwd="/docs", ended_days_ago=1)
+        _store(conn, "NEW", "awaiting-user", cwd="/docs")
+        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=100),
+                 TmuxPane("main:5.1", "/docs", "2.1.270", window="docs", pid=200)]
+        live = [ClaudeSession("OLD", 150, cwd="/docs"), ClaudeSession("NEW", 250, cwd="/docs")]
+        monkeypatch.setattr("scad.live._process_parents", lambda: {150: 100, 250: 200})
+        rows = gather(conn, panes, set(), live_sessions=live)["panes"]
+        by = {r["target"]: r for r in rows}
+        assert by["main:5.0"]["likely_id"] == "OLD"
+        assert by["main:5.1"]["likely_id"] == "NEW"
+        assert {r["occupant"] for r in rows} == {"proven"}
+
+    def test_a_proven_session_the_index_has_not_seen_is_still_named(self, tmp_path, monkeypatch):
+        """A launch is indexed as a skeleton and a hand-started session not at
+        all until a reindex; the registry knows the id regardless."""
+        from scad.live import ClaudeSession
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "NEW", "awaiting-user", cwd="/docs")
+        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=100)]
+        live = [ClaudeSession("UNSEEN", 150, cwd="/docs")]
+        monkeypatch.setattr("scad.live._process_parents", lambda: {150: 100})
+        row = gather(conn, panes, set(), live_sessions=live)["panes"][0]
+        assert row["likely_id"] == "UNSEEN"
+        assert row["likely_name"] is None
+        assert row["occupant"] == "proven"
+
+    def test_without_a_process_match_the_cwd_guess_is_marked_as_one(self, tmp_path, monkeypatch):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "NEW", "awaiting-user", cwd="/docs")
+        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=100)]
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        row = gather(conn, panes, set(), live_sessions=[])["panes"][0]
+        assert row["likely_id"] == "NEW"
+        assert row["occupant"] == "guessed"
+
+    def test_a_launch_record_naming_the_pane_is_a_proof_for_any_family(self, tmp_path, monkeypatch):
+        from scad.launch import write_record
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "CX-NEW", "awaiting-user", cwd="/repo", agent="codex")
+        _store(conn, "CX-MINE", "awaiting-user", cwd="/repo", agent="codex", ended_days_ago=2)
+        write_record({"agent": "codex", "session_id": "CX-MINE", "cwd": "/repo",
+                      "tmux": "main:7.0", "started": "2026-09-15T10:00:00Z",
+                      "resume": "cd /repo && codex resume CX-MINE", "provenance": "tui-native"})
+        panes = [TmuxPane("main:7.0", "/repo", "codex", window="w", pid=300)]
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        row = gather(conn, panes, set(), live_sessions=[])["panes"][0]
+        assert row["likely_id"] == "CX-MINE"
+        assert row["occupant"] == "proven"
+
     def test_non_agent_panes_are_excluded(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
         panes = [TmuxPane("main:2.0", "/repo", "zsh", window="docs")]
