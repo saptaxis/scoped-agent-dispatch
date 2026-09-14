@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- `session ls --json` is now the export a consumer reads instead of the index file. Rows carry
+  `cwd`, `ended`, `needs` and `parent_session_id`, plus `last_turn` (the newest turn with text,
+  clipped to 240 characters) and `live` (pid, name, status from Claude's process registry, or
+  null). Filed by orglens as the five query shapes it ran against `~/.scad/index.sqlite`.
+- `session ls --parent <id>`: a session's subagents and workflow agents.
+- `notes ls --about NAME`: notes naming NAME in `tags` or `entities`, as the topic, or as the
+  project. By project alone, three of eight notes about orglens were found; this finds all.
+- An index on `turns(session_id, ts)`, for "the last thing said" per session.
+
+### Changed
+
+- The index opens in WAL mode. A reader in another process is no longer blocked for the whole
+  of a reindex; one external view had stalled 600s behind one.
+
 ### Fixed
 
 - `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the

@@ -2038,14 +2038,20 @@ def reindex(rebuild, force, no_archive):
               help="Terminal state — e.g. --outcome awaiting-question for sessions asking you something.")
 @click.option("--since", default=None, help="Only sessions started on/after YYYY-MM-DD.")
 @click.option("--until", default=None, help="Only sessions started before YYYY-MM-DD.")
+@click.option("--parent", "parent_id", default=None,
+              help="Only the subagents and workflow agents of this session.")
 @click.option("--limit", default=40, help="Rows to show.")
-@click.option("--json", "as_json", is_flag=True, help="Emit rows as JSON.")
-def session_ls(project, agent, kind, machine, grade, outcome, since, until, limit, as_json):
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit rows as JSON. The export a consumer reads instead of the index "
+                   "file: adds cwd, ended, needs, parent_session_id, last_turn and live.")
+def session_ls(project, agent, kind, machine, grade, outcome, since, until, parent_id,
+               limit, as_json):
     """List indexed sessions, newest first."""
     conn = index_connect()
     where, params = [], []
     for column, value in (("project", project), ("agent", agent), ("kind", kind),
-                          ("machine", machine), ("grade", grade), ("outcome", outcome)):
+                          ("machine", machine), ("grade", grade), ("outcome", outcome),
+                          ("parent_session_id", parent_id)):
         if value:
             where.append(f"{column} = ?")
             params.append(value)
@@ -2056,12 +2062,13 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"SELECT id, name, harness_state, kind, agent, project, title, n_turns, "
-        f"grade, outcome, started FROM sessions {clause} ORDER BY started DESC LIMIT ?",
+        f"grade, outcome, started, ended, cwd, needs, parent_session_id "
+        f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
         (*params, limit),
     ).fetchall()
 
     if as_json:
-        click.echo(json.dumps([dict(r) for r in rows], default=str))
+        click.echo(json.dumps(_session_export(conn, rows), default=str))
         return
     if not rows:
         click.echo("[scad] No sessions. Run: scad archive && scad reindex")
@@ -2078,6 +2085,35 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
         name = (r["name"] or "")[:26]     # the longest real one is 26 characters
         click.echo(f"{r['id'][:12]:<14} {name:<27} {when}  {r['agent']:<7} "
                    f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
+
+
+def _session_export(conn, rows) -> list[dict]:
+    """The `session ls --json` rows, with what a consumer otherwise opens the
+    index file for: the last thing said in each session and whether it is
+    open right now.
+
+    Filed by orglens (2026-09-15) as the query shapes it ran against
+    `index.sqlite` directly, which made the schema a contract two repositories
+    held silently. `last_turn` is the newest turn with text, not the newest
+    row: a trailing empty tool_result is not the last thing said. `live` comes
+    from Claude's process registry and is None for anything not in it, which
+    includes every codex and kimi session; the registry is Claude's.
+    """
+    out = []
+    live = {s.session_id: s for s in claude_live_sessions()}
+    for r in rows:
+        row = dict(r)
+        last = conn.execute(
+            "SELECT ts, role, substr(text, 1, 240) AS text FROM turns "
+            "WHERE session_id = ? AND text != '' ORDER BY ts DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        row["last_turn"] = dict(last) if last else None
+        s = live.get(row["id"])
+        row["live"] = ({"pid": s.pid, "name": s.name, "status": s.status,
+                        "waiting_for": s.waiting_for} if s else None)
+        out.append(row)
+    return out
 
 
 @session.command("show")
@@ -2551,11 +2587,14 @@ def notes():
 @click.option("--project", "project_name", default=None,
               help="Only notes filed under this project.")
 @click.option("--session", "session_id", default=None, help="Only this session's notes.")
+@click.option("--about", default=None,
+              help="Notes about NAME wherever they were written: NAME in tags or "
+                   "entities, as the topic, or as the project.")
 @click.option("--kind", "kind", type=click.Choice(KINDS), default=None,
               help="Only notes of this kind (handoff is the catch-up query).")
 @click.option("--limit", default=20, help="How many, newest first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
-def notes_ls(project_name, session_id, kind, limit, as_json):
+def notes_ls(project_name, session_id, about, kind, limit, as_json):
     """List notes, newest first.
 
     Metadata only — the body is not in the index at all, so this can say what
@@ -2572,6 +2611,15 @@ def notes_ls(project_name, session_id, kind, limit, as_json):
     if session_id:
         where.append("n.session_id = ?")
         params.append(session_id)
+    if about:
+        # A note about X is often written in Y: a field report on one project
+        # from another project's session, cross-tagged. Project alone found
+        # three of eight such notes. `tags` and `entities` are JSON arrays,
+        # so the quoted form matches a whole element and not a prefix.
+        where.append(f"(n.tags LIKE ? OR n.entities LIKE ? OR n.topic = ? "
+                     f"OR {NOTE_PROJECT_RESOLVED} = ?)")
+        quoted = f'%{json.dumps(about)}%'
+        params.extend([quoted, quoted, about, about])
     if kind:
         where.append(f"{NOTE_KIND_SQL} = ?")
         params.append(kind)

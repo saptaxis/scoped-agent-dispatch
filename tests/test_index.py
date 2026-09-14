@@ -1369,3 +1369,23 @@ class TestASessionThatGrewAfterItWasIndexed:
         texts = [r["text"] for r in conn.execute(
             "SELECT text FROM turns WHERE session_id='C9' ORDER BY idx")]
         assert texts.count("review the spec") == 1
+
+
+class TestReadersAndWriters:
+    """The index is read by other processes while scad writes it. One
+    `orglens view` stalled 600s behind a reindex in another pane (filed
+    2026-09-15): a rollback-journal writer blocks every reader for the whole
+    write. WAL lets readers proceed against the last committed state."""
+
+    def test_the_index_is_in_wal_mode(self, tmp_path):
+        from scad.index import connect
+        conn = connect(tmp_path / "i.sqlite")
+        assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
+
+    def test_turns_are_indexed_by_session_and_time(self, tmp_path):
+        """`last thing said across these ids` walks turns by (session_id, ts);
+        without this it was 85% of a consumer's per-unit cost."""
+        from scad.index import connect
+        conn = connect(tmp_path / "i.sqlite")
+        names = {r[1] for r in conn.execute("PRAGMA index_list(turns)")}
+        assert "idx_turns_session_ts" in names

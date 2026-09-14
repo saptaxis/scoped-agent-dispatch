@@ -67,6 +67,30 @@ scad session ls --outcome awaiting-question   # sessions that asked you somethin
 from reading the prose. A session whose ending cannot be classified is left
 unlabelled.
 
+### Reading the index from another program
+
+`scad session ls --json` is the contract. Open `~/.scad/index.sqlite` directly
+and the schema becomes something two repositories hold silently. The export
+carries, per row: `id`, `kind`, `parent_session_id`, `agent`, `cwd`, `project`,
+`name`, `title`, `started`, `ended`, `n_turns`, `outcome`, `needs`, `grade`,
+`harness_state`; `last_turn` as `{ts, role, text}` with the text clipped to 240
+characters and empty turns skipped; and `live` as `{pid, name, status,
+waiting_for}` from Claude's process registry, or `null`. `live` is Claude-only,
+since the registry is Claude's; `name` there is fresher than the index's, which
+learns it on reindex.
+
+```bash
+scad session ls --json --kind main --limit 1000     # every main session, one call
+scad session ls --parent <id>                       # a session's subagents
+scad notes ls --about orglens --json                # notes about a thing, wherever written
+```
+
+`--about` matches the name in `tags` or `entities`, as the `topic`, or as the
+project. A note about X is often written in Y's session and cross-tagged; by
+project alone, three of eight such notes were found.
+
+The index is in WAL mode, so a reader is not blocked while a reindex writes.
+
 ### Project attribution
 
 `scad where` reports which tier matched (`scad.yml`, then `.scad-project`, then

@@ -3651,3 +3651,136 @@ class TestLaunchRecordsTheSessionItStarted:
         )
         assert ensure_launched_session(conn, "L1", "codex", "/elsewhere") is False
         assert session_row(conn, "L1")["cwd"] == "/real"
+
+
+class TestSessionLsExport:
+    """`session ls --json` as the contract a consumer reads instead of the
+    SQLite file. Filed by orglens on 2026-09-15 as the five query shapes it
+    runs against `~/.scad/index.sqlite`; this is shapes 1, 2, 3 and 5 in one
+    call, plus the parent link for subagents (its open question)."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        import time as _time
+        from scad.index import append_turns, connect, upsert_session
+        from scad.records import KIND_MAIN, KIND_SUBAGENT, SessionRecord, TurnRecord
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
+        now = int(_time.time() * 1000)
+        conn = connect()
+        for sid, kind, parent, started in (("M1", KIND_MAIN, None, now - 5000),
+                                           ("M2", KIND_MAIN, None, now - 9000),
+                                           ("A1", KIND_SUBAGENT, "M1", now - 4000)):
+            rec = SessionRecord(id=sid, kind=kind, agent="claude", source="claude-transcript",
+                                cwd="/repo", started=started, ended=started + 1000,
+                                outcome="awaiting-user", parent_session_id=parent)
+            upsert_session(conn, rec, machine="mac", project="proj",
+                           archive_path=f"/arc/{sid}.jsonl", source_size=1,
+                           source_mtime=1, parsed_offset=1)
+        conn.execute("UPDATE sessions SET needs = 'permission' WHERE id = 'M1'")
+        append_turns(conn, "M1", [
+            TurnRecord(ts=1000, role="user", kind="text", text="first"),
+            TurnRecord(ts=2000, role="assistant", kind="text", text="x" * 300),
+            TurnRecord(ts=3000, role="user", kind="tool_result", text=""),
+        ])
+        conn.commit()
+        return conn
+
+    def _rows(self, runner, *args):
+        result = runner.invoke(main, ["session", "ls", "--json", *args])
+        assert result.exit_code == 0, result.output
+        return {r["id"]: r for r in json.loads(result.stdout)}
+
+    def test_rows_carry_the_columns_a_consumer_joins_on(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        rows = self._rows(runner)
+        m1 = rows["M1"]
+        assert m1["cwd"] == "/repo"
+        assert m1["ended"] == m1["started"] + 1000
+        assert m1["needs"] == "permission"
+        assert m1["parent_session_id"] is None
+        assert rows["A1"]["parent_session_id"] == "M1"
+
+    def test_last_turn_is_the_newest_with_text_clipped_to_240(self, runner, tmp_path, monkeypatch):
+        """The empty tool_result at ts 3000 is skipped: a consumer wants the
+        last thing said, not the last row written."""
+        self._seed(tmp_path, monkeypatch)
+        last = self._rows(runner)["M1"]["last_turn"]
+        assert last["ts"] == 2000 and last["role"] == "assistant"
+        assert len(last["text"]) == 240
+        assert self._rows(runner)["M2"]["last_turn"] is None
+
+    def test_live_comes_from_the_registry_and_names_the_pid(self, runner, tmp_path, monkeypatch):
+        from scad.live import ClaudeSession
+        self._seed(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 4242, cwd="/repo", name="renamed", status="busy")])
+        rows = self._rows(runner)
+        assert rows["M1"]["live"] == {"pid": 4242, "name": "renamed", "status": "busy",
+                                      "waiting_for": ""}
+        assert rows["M2"]["live"] is None
+
+    def test_parent_filter_lists_a_sessions_subagents(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        assert list(self._rows(runner, "--parent", "M1")) == ["A1"]
+
+    def test_the_text_listing_is_unchanged(self, runner, tmp_path, monkeypatch):
+        """The export grew; the human listing did not."""
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "ls"])
+        assert result.exit_code == 0
+        assert "last_turn" not in result.output and "/repo" not in result.output
+
+
+class TestNotesAbout:
+    """`notes ls --about NAME`: a note *about* X is often written *in* Y.
+
+    orglens found three of eight notes about itself by project alone; the
+    rest named it in tags, entities or topic from other projects' sessions."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        import time as _time
+        from scad.index import append_notes, connect, upsert_session
+        from scad.records import KIND_MAIN, NoteRecord, SessionRecord
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        now = int(_time.time() * 1000)
+        conn = connect()
+        for sid, project in (("SA", "scad"), ("SO", "orglens")):
+            rec = SessionRecord(id=sid, kind=KIND_MAIN, agent="claude", source="claude-transcript",
+                                cwd="/x", started=now - 1000, ended=now, outcome="awaiting-user")
+            upsert_session(conn, rec, machine="mac", project=project,
+                           archive_path=f"/arc/{sid}.jsonl", source_size=1,
+                           source_mtime=1, parsed_offset=1)
+        append_notes(conn, "SA", [
+            NoteRecord(ts=now - 500, title="by tag", tags=["orglens", "x"]),
+            NoteRecord(ts=now - 400, title="by entity", entities=["orglens"]),
+            NoteRecord(ts=now - 300, title="by topic", topic="orglens"),
+            NoteRecord(ts=now - 200, title="by authored project", project="orglens"),
+            NoteRecord(ts=now - 100, title="unrelated", tags=["scad"]),
+        ], "/notes/SA.jsonl")
+        append_notes(conn, "SO", [NoteRecord(ts=now - 50, title="by session project")],
+                     "/notes/SO.jsonl")
+        conn.commit()
+
+    def test_about_matches_tags_entities_topic_and_project(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
+        assert result.exit_code == 0, result.output
+        titles = {r["title"] for r in json.loads(result.stdout)}
+        assert titles == {"by tag", "by entity", "by topic", "by authored project",
+                          "by session project"}
+
+    def test_about_is_a_whole_word_in_the_json_arrays(self, runner, tmp_path, monkeypatch):
+        """`orglens` must not match a tag `orglens-extras`."""
+        from scad.index import append_notes, connect
+        from scad.records import NoteRecord
+        self._seed(tmp_path, monkeypatch)
+        conn = connect()
+        append_notes(conn, "SA", [NoteRecord(ts=1, title="near miss", tags=["orglens-extras"])],
+                     "/notes/SA.jsonl")
+        conn.commit()
+        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
+        assert "near miss" not in {r["title"] for r in json.loads(result.stdout)}

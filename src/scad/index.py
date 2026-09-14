@@ -140,6 +140,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent  ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_kind    ON sessions(kind);
 CREATE INDEX IF NOT EXISTS idx_turns_kind       ON turns(kind);
+-- "the last thing said across these ids" walks turns newest-first per
+-- session; without this it was a scan, and 85% of one consumer's cost.
+CREATE INDEX IF NOT EXISTS idx_turns_session_ts ON turns(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_outcome ON sessions(outcome);
 """
 
@@ -185,6 +188,12 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row
+    # Other processes read this file while scad writes it. Under the default
+    # rollback journal a writer blocks every reader for the whole write, and
+    # one external view stalled 600s behind a reindex. WAL lets readers see
+    # the last committed state while the write is in progress. Persistent:
+    # set once in the file, honoured by every later connection.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _migrate(conn)
     conn.execute(
