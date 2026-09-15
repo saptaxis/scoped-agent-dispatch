@@ -107,10 +107,10 @@ incremental pass is mtime-based, so re-filing what is already indexed needs
 Renders the index to a self-contained HTML page and opens it.
 
 ```bash
-scad view                 # waiting list, live sessions, everything, then open
+scad view                 # refresh, then: waiting list, live sessions, everything, then open
 scad view --days 30       # widen the waiting window
 scad view --no-open       # just write ~/.scad/view.html
-scad view --refresh       # archive and index new traces first
+scad view --no-refresh    # render the index as it is; the pure reader
 ```
 
 It answers who is waiting on you and how to get back to them. Each row carries a
@@ -118,10 +118,17 @@ command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.
 
-Live panes and containers are discovered at render time and are current.
-Everything else reflects the last `scad reindex`. `--refresh` runs an incremental
-pass (about a second) before rendering, and is opt-in so that plain `scad view`
-stays a reader. A refresh that fails warns and renders the existing index.
+Live panes and containers are discovered at render time and are current. The
+index is refreshed first by default, an incremental pass of about a second,
+because nothing else refreshes it and an unrefreshed page was current about
+panes and stale about everything else. `--no-refresh` keeps the pure reader. A
+refresh that fails warns and renders the existing index.
+
+The archive keeps every version of a source file: one that was rewritten rather
+than appended to is stored as a fork beside the original. A refresh reads the
+newest fork and replaces that session's turns from it, once, and reports it as
+"re-read from a rewritten source". Codex did this to 133 rollouts at once in
+September 2026 when it changed its on-disk format.
 
 Live panes are matched by working directory, which is approximate, since several
 panes can share one. Only panes running an agent count, and where more than one

@@ -7,6 +7,7 @@ drift would be worse than drift, so counts are returned for reporting.
 """
 
 import json
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -233,7 +234,7 @@ def identity_from_path(path: Path) -> dict:
                                                                        -> workflow-agent
     """
     parts = path.parts
-    stem = path.stem
+    stem = unforked_stem(path)
 
     if "subagents" not in parts:
         return {"kind": KIND_MAIN, "id": stem, "parent_session_id": None,
@@ -550,6 +551,40 @@ def _kimi_location(path: Path) -> tuple[Path | None, str | None]:
         if parent.name.startswith("session_"):
             return parent, None
     return None, None
+
+
+def fork_order(path: Path) -> int:
+    """Where an archive file sits among the copies of one source: 0 for the
+    original, else the mtime the archive stamped on the fork.
+
+    `archive._fork` writes `<stem>.<mtime><suffix>` beside a file whose source
+    was rewritten rather than appended to. The stamp is the source's mtime at
+    the time, so a later rewrite sorts later.
+    """
+    tail = path.stem.rpartition(".")[2]
+    return int(tail) if tail.isdigit() and "." in path.stem else 0
+
+
+def unforked_stem(path: Path) -> str:
+    """The stem with any fork stamp removed: `S1.1770042286` -> `S1`."""
+    return path.stem.rpartition(".")[0] if fork_order(path) else path.stem
+
+
+_ROLLOUT = re.compile(r"^rollout-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-(.+)$")
+
+
+def codex_identity_from_path(path: Path) -> dict:
+    """Derive a rollout's row id from its filename, not its first line.
+
+    `rollout-<timestamp>-<uuid>.jsonl` carries the same uuid `session_meta`
+    does, so a copy the archive forked resolves to the row its original made
+    without either file being opened. Before this, the fork's stem was taken
+    as an id, matched nothing, and was parsed from zero on every pass.
+    """
+    stem = unforked_stem(path)
+    m = _ROLLOUT.match(stem)
+    return {"kind": KIND_MAIN, "id": m.group(1) if m else stem,
+            "parent_session_id": None, "agent_id": None, "workflow_id": None}
 
 
 def kimi_identity_from_path(path: Path) -> dict:

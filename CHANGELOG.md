@@ -28,6 +28,12 @@ the wrong command for the moment it was printed.
 
 ### Fixed
 
+- A source file the archive had forked (rewritten at the source, so a `<name>.<mtime>.jsonl`
+  copy sits beside the original) was parsed from zero and appended on every pass, alternating
+  between the two copies. Codex rewrote 133 rollouts in place on 2026-09-15; each `scad view`
+  then added 6,320 duplicate turns and took ten seconds. Both copies now resolve to one row by
+  name; the older is skipped unopened and a newer fork replaces that session's turns once,
+  reported as "re-read from a rewritten source". The pass after is quiet.
 - `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the
   session is certainly open. A second `claude --resume` on an open session is a second process on
   one transcript: it appends its own entries, the chain forks, and every later resume follows the

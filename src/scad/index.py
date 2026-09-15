@@ -588,16 +588,24 @@ def _run_id_for(rel_parts: tuple) -> str | None:
     return rel_parts[1] if len(rel_parts) > 1 and rel_parts[0] == "runs" else None
 
 
-def _peek_session_id(conn, path: Path, *, kimi: bool = False) -> str | None:
+def _peek_session_id(conn, path: Path, *, label: str = "claude") -> str | None:
     """The row id a file maps to, without parsing it.
 
-    Identity is path-derived for Claude (see readers.identity_from_path) and for
-    kimi (readers.kimi_identity_from_path); codex rollouts key on session_meta,
-    so fall back to the archive path already stored.
+    Identity is path-derived for every family (readers.identity_from_path,
+    kimi_identity_from_path, codex_identity_from_path), and a fork stamp in
+    the filename is ignored, so the copies the archive keeps of one rewritten
+    source all resolve to one row. The stored archive path is consulted first
+    only because it is exact where a name is derived.
     """
-    from scad.readers import identity_from_path, kimi_identity_from_path
+    from scad.readers import (codex_identity_from_path, identity_from_path,
+                              kimi_identity_from_path)
 
-    ident = kimi_identity_from_path(path) if kimi else identity_from_path(path)
+    if label == "kimi":
+        ident = kimi_identity_from_path(path)
+    elif label == "codex":
+        ident = codex_identity_from_path(path)
+    else:
+        ident = identity_from_path(path)
     if ident["kind"] != "main":
         return ident["id"]
     row = conn.execute(
@@ -605,14 +613,37 @@ def _peek_session_id(conn, path: Path, *, kimi: bool = False) -> str | None:
     return row["id"] if row else ident["id"]
 
 
+def _fork_of(path: Path, held: str | None) -> int | None:
+    """How `path` relates to the file a row already holds, if they are copies
+    of one source: negative for older, positive for newer, None if unrelated.
+
+    Two files are copies of one source when they sit in the same directory
+    with the same stem once the fork stamp is removed. A skeleton row whose
+    archive path is `history.jsonl` is unrelated to the transcript that later
+    arrives for it, and must keep being upgraded by it.
+    """
+    from scad.readers import fork_order, unforked_stem
+
+    if not held:
+        return None
+    other = Path(held)
+    if other == path:
+        return 0
+    if other.parent != path.parent or unforked_stem(other) != unforked_stem(path):
+        return None
+    return fork_order(path) - fork_order(other)
+
+
 def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
             archive_first: bool = False) -> dict[str, int]:
     """Scan the archive into the index.
 
     Incremental by default: a file whose size already equals the session's
-    parsed_offset is skipped without being opened. Never deletes; `rebuild`
-    is the only destructive path and it refuses when any session's raw is gone,
-    because those turns cannot be re-derived from anything.
+    parsed_offset is skipped without being opened. Never deletes, with one
+    exception: a session whose source was rewritten (the archive holds a newer
+    fork of its file) has its turns replaced from the fork. `rebuild` is the
+    only whole-index destructive path and it refuses when any session's raw is
+    gone, because those turns cannot be re-derived from anything.
     """
     conn = conn or connect()
 
@@ -696,11 +727,23 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
 
         # Incremental: resolve the row this file maps to without parsing it, and
         # skip entirely when nothing has been appended since the last pass.
-        probe_id = _peek_session_id(conn, path, kimi=kimi)
+        probe_id = _peek_session_id(conn, path, label=rel[0])
         row = session_row(conn, probe_id) if probe_id else None
-        if row is not None and row["parsed_offset"] >= stat.st_size:
+
+        # A source that was rewritten rather than appended to is archived as a
+        # fork beside the original (archive._fork). Both copies name one
+        # session. The older copy is skipped without being opened; a newer one
+        # replaces the row's turns, because the text they came from no longer
+        # exists at the source. Without this, each copy in turn was parsed
+        # from zero and appended, and a pass over 133 forked rollouts added
+        # 6,320 duplicate turns every time it ran.
+        fork = _fork_of(path, row["archive_path"]) if row is not None else None
+        if fork is not None and fork < 0:
             continue
-        start = row["parsed_offset"] if row is not None else 0
+        replace = fork is not None and fork > 0
+        if not replace and row is not None and row["parsed_offset"] >= stat.st_size:
+            continue
+        start = 0 if replace else (row["parsed_offset"] if row is not None else 0)
 
         try:
             session, turns, end = reader(path, start)
@@ -743,7 +786,14 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
         )
         if not existed:
             stats["sessions"] += 1
-        stats["turns"] += append_turns(conn, session.id, turns)
+        if replace:
+            # The one delete outside --rebuild, and for the same reason
+            # rebuild exists: the derivation changed, for this session only.
+            conn.execute("DELETE FROM turns WHERE session_id = ?", (session.id,))
+            stats["replaced"] += 1
+            append_turns(conn, session.id, turns)
+        else:
+            stats["turns"] += append_turns(conn, session.id, turns)
         stats["files"] += 1
 
     # Second pass, once every row the scan will create exists.

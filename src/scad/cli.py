@@ -2019,7 +2019,7 @@ def reindex(rebuild, force, no_archive):
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
-    for key in ("files", "sessions", "turns", "notes", "named",
+    for key in ("files", "sessions", "turns", "replaced", "notes", "named",
                 "skipped_lines", "skipped_files"):
         if stats.get(key):
             click.echo(f"[scad]   {key}: {stats[key]}")
@@ -2909,8 +2909,10 @@ def view(days, output, no_open, refresh, no_refresh):
         # been pruned.
         try:
             stats = run_reindex(archive_first=True)
+            replaced = (f", {stats['replaced']} session(s) re-read from a rewritten source"
+                        if stats.get("replaced") else "")
             click.echo(f"[scad] refreshed: {stats.get('sessions', 0)} new session(s), "
-                       f"{stats.get('turns', 0)} new turn(s)")
+                       f"{stats.get('turns', 0)} new turn(s){replaced}")
         except Exception as exc:
             # A refresh is a convenience wrapped around the thing actually asked
             # for. Failing the render because the sweep hit a full disk would

@@ -1389,3 +1389,107 @@ class TestReadersAndWriters:
         conn = connect(tmp_path / "i.sqlite")
         names = {r[1] for r in conn.execute("PRAGMA index_list(turns)")}
         assert "idx_turns_session_ts" in names
+
+
+class TestARewrittenSourceForksTheArchive:
+    """Codex rewrote 133 rollouts in place on 2026-09-15 (a new first line:
+    `ordinal`, `session_id`). The archive did what it is for: kept the old
+    copy and wrote `<name>.<mtime>.jsonl` beside it. The index then had two
+    files for one session and understood neither as the other: the stranger
+    was parsed from 0, `archive_path` flipped to it, every turn appended
+    again, and the next pass did it the other way. +6,320 turns per `view`.
+
+    The rule now: both copies resolve to one row by name; the older copy is
+    skipped unopened; a newer fork replaces the row's turns, because the
+    source it mirrors was rewritten and the old turns describe nothing.
+    """
+
+    ORIG = "codex/2026/07/31/rollout-2026-07-31T12-22-08-C9.jsonl"
+    FORK = "codex/2026/07/31/rollout-2026-07-31T12-22-08-C9.1770042286.jsonl"
+
+    def _rewritten(self):
+        head = [dict(r, ordinal=i) for i, r in enumerate(CODEX_HEAD)]
+        head[0]["payload"] = dict(head[0]["payload"], session_id="C9")
+        return head + [dict(CODEX_TAIL[0], ordinal=len(head))]
+
+    def _n_turns(self, records, tmp_path):
+        from scad.readers import read_codex_rollout
+        p = tmp_path / "probe.jsonl"
+        p.write_text("".join(json.dumps(r) + "\n" for r in records))
+        return len(read_codex_rollout(p, 0)[1])
+
+    def _count(self, conn):
+        return conn.execute("SELECT count(*) FROM turns WHERE session_id = 'C9'").fetchone()[0]
+
+    def _env(self, tmp_path, monkeypatch):
+        arc = tmp_path / "arc"
+        monkeypatch.setenv("SCAD_ARCHIVE", str(arc))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        return arc
+
+    def test_a_sidecar_resolves_to_the_same_session_as_its_original(self, tmp_path):
+        from scad.readers import codex_identity_from_path, identity_from_path
+        assert codex_identity_from_path(Path(self.ORIG))["id"] == "C9"
+        assert codex_identity_from_path(Path(self.FORK))["id"] == "C9"
+        # the same courtesy for a claude transcript the archive forked
+        assert identity_from_path(Path("claude/projects/-repo/S1.1770042286.jsonl"))["id"] == "S1"
+        assert identity_from_path(Path("claude/projects/-repo/S1.jsonl"))["id"] == "S1"
+
+    def test_a_newer_fork_replaces_the_turns_and_later_passes_are_quiet(self, tmp_path, monkeypatch):
+        arc = self._env(tmp_path, monkeypatch)
+        arc_write(arc, self.ORIG, CODEX_HEAD)
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert self._count(conn) == self._n_turns(CODEX_HEAD, tmp_path)
+
+        fork = arc_write(arc, self.FORK, self._rewritten())
+        stats = reindex(conn)
+        expected = self._n_turns(self._rewritten(), tmp_path)
+        assert self._count(conn) == expected, "replaced, not appended"
+        assert stats["replaced"] == 1
+        assert session_row(conn, "C9")["archive_path"] == str(fork)
+
+        for _ in range(2):
+            stats = reindex(conn)
+            assert stats["turns"] == 0 and stats.get("replaced", 0) == 0
+            assert self._count(conn) == expected
+        assert session_row(conn, "C9")["archive_path"] == str(fork), "the original never wins back"
+
+    def test_a_rebuild_with_both_copies_present_is_not_doubled(self, tmp_path, monkeypatch):
+        """The repair path for an index that already holds the duplicates."""
+        arc = self._env(tmp_path, monkeypatch)
+        arc_write(arc, self.ORIG, CODEX_HEAD)
+        arc_write(arc, self.FORK, self._rewritten())
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert self._count(conn) == self._n_turns(self._rewritten(), tmp_path)
+
+    def test_a_fork_still_grows_incrementally(self, tmp_path, monkeypatch):
+        """Once the fork is the row's file, an appended turn is picked up the
+        ordinary way, not by another replace."""
+        arc = self._env(tmp_path, monkeypatch)
+        arc_write(arc, self.ORIG, CODEX_HEAD)
+        fork = arc_write(arc, self.FORK, self._rewritten())
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        before = self._count(conn)
+        with fork.open("a") as fh:
+            fh.write(json.dumps(dict(CODEX_TAIL[0], ordinal=99,
+                                     timestamp="2026-07-31T12:50:00.000Z")) + "\n")
+        stats = reindex(conn)
+        assert stats.get("replaced", 0) == 0
+        assert self._count(conn) == before + 1
+
+    def test_a_skeleton_row_is_still_upgraded_by_its_transcript(self, tmp_path, monkeypatch):
+        """A row whose archive_path is history.jsonl is not a fork of the
+        transcript that later arrives for it; the fork rule must not skip it."""
+        arc = self._env(tmp_path, monkeypatch)
+        arc_write(arc, "claude/history.jsonl", [
+            {"sessionId": "S1", "display": "hi", "timestamp": 1753696800000,
+             "project": "/repo"}])
+        conn = connect(tmp_path / "i.sqlite")
+        reindex(conn)
+        assert session_row(conn, "S1")["grade"] == "skeleton"
+        arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
+        reindex(conn)
+        assert session_row(conn, "S1")["grade"] == "full"
