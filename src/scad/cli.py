@@ -2183,11 +2183,13 @@ def _exec(argv: list[str]) -> None:
 @click.option("--cwd", default=None, type=click.Path(),
               help="Where the session works (default: here).")
 @click.option("--prompt", default=None, help="The session's first turn.")
+@click.option("--add-dir", "add_dirs", multiple=True, type=click.Path(),
+              help="A directory the session may also work in (claude only; repeatable).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the pane and the way back in, and leaves your
@@ -2225,7 +2227,7 @@ def session_launch(agent, cwd, prompt, attach, as_json):
         note(f"[scad] project: {project}")
 
     try:
-        record = launch_agent(agent, target_cwd, prompt=prompt,
+        record = launch_agent(agent, target_cwd, prompt=prompt, add_dirs=list(add_dirs),
                               say=lambda msg: note(f"[scad] {msg}"))
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2526,16 +2528,25 @@ def _resolve_note_path(session_id: str, agent: str):
 
 
 @session.command("notes")
-@click.argument("session_id")
+@click.argument("session_id", required=False)
+@click.option("--current", is_flag=True,
+              help="The session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard to read first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the records as written.")
-def session_notes_cmd(session_id, agent, as_json):
+def session_notes_cmd(session_id, current, agent, as_json):
     """Print a session's notes, oldest first.
 
     Reads the FILE, not the index. The file is truth, and a note must be
     readable before anything has been indexed and after a --rebuild has dropped
     every row.
     """
+    if bool(session_id) == bool(current):
+        raise click.ClickException("Pass exactly one of SESSION_ID or --current.")
+    if current:
+        try:
+            session_id = current_session_id(agent=agent)
+        except NoteTargetError as exc:
+            raise click.ClickException(str(exc)) from exc
     path = _resolve_note_path(session_id, agent)
     # Hydrated, not raw: `relation` is computed from the records around it and
     # `kind` has a default, so a consumer reading --json gets the same shape

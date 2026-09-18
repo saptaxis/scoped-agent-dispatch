@@ -550,6 +550,31 @@ class TestLaunching:
             ["--session-id", record["session_id"]]
         assert record["provenance"] == MINTED
 
+    def test_add_dirs_are_passed_to_claude_and_recorded(self, tmp_path):
+        """A unit of work spans several directories; the session should be
+        able to work in all of them. Claude takes --add-dir, repeatable."""
+        from scad.launch import launch
+
+        binary, stub = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        extra = tmp_path / "docs"
+        extra.mkdir()
+        record = launch("claude", tmp_path, binary=binary, add_dirs=[extra, "/a b"])
+
+        assert self._wait_for(stub / "argv.json")
+        assert json.loads((stub / "argv.json").read_text()) == \
+            ["--session-id", record["session_id"], "--add-dir", str(extra), "--add-dir", "/a b"]
+        assert record["add_dirs"] == [str(extra), "/a b"]
+
+    def test_add_dirs_are_refused_for_agents_without_the_flag(self, tmp_path):
+        """Dropping them silently would launch a session that cannot reach
+        the directories it was told about."""
+        from scad.launch import LaunchError, launch
+
+        binary, _ = self._stub(tmp_path, [{"print": "ready"}])
+        for agent in ("codex", "kimi"):
+            with pytest.raises(LaunchError, match="add-dir"):
+                launch(agent, tmp_path, binary=binary, add_dirs=["/x"])
+
     def test_a_prompt_is_typed_then_submitted_separately(self, tmp_path):
         """`send-keys` without `-l` drops the text silently, so the text and
         the Enter are always two calls."""

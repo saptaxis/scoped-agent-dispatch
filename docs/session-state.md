@@ -146,6 +146,7 @@ and degrade to empty if either is unavailable.
 ```bash
 scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
 scad session launch --agent claude --cwd . --json    # the launch record, for scripts
+scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
 scad session resume <id>                             # attach if open, resume if closed
 scad session resume <id> --print                     # just the command
 ```
@@ -205,6 +206,7 @@ are indexed as they are written.
 
 ```bash
 scad session notes <id>            # read them back, from the file
+scad session notes --current       # this session's
 scad notes ls --kind handoff       # what a session left for whoever comes next
 scad notes read <id> --last
 scad search "resolver" --notes     # topic, title, tags, entities, project

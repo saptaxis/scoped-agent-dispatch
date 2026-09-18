@@ -17,6 +17,9 @@ the wrong command for the moment it was printed.
   clipped to 240 characters) and `live` (pid, name, status from Claude's process registry, or
   null). Filed by orglens as the five query shapes it ran against `~/.scad/index.sqlite`.
 - `session ls --parent <id>`: a session's subagents and workflow agents.
+- `session launch --add-dir PATH`, repeatable. Claude-only, and refused rather than dropped for
+  codex and kimi. Recorded in the launch record as `add_dirs`.
+- `session notes --current`, resolved the same way `session note --current` writes.
 - `notes ls --about NAME`: notes naming NAME in `tags` or `entities`, as the topic, or as the
   project. By project alone, three of eight notes about orglens were found; this finds all.
 - An index on `turns(session_id, ts)`, for "the last thing said" per session.

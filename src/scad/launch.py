@@ -30,6 +30,7 @@ was born. So every read degrades to None rather than raising.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -650,7 +651,7 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
 
 
 def launch(agent: str, cwd, *, prompt: str | None = None,
-           binary: str | None = None, say=None) -> dict:
+           binary: str | None = None, say=None, add_dirs=()) -> dict:
     """Start an interactive agent in tmux and record which session it became.
 
     Detached: the pane is left running and the caller keeps its terminal.
@@ -666,6 +667,12 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
 
     if agent not in AGENTS:
         raise LaunchError(f"Unknown agent {agent!r}. One of: {', '.join(AGENTS)}.")
+    add_dirs = [str(Path(d).expanduser()) for d in add_dirs]
+    if add_dirs and agent != "claude":
+        # Refused, not dropped: a session told about directories it cannot
+        # reach would look launched and be wrong. codex and kimi have no
+        # equivalent flag; their sandboxes are set elsewhere.
+        raise LaunchError(f"--add-dir is Claude-only; {agent} has no equivalent flag.")
 
     cwd = Path(cwd).expanduser()
     if not cwd.is_dir():
@@ -690,6 +697,8 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
     before_rollouts = rollout_ids() if agent == "codex" else set()
 
     command = f"{binary} {_FLAGS[agent].format(id=session_id)}".strip()
+    for d in add_dirs:
+        command += f" --add-dir {shlex.quote(d)}"
     target = new_session(name, cwd, command)
     say(f"launched {agent} in {target}")
 
@@ -720,6 +729,7 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
         "agent": agent,
         "session_id": session_id,
         "cwd": str(cwd),
+        "add_dirs": add_dirs,
         "tmux": target,
         "started": _now_iso(),
         "resume": resume_command({"id": session_id, "agent": agent,

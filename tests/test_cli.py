@@ -3321,6 +3321,15 @@ class TestSessionLaunch:
         assert "codex resume CX1" not in result.output
         assert "pane: scad-cx-1430:0.0" in result.output
 
+    def test_add_dir_is_repeatable_and_reaches_the_launcher(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude",
+                                      "--cwd", str(tmp_path),
+                                      "--add-dir", "/docs", "--add-dir", "/other"])
+        assert result.exit_code == 0, result.output
+        assert calls[0]["add_dirs"] == ["/docs", "/other"]
+
     def test_json_emits_the_record_and_nothing_to_parse(
             self, runner, tmp_path, monkeypatch):
         """The id is a contract. A consumer must not regex the human lines for
@@ -3818,3 +3827,23 @@ class TestNotesAbout:
         conn.commit()
         result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
         assert "near miss" not in {r["title"] for r in json.loads(result.stdout)}
+
+
+class TestSessionNotesCurrent:
+    """`session notes --current` reads the notes of the session you are in,
+    resolved the same way `session note --current` writes them."""
+
+    def test_current_resolves_like_note_current(self, runner, tmp_path, monkeypatch):
+        from scad.notes import append_note
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setattr("scad.cli.current_session_id", lambda agent="claude": "S9")
+        append_note({"title": "mine", "text": "b"}, session_id="S9")
+        result = runner.invoke(main, ["session", "notes", "--current"])
+        assert result.exit_code == 0, result.output
+        assert "mine" in result.output
+
+    def test_exactly_one_of_id_or_current(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        result = runner.invoke(main, ["session", "notes"])
+        assert result.exit_code != 0
+        assert "--current" in result.output
