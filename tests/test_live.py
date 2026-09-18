@@ -234,6 +234,7 @@ class TestClaudeLiveSessions:
             session_id="sid-30036", pid=30036, cwd="/Users/vsr/code/scad",
             name="jul25-resolver-session-cli", status="waiting",
             waiting_for="permission prompt", started_at=1785307504101,
+            updated_at=1785307545649,
             kind="interactive", entrypoint="cli", version="2.1.220",
         )]
 
@@ -589,3 +590,28 @@ class TestPaneOccupants:
         from scad.live import pane_occupants
         with patch("scad.live.subprocess.run", side_effect=OSError("no ps")):
             assert pane_occupants(self._panes(), []) == {}
+
+
+class TestOneSessionTwoRegistryFiles:
+    """A reattach leaves the first process's <pid>.json in place, both pids
+    alive. `/rename` writes into the newer file. Reported 2026-09-18: five
+    session ids on one machine had two live files each, and every consumer
+    that keyed a dict on session id kept the older name."""
+
+    def test_updated_at_is_read(self, tmp_path):
+        from scad.live import claude_live_sessions
+        write_entry(tmp_path, 100, updatedAt=1785307545649)
+        with patch("scad.live._process_start_times", return_value={100: START}), \
+             patch("scad.live._is_alive", return_value=True):
+            [s] = claude_live_sessions(tmp_path)
+        assert s.updated_at == 1785307545649
+
+    def test_newest_by_session_keeps_the_renamed_entry(self):
+        from scad.live import ClaudeSession, newest_by_session
+        old = ClaudeSession("S", 100, name="interview-prep-98", updated_at=1789711422078)
+        new = ClaudeSession("S", 200, name="intrvw-stories-3-branch-sep18", updated_at=1789711863973)
+        other = ClaudeSession("T", 300, name="t", updated_at=5)
+        for order in ((old, new, other), (new, old, other)):
+            by = newest_by_session(order)
+            assert by["S"].name == "intrvw-stories-3-branch-sep18"
+            assert by["T"] is other

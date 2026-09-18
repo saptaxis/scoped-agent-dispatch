@@ -106,6 +106,7 @@ from scad.launch import (
 from scad.live import (
     attach_argv,
     claude_live_sessions,
+    newest_by_session,
     find_pane,
     running_run_ids,
     tmux_panes,
@@ -2100,7 +2101,7 @@ def _session_export(conn, rows) -> list[dict]:
     includes every codex and kimi session; the registry is Claude's.
     """
     out = []
-    live = {s.session_id: s for s in claude_live_sessions()}
+    live = newest_by_session(claude_live_sessions())
     for r in rows:
         row = dict(r)
         last = conn.execute(
@@ -2583,13 +2584,26 @@ def notes():
     pass
 
 
+def _about_matches(row: dict, names) -> list[str]:
+    """The subset of `names` this note row is about, by the same rule the
+    SQL used: in tags or entities, the topic, or the project."""
+    def arr(key):
+        try:
+            return set(json.loads(row.get(key) or "[]"))
+        except ValueError:
+            return set()
+    named = arr("tags") | arr("entities") | {row.get("topic"), row.get("project")}
+    return [n for n in names if n in named]
+
+
 @notes.command("ls")
 @click.option("--project", "project_name", default=None,
               help="Only notes filed under this project.")
 @click.option("--session", "session_id", default=None, help="Only this session's notes.")
-@click.option("--about", default=None,
+@click.option("--about", multiple=True,
               help="Notes about NAME wherever they were written: NAME in tags or "
-                   "entities, as the topic, or as the project.")
+                   "entities, as the topic, or as the project. Repeatable; JSON rows "
+                   "then carry `about`, the names each one matched.")
 @click.option("--kind", "kind", type=click.Choice(KINDS), default=None,
               help="Only notes of this kind (handoff is the catch-up query).")
 @click.option("--limit", default=20, help="How many, newest first.")
@@ -2616,22 +2630,30 @@ def notes_ls(project_name, session_id, about, kind, limit, as_json):
         # from another project's session, cross-tagged. Project alone found
         # three of eight such notes. `tags` and `entities` are JSON arrays,
         # so the quoted form matches a whole element and not a prefix.
-        where.append(f"(n.tags LIKE ? OR n.entities LIKE ? OR n.topic = ? "
-                     f"OR {NOTE_PROJECT_RESOLVED} = ?)")
-        quoted = f'%{json.dumps(about)}%'
-        params.extend([quoted, quoted, about, about])
+        clauses = []
+        for name in about:
+            clauses.append(f"(n.tags LIKE ? OR n.entities LIKE ? OR n.topic = ? "
+                           f"OR {NOTE_PROJECT_RESOLVED} = ?)")
+            quoted = f'%{json.dumps(name)}%'
+            params.extend([quoted, quoted, name, name])
+        where.append("(" + " OR ".join(clauses) + ")")
     if kind:
         where.append(f"{NOTE_KIND_SQL} = ?")
         params.append(kind)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = [dict(r) for r in conn.execute(
         f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, "
+        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
         f"       {NOTE_PROJECT_SQL}, s.name, s.agent "
         f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
         f"{clause} ORDER BY n.ts DESC LIMIT ?", (*params, limit))]
 
     if as_json:
+        if about:
+            # Which of the asked-for names each row matched, so one call over
+            # several names can still be joined per name by the consumer.
+            for r in rows:
+                r["about"] = _about_matches(r, about)
         click.echo(json.dumps(rows, ensure_ascii=False, default=str))
         return
     if not rows:

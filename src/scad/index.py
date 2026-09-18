@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   source_size       INTEGER,
   parsed_offset     INTEGER NOT NULL DEFAULT 0,
   notes_offset      INTEGER NOT NULL DEFAULT 0,
+  notes_mtime       INTEGER,
   raw_present       INTEGER NOT NULL DEFAULT 1,
   extractor_version INTEGER NOT NULL DEFAULT 1
 );
@@ -157,14 +158,18 @@ def index_path() -> Path:
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "sessions": {
         "name": "TEXT", "harness_state": "TEXT", "needs": "TEXT", "needs_detail": "TEXT",
+        # When the note file was last written, so an edit that leaves the size
+        # alone is still seen. NULL on an existing index reads as "never", and
+        # the next pass re-reads every note file once and stamps it.
+        "notes_mtime": "INTEGER",
     },
-    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass resumes from
-    # `notes_offset` — so on an index that already has rows, these stay NULL
-    # through any number of ordinary reindexes. Only re-reading the note files
-    # fills them: `scad reindex --rebuild`, or `DELETE FROM notes; UPDATE
-    # sessions SET notes_offset = 0;` followed by `scad reindex`. Both halves of
-    # that second recipe are needed — resetting the offset alone re-appends the
-    # same records under fresh idx values. Meanwhile queries read `kind` through
+    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass skips a
+    # file whose size and mtime it has seen — so on an index that already has
+    # rows, these stay NULL through any number of ordinary reindexes. Only
+    # re-reading the note files fills them: `scad reindex --rebuild`, or
+    # `UPDATE sessions SET notes_mtime = NULL;` followed by `scad reindex`,
+    # which re-reads every note file, finds the rows disagree with the lines,
+    # and replaces them. Meanwhile queries read `kind` through
     # COALESCE(kind,'info'), so an un-backfilled row answers as the default
     # rather than as nothing.
     "notes": {"kind": "TEXT", "project": "TEXT"},
@@ -557,13 +562,21 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
     stats = collections.Counter()
     session_id = path.stem
     row = session_row(conn, session_id)
-    size = path.stat().st_size
-    if row is not None and row["notes_offset"] >= size:
+    stat = path.stat()
+    size = stat.st_size
+    held = row["notes_offset"] if row is not None else 0
+    if row is not None and held >= size and int(stat.st_mtime) <= (row["notes_mtime"] or 0):
         return stats
 
-    start = row["notes_offset"] if row is not None else 0
+    # A note file is the one store a person edits by hand: the CLI warns
+    # about an unknown project and writes anyway, and the fix is to correct
+    # the line. Appending from the offset cannot see that. Notes are small,
+    # so a file that changed is read whole, and if the lines already indexed
+    # no longer say what the rows say, the rows are replaced from the file.
+    # The one case the offset rule still serves is the pure append, which
+    # stays an append so idx values are stable.
     try:
-        notes, end = read_notes(path, start)
+        notes, end = read_notes(path, 0)
     except Exception as exc:          # a note we cannot read must not stop the pass
         click.echo(f"[scad] skipped note {path.name}: {exc}")
         stats["skipped_files"] += 1
@@ -573,8 +586,19 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
         cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
         _ensure_note_session(conn, session_id, agent, cwd)
 
-    stats["notes"] += append_notes(conn, session_id, notes, str(path))
-    conn.execute("UPDATE sessions SET notes_offset = ? WHERE id = ?", (end, session_id))
+    stored = conn.execute(
+        "SELECT ts, topic, title, project, parent FROM notes WHERE session_id = ? "
+        "ORDER BY idx", (session_id,)).fetchall()
+    prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in notes[:len(stored)]]
+    if prefix == [tuple(r) for r in stored]:
+        new = notes[len(stored):]
+    else:
+        conn.execute("DELETE FROM notes WHERE session_id = ?", (session_id,))
+        stats["replaced"] += 1
+        new = notes
+    stats["notes"] += append_notes(conn, session_id, new, str(path))
+    conn.execute("UPDATE sessions SET notes_offset = ?, notes_mtime = ? WHERE id = ?",
+                 (end, int(stat.st_mtime), session_id))
     conn.commit()
     return stats
 

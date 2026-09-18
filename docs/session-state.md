@@ -82,12 +82,18 @@ learns it on reindex.
 ```bash
 scad session ls --json --kind main --limit 1000     # every main session, one call
 scad session ls --parent <id>                       # a session's subagents
-scad notes ls --about orglens --json                # notes about a thing, wherever written
+scad notes ls --about orglens --about scad --json   # notes about things, wherever written
 ```
 
 `--about` matches the name in `tags` or `entities`, as the `topic`, or as the
-project. A note about X is often written in Y's session and cross-tagged; by
-project alone, three of eight such notes were found.
+project, and can be given several times; each JSON row then carries `about`,
+the names it matched. A note about X is often written in Y's session and
+cross-tagged; by project alone, three of eight such notes were found. Rows also
+carry `tags` and `entities` themselves, so a consumer can do the match from one
+plain export instead.
+
+`live` is the newest registry entry for the session, by `updatedAt`; a reattach
+can leave two entries for one id, and a `/rename` lands in the newer.
 
 The index is in WAL mode, so a reader is not blocked while a reindex writes.
 

@@ -1077,14 +1077,17 @@ class TestBackfillingTheNewColumns:
         row = conn.execute("SELECT kind, project FROM notes").fetchone()
         assert (row["kind"], row["project"]) == ("handoff", "orglens")
 
-    def test_resetting_the_offset_without_clearing_would_duplicate(self, noted):
-        """Why the recipe is DELETE *and* reset, not reset alone: idx continues
-        from the maximum, so the same records come back as new rows."""
+    def test_resetting_the_offset_alone_now_repairs_rather_than_duplicates(self, noted):
+        """This used to double the rows: idx continued from the maximum and
+        the same records came back as new. Since a changed file is compared
+        line by line against its rows (the edited-note fix), a reset offset
+        re-reads, sees the rows disagree with the file, and replaces them."""
         conn, _ = self._stale(noted)
         conn.execute("UPDATE sessions SET notes_offset = 0")
         conn.commit()
         index_notes(conn)
-        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 2
+        rows = conn.execute("SELECT kind, project FROM notes").fetchall()
+        assert [(r["kind"], r["project"]) for r in rows] == [("handoff", "orglens")]
 
 
 class TestRelationIsDerived:
@@ -1493,3 +1496,57 @@ class TestARewrittenSourceForksTheArchive:
         arc_write(arc, "claude/projects/-repo/S1.jsonl", MAIN)
         reindex(conn)
         assert session_row(conn, "S1")["grade"] == "full"
+
+
+class TestAnEditedNoteLineReachesTheIndex:
+    """The unknown-project warning on `session note` invites a hand edit of
+    the file; the pass then never re-read it, so a corrected `project` stayed
+    wrong in the index and `notes ls --project` missed the note (2026-09-18,
+    the scad-session-inject request). Notes are small: a file whose indexed
+    prefix no longer matches its rows is re-read whole and its rows replaced.
+    """
+
+    def _lines(self, path):
+        return [json.loads(l) for l in path.read_text().splitlines()]
+
+    def _rewrite(self, path, idx, **changes):
+        rows = self._lines(path)
+        rows[idx].update(changes)
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows))
+
+    def test_a_corrected_project_is_picked_up_by_the_next_pass(self, noted):
+        from scad.index import index_note_file, reindex
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(dict(NOTE, project="scad"), session_id="S1")
+        index_note_file(conn, p, "claude")
+        assert conn.execute("SELECT project FROM notes").fetchone()[0] == "scad"
+
+        self._rewrite(p, 0, project="scoped-agent-dispatch")
+        stats = index_note_file(conn, p, "claude")
+        rows = conn.execute("SELECT idx, project FROM notes ORDER BY idx").fetchall()
+        assert [tuple(r) for r in rows] == [(0, "scoped-agent-dispatch")]
+        assert stats["replaced"] == 1
+
+    def test_an_unchanged_file_is_not_re_read(self, noted):
+        from scad.index import index_note_file
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(NOTE, session_id="S1")
+        index_note_file(conn, p, "claude")
+        with patch("scad.index.read_notes") as rn:
+            stats = index_note_file(conn, p, "claude")
+        rn.assert_not_called()
+        assert stats["notes"] == 0
+
+    def test_an_append_after_an_edit_keeps_one_row_per_line(self, noted):
+        from scad.index import index_note_file
+        conn = connect(noted / "i.sqlite")
+        store(conn, rec(id="S1"))
+        p = append_note(NOTE, session_id="S1")
+        index_note_file(conn, p, "claude")
+        self._rewrite(p, 0, title="edited")
+        append_note(dict(NOTE, title="second"), session_id="S1")
+        index_note_file(conn, p, "claude")
+        titles = [r[0] for r in conn.execute("SELECT title FROM notes ORDER BY idx")]
+        assert titles == ["edited", "second"]

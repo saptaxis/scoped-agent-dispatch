@@ -232,6 +232,7 @@ class ClaudeSession:
     status: str = ""       # idle | busy | waiting
     waiting_for: str = ""
     started_at: int = 0    # epoch ms, when the *session* began
+    updated_at: int = 0    # epoch ms, the file's last write; a /rename lands here
     kind: str = ""         # interactive | ...
     entrypoint: str = ""   # cli | ...
     version: str = ""
@@ -334,10 +335,14 @@ def _read_entry(path: Path) -> tuple[ClaudeSession, float] | None:
     if proc_start is None:
         return None
 
-    try:
-        started_at = int(record.get("startedAt") or 0)
-    except (TypeError, ValueError):
-        started_at = 0
+    def epoch_ms(key: str) -> int:
+        try:
+            return int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    started_at = epoch_ms("startedAt")
+    updated_at = epoch_ms("updatedAt")
 
     def text(key: str) -> str:
         value = record.get(key)
@@ -351,6 +356,7 @@ def _read_entry(path: Path) -> tuple[ClaudeSession, float] | None:
         status=text("status"),
         waiting_for=text("waitingFor"),
         started_at=started_at,
+        updated_at=updated_at,
         kind=text("kind"),
         entrypoint=text("entrypoint"),
         version=text("version"),
@@ -485,6 +491,22 @@ def claude_live_sessions(registry: Path | str | None = None) -> list[ClaudeSessi
         if session.pid in starts and abs(starts[session.pid] - claimed) <= _START_SKEW
     ]
     return sorted(sessions, key=lambda s: (-s.started_at, s.session_id))
+
+
+def newest_by_session(sessions: list[ClaudeSession]) -> dict[str, ClaudeSession]:
+    """One entry per session id: the one written most recently.
+
+    A reattach leaves the first process's registry file in place with both
+    pids alive, so one id can have two live entries. `/rename` and status
+    changes land in the newer file. Keying a dict on session id from the
+    registry's own order kept the older one, and a rename never showed.
+    """
+    best: dict[str, ClaudeSession] = {}
+    for s in sessions:
+        held = best.get(s.session_id)
+        if held is None or s.updated_at > held.updated_at:
+            best[s.session_id] = s
+    return best
 
 
 def agent_cwds(panes: list[TmuxPane] | None = None) -> set[str]:

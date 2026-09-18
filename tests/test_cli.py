@@ -3721,6 +3721,20 @@ class TestSessionLsExport:
                                       "waiting_for": ""}
         assert rows["M2"]["live"] is None
 
+    def test_live_is_the_newest_registry_entry_when_a_session_has_two(self, runner, tmp_path, monkeypatch):
+        """A reattach leaves two <pid>.json for one id; /rename lands in the
+        newer. The older one was being reported (orglens, 2026-09-18)."""
+        from scad.live import ClaudeSession
+        self._seed(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 200, cwd="/repo", name="renamed", updated_at=20),
+            ClaudeSession("M1", 100, cwd="/repo", name="original", updated_at=10)])
+        assert self._rows(runner)["M1"]["live"]["name"] == "renamed"
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 100, cwd="/repo", name="original", updated_at=10),
+            ClaudeSession("M1", 200, cwd="/repo", name="renamed", updated_at=20)])
+        assert self._rows(runner)["M1"]["live"]["name"] == "renamed"
+
     def test_parent_filter_lists_a_sessions_subagents(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
         assert list(self._rows(runner, "--parent", "M1")) == ["A1"]
@@ -3772,6 +3786,26 @@ class TestNotesAbout:
         titles = {r["title"] for r in json.loads(result.stdout)}
         assert titles == {"by tag", "by entity", "by topic", "by authored project",
                           "by session project"}
+
+    def test_json_rows_carry_entities(self, runner, tmp_path, monkeypatch):
+        """Without them a consumer cannot do the about-match from one export
+        and calls --about once per unit: 23 subprocesses (orglens, 2026-09-15)."""
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--json", "--limit", "100"])
+        by = {r["title"]: r for r in json.loads(result.stdout)}
+        assert json.loads(by["by entity"]["entities"]) == ["orglens"]
+        assert json.loads(by["by tag"]["tags"]) == ["orglens", "x"]
+
+    def test_about_takes_several_names_and_says_which_matched(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--about", "scad",
+                                      "--json", "--limit", "100"])
+        assert result.exit_code == 0, result.output
+        by = {r["title"]: r["about"] for r in json.loads(result.stdout)}
+        # "by tag" is tagged orglens and written in a scad session: both.
+        assert by["by tag"] == ["orglens", "scad"]
+        assert by["unrelated"] == ["scad"]
+        assert by["by session project"] == ["orglens"]
 
     def test_about_is_a_whole_word_in_the_json_arrays(self, runner, tmp_path, monkeypatch):
         """`orglens` must not match a tag `orglens-extras`."""

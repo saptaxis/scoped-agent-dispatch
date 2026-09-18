@@ -20,6 +20,9 @@ the wrong command for the moment it was printed.
 - `notes ls --about NAME`: notes naming NAME in `tags` or `entities`, as the topic, or as the
   project. By project alone, three of eight notes about orglens were found; this finds all.
 - An index on `turns(session_id, ts)`, for "the last thing said" per session.
+- `notes ls --json` rows carry `entities`, and `--about` is repeatable; with several names each
+  JSON row carries `about`, the names it matched, so one call serves a consumer that joins per
+  name. Asked by orglens after adopting the export.
 
 ### Changed
 
@@ -34,6 +37,13 @@ the wrong command for the moment it was printed.
   then added 6,320 duplicate turns and took ten seconds. Both copies now resolve to one row by
   name; the older is skipped unopened and a newer fork replaces that session's turns once,
   reported as "re-read from a rewritten source". The pass after is quiet.
+- `session ls --json` `live` is the newest registry entry for a session, by `updatedAt`. A
+  reattach leaves the first process's `<pid>.json` in place with both pids alive, and `/rename`
+  writes into the newer file; the older name was being reported.
+- A note line edited after it was indexed now reaches the index. The unknown-project warning on
+  `session note` invites exactly that edit, and the pass never re-read an existing line, so a
+  corrected note stayed unfindable by project until a rebuild. A changed note file is read whole
+  and its rows replaced when they no longer match its lines; a pure append is still an append.
 - `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the
   session is certainly open. A second `claude --resume` on an open session is a second process on
   one transcript: it appends its own entries, the chain forks, and every later resume follows the
