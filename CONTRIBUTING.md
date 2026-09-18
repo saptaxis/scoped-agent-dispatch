@@ -32,7 +32,6 @@ branch and a PR, and a published tag never moves.
 2. In `CHANGELOG.md`, rename `[Unreleased]` to `[x.y.z] — YYYY-MM-DD` and open a new empty
    `[Unreleased]` above it.
 3. Commit as `release: x.y.z`, open the PR, merge it.
-4. On the merged `main`: `git tag -a vx.y.z -m "x.y.z" && git push origin vx.y.z`.
-
-A tag is placed where the changelog says the features are, and stays there.
+4. On the merged `main`: `git tag -a vx.y.z -m "x.y.z" && git push origin vx.y.z`. The tag
+   goes where the changelog says the features are.
 

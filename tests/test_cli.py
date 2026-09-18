@@ -2031,8 +2031,9 @@ class TestRenameLeftNoStaleDocs:
     it teaches agents the commands, so a stale copy makes every scad-skill agent
     call dead verbs."""
 
+    # `send` is absent: `session send` is a real verb since 0.5.0.
     VERBS = ("start", "stop", "clean", "attach", "info",
-             "inject", "jobs", "logs", "send", "refresh")
+             "inject", "jobs", "logs", "refresh")
 
     def _sources(self):
         root = Path(__file__).resolve().parent.parent

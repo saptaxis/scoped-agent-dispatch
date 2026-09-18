@@ -70,7 +70,6 @@ scad session launch --agent kimi --cwd ~/Desktop/scad-launch-demo \
 ## 3. codex — the id comes from the first turn
 
 Do this one **in a directory codex has never seen**, so the trust gate is live.
-That is the whole point of the case.
 
 ```bash
 scad session launch --agent codex --cwd ~/Desktop/scad-launch-demo

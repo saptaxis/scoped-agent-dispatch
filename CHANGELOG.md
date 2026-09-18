@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-18
+
 **The release where scad's index became an interface rather than a file.** 0.4.0 added the read
 tier; the first consumer of it, orglens, then reached past the CLI and queried the sqlite file
 directly, which made the schema a contract nobody had written down. This release writes it down:
@@ -48,7 +50,7 @@ the wrong command for the moment it was printed.
   between the two copies. Codex rewrote 133 rollouts in place on 2026-09-15; each `scad view`
   then added 6,320 duplicate turns and took ten seconds. Both copies now resolve to one row by
   name; the older is skipped unopened and a newer fork replaces that session's turns once,
-  reported as "re-read from a rewritten source". The pass after is quiet.
+  reported as "re-read from a rewritten source". Later passes re-read nothing.
 - `session ls --json` `live` is the newest registry entry for a session, by `updatedAt`. A
   reattach leaves the first process's `<pid>.json` in place with both pids alive, and `/rename`
   writes into the newer file; the older name was being reported.

@@ -103,7 +103,9 @@ scad harvest|finish <run-id>                        # fetch, then review or tear
 # Sessions
 scad session launch --agent claude|codex|kimi --cwd <dir>
 scad session resume <id>                            # attach if open, resume if closed
+scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session ls|show|read <id>
+scad session ls --json                              # the export other programs read
 scad session note --current                         # append a /remember capture
 
 # Corpus
@@ -111,7 +113,7 @@ scad archive                                        # copy traces in, append-onl
 scad reindex                                        # archive, then index
 scad search <query> [--notes]
 scad view                                           # render the index and open it
-scad notes ls [--kind handoff]
+scad notes ls [--kind handoff] [--about <name>]
 scad project ls|show <name>
 scad where                                          # how this directory resolves
 ```
@@ -142,7 +144,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 
 ```bash
 pip install -e ".[dev]"
-pytest                 # 1420 tests
+pytest                 # 1464 tests
 ```
 
 The interactive launch routes are verified by hand, since every run costs a model

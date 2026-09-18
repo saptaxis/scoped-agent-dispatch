@@ -69,9 +69,8 @@ unlabelled.
 
 ### Reading the index from another program
 
-`scad session ls --json` is the contract. Open `~/.scad/index.sqlite` directly
-and the schema becomes something two repositories hold silently. The export
-carries, per row: `id`, `kind`, `parent_session_id`, `agent`, `cwd`, `project`,
+`scad session ls --json` is the contract. Reading `~/.scad/index.sqlite` directly
+ties a consumer to a schema nothing checks. The export carries, per row: `id`, `kind`, `parent_session_id`, `agent`, `cwd`, `project`,
 `name`, `title`, `started`, `ended`, `n_turns`, `outcome`, `needs`, `grade`,
 `harness_state`; `last_turn` as `{ts, role, text}` with the text clipped to 240
 characters and empty turns skipped; and `live` as `{pid, name, status,
@@ -125,10 +124,9 @@ attach` for a container, or `cd <cwd> && claude --resume <id>` for a session tha
 has closed. The page is read-only; reply in the session itself.
 
 Live panes and containers are discovered at render time and are current. The
-index is refreshed first by default, an incremental pass of about a second,
-because nothing else refreshes it and an unrefreshed page was current about
-panes and stale about everything else. `--no-refresh` keeps the pure reader. A
-refresh that fails warns and renders the existing index.
+index is refreshed first by default, an incremental pass of about a second;
+`--no-refresh` keeps the pure reader. A refresh that fails warns and renders the
+existing index.
 
 The archive keeps every version of a source file: one that was rewritten rather
 than appended to is stored as a fork beside the original. A refresh reads the
@@ -136,10 +134,12 @@ newest fork and replaces that session's turns from it, once, and reports it as
 "re-read from a rewritten source". Codex did this to 133 rollouts at once in
 September 2026 when it changed its on-disk format.
 
-Live panes are matched by working directory, which is approximate, since several
-panes can share one. Only panes running an agent count, and where more than one
-matches, every candidate is listed. tmux and docker are queried at render time
-and degrade to empty if either is unavailable.
+A claude pane is matched to its session through the process tree, from the
+pane's shell to the pid Claude's registry names, and a scad-launched pane through
+its launch record. A pane neither can name gets the newest session in its
+working directory, labelled as the guess it is. Only panes running an agent
+count. tmux and docker are queried at render time and degrade to empty if either
+is unavailable.
 
 ## Interactive launch
 
@@ -167,15 +167,14 @@ Claude session stamped `entrypoint: cli` rather than `sdk-cli`, which is what
 keeps it in Claude's own `/resume` picker. A non-pty launch produces a session the
 picker hides, so a missing tmux refuses rather than degrading.
 
-A later turn goes in with `session send`. The text is delivered as one bracketed
-paste and then submitted, the way the first turn is; `tmux send-keys` of a long
-string is not that, and was measured to lose the head of a 1,400-character turn.
-`send` refuses a session that has closed, naming the resume command, and a pane
-sitting at a dialog.
+A later turn goes in with `session send`, delivered as one bracketed paste and
+then submitted, the same transport as the first turn. `tmux send-keys` was
+measured to lose the head of a 1,400-character turn. `send` refuses a session
+that has closed, naming the resume command, and a pane sitting at a dialog.
 
 `session resume` attaches when the session is still open and only runs the agent's
-own resume when it has closed. That distinction is not cosmetic. A second `claude
---resume <id>` against an open session is a second process on one transcript: it
+own resume when it has closed. A second `claude --resume <id>` against an open
+session is a second process on one transcript: it
 appends its own entries, the chain forks, and until the original process exits every
 later resume follows the fork and hides the original's turns. Go through `session
 resume`, or attach to the pane, while a session is open.
