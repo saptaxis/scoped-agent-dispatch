@@ -100,12 +100,14 @@ from scad.launch import (
     AGENTS,
     LaunchError,
     launch as launch_agent,
+    send_turn,
     read_record,
     record_path,
 )
 from scad.live import (
     attach_argv,
     claude_live_sessions,
+    newest_by_session,
     find_pane,
     running_run_ids,
     tmux_panes,
@@ -2019,7 +2021,7 @@ def reindex(rebuild, force, no_archive):
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
-    for key in ("files", "sessions", "turns", "notes", "named",
+    for key in ("files", "sessions", "turns", "replaced", "notes", "named",
                 "skipped_lines", "skipped_files"):
         if stats.get(key):
             click.echo(f"[scad]   {key}: {stats[key]}")
@@ -2038,14 +2040,20 @@ def reindex(rebuild, force, no_archive):
               help="Terminal state — e.g. --outcome awaiting-question for sessions asking you something.")
 @click.option("--since", default=None, help="Only sessions started on/after YYYY-MM-DD.")
 @click.option("--until", default=None, help="Only sessions started before YYYY-MM-DD.")
+@click.option("--parent", "parent_id", default=None,
+              help="Only the subagents and workflow agents of this session.")
 @click.option("--limit", default=40, help="Rows to show.")
-@click.option("--json", "as_json", is_flag=True, help="Emit rows as JSON.")
-def session_ls(project, agent, kind, machine, grade, outcome, since, until, limit, as_json):
+@click.option("--json", "as_json", is_flag=True,
+              help="Emit rows as JSON. The export a consumer reads instead of the index "
+                   "file: adds cwd, ended, needs, parent_session_id, last_turn and live.")
+def session_ls(project, agent, kind, machine, grade, outcome, since, until, parent_id,
+               limit, as_json):
     """List indexed sessions, newest first."""
     conn = index_connect()
     where, params = [], []
     for column, value in (("project", project), ("agent", agent), ("kind", kind),
-                          ("machine", machine), ("grade", grade), ("outcome", outcome)):
+                          ("machine", machine), ("grade", grade), ("outcome", outcome),
+                          ("parent_session_id", parent_id)):
         if value:
             where.append(f"{column} = ?")
             params.append(value)
@@ -2056,12 +2064,13 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"SELECT id, name, harness_state, kind, agent, project, title, n_turns, "
-        f"grade, outcome, started FROM sessions {clause} ORDER BY started DESC LIMIT ?",
+        f"grade, outcome, started, ended, cwd, needs, parent_session_id "
+        f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
         (*params, limit),
     ).fetchall()
 
     if as_json:
-        click.echo(json.dumps([dict(r) for r in rows], default=str))
+        click.echo(json.dumps(_session_export(conn, rows), default=str))
         return
     if not rows:
         click.echo("[scad] No sessions. Run: scad archive && scad reindex")
@@ -2078,6 +2087,35 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, limi
         name = (r["name"] or "")[:26]     # the longest real one is 26 characters
         click.echo(f"{r['id'][:12]:<14} {name:<27} {when}  {r['agent']:<7} "
                    f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
+
+
+def _session_export(conn, rows) -> list[dict]:
+    """The `session ls --json` rows, with what a consumer otherwise opens the
+    index file for: the last thing said in each session and whether it is
+    open right now.
+
+    Filed by orglens (2026-09-15) as the query shapes it ran against
+    `index.sqlite` directly, which made the schema a contract two repositories
+    held silently. `last_turn` is the newest turn with text, not the newest
+    row: a trailing empty tool_result is not the last thing said. `live` comes
+    from Claude's process registry and is None for anything not in it, which
+    includes every codex and kimi session; the registry is Claude's.
+    """
+    out = []
+    live = newest_by_session(claude_live_sessions())
+    for r in rows:
+        row = dict(r)
+        last = conn.execute(
+            "SELECT ts, role, substr(text, 1, 240) AS text FROM turns "
+            "WHERE session_id = ? AND text != '' ORDER BY ts DESC LIMIT 1",
+            (row["id"],),
+        ).fetchone()
+        row["last_turn"] = dict(last) if last else None
+        s = live.get(row["id"])
+        row["live"] = ({"pid": s.pid, "name": s.name, "status": s.status,
+                        "waiting_for": s.waiting_for} if s else None)
+        out.append(row)
+    return out
 
 
 @session.command("show")
@@ -2146,14 +2184,16 @@ def _exec(argv: list[str]) -> None:
 @click.option("--cwd", default=None, type=click.Path(),
               help="Where the session works (default: here).")
 @click.option("--prompt", default=None, help="The session's first turn.")
+@click.option("--add-dir", "add_dirs", multiple=True, type=click.Path(),
+              help="A directory the session may also work in (claude only; repeatable).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
-    Detached: it prints the resume command and the pane, and leaves your
+    Detached: it prints the pane and the way back in, and leaves your
     terminal alone. `--attach` takes you in at the end.
 
     tmux is required, and not as a convenience — it supplies the pty that keeps
@@ -2188,7 +2228,7 @@ def session_launch(agent, cwd, prompt, attach, as_json):
         note(f"[scad] project: {project}")
 
     try:
-        record = launch_agent(agent, target_cwd, prompt=prompt,
+        record = launch_agent(agent, target_cwd, prompt=prompt, add_dirs=list(add_dirs),
                               say=lambda msg: note(f"[scad] {msg}"))
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2240,7 +2280,12 @@ def session_launch(agent, cwd, prompt, attach, as_json):
     if record.get("session_id"):
         click.echo(f"[scad] session: {record['session_id']}  "
                    f"({record.get('provenance')})")
-        click.echo(f"[scad] resume: {record['resume']}")
+        # Not the raw resume command. The session is certainly open at this
+        # moment, and a second `claude --resume` on an open id writes a fork
+        # into its transcript that later resumes follow until the original
+        # exits. `session resume` attaches while the pane is open and resumes
+        # once it has closed; the record keeps the raw command for then.
+        click.echo(f"[scad] back in: scad session resume {record['session_id']}")
         click.echo(f"[scad] record: {record_path(record['session_id'])}")
         if attach:
             _exec(attach_argv(pane))
@@ -2258,6 +2303,22 @@ def session_launch(agent, cwd, prompt, attach, as_json):
         _exec(attach_argv(pane))
         return
     raise SystemExit(1)
+
+
+def _open_in(session_id: str, record: dict) -> str | None:
+    """Where `session_id` is open right now, or None if it is not known to be.
+
+    The two proofs `session resume` itself acts on, in the same order: the
+    launch record's pane if it still holds an agent, then Claude's own
+    process registry. Neither is inferred from cwd or time.
+    """
+    pane_target = record.get("tmux")
+    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
+        return f"pane {pane_target}"
+    live = next((s for s in claude_live_sessions() if s.session_id == session_id), None)
+    if live is not None:
+        return f"pid {live.pid}"
+    return None
 
 
 @session.command("resume")
@@ -2302,7 +2363,17 @@ def session_resume(session_id, print_only):
     command = resume_command(target)
 
     if print_only:
+        # The payload is the viewer's clipboard: a resume command, never a
+        # tmux target, because the pane is gone tomorrow and the command is
+        # not. But a person running this at a terminal while the session is
+        # open gets told, on stderr, so the payload stays clean: running it
+        # now forks the transcript.
         click.echo(command)
+        open_in = _open_in(session_id, record)
+        if open_in:
+            click.echo(f"[scad] {session_id} is open right now ({open_in}); "
+                       f"this command is for after it closes. While it is open: "
+                       f"scad session resume {session_id}", err=True)
         return
 
     # The launch record is the only thing that can name the pane a specific
@@ -2457,17 +2528,53 @@ def _resolve_note_path(session_id: str, agent: str):
     return path                       # unchanged, so the error still names the shard asked for
 
 
-@session.command("notes")
+@session.command("send")
 @click.argument("session_id")
+@click.argument("text", required=False)
+@click.option("--file", "path", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Read the turn from this file instead of the argument.")
+@click.option("--json", "as_json", is_flag=True, help="Emit {session_id, tmux, bytes}.")
+def session_send_turn(session_id, text, path, as_json):
+    """Send a later turn to an open session scad launched.
+
+    The text goes into the session's pane as one bracketed paste and is then
+    submitted, the way the first turn is. Raw `tmux send-keys` is not that:
+    a long turn sent that way arrives with its head missing.
+    """
+    if bool(text) == bool(path):
+        raise click.ClickException("Pass exactly one of TEXT or --file PATH.")
+    if path:
+        text = Path(path).read_text()
+    try:
+        result = send_turn(session_id, text)
+    except LaunchError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(result))
+        return
+    click.echo(f"[scad] sent {result['bytes']} bytes to {result['tmux']} ({session_id})")
+
+
+@session.command("notes")
+@click.argument("session_id", required=False)
+@click.option("--current", is_flag=True,
+              help="The session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard to read first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the records as written.")
-def session_notes_cmd(session_id, agent, as_json):
+def session_notes_cmd(session_id, current, agent, as_json):
     """Print a session's notes, oldest first.
 
     Reads the FILE, not the index. The file is truth, and a note must be
     readable before anything has been indexed and after a --rebuild has dropped
     every row.
     """
+    if bool(session_id) == bool(current):
+        raise click.ClickException("Pass exactly one of SESSION_ID or --current.")
+    if current:
+        try:
+            session_id = current_session_id(agent=agent)
+        except NoteTargetError as exc:
+            raise click.ClickException(str(exc)) from exc
     path = _resolve_note_path(session_id, agent)
     # Hydrated, not raw: `relation` is computed from the records around it and
     # `kind` has a default, so a consumer reading --json gets the same shape
@@ -2516,15 +2623,31 @@ def notes():
     pass
 
 
+def _about_matches(row: dict, names) -> list[str]:
+    """The subset of `names` this note row is about, by the same rule the
+    SQL used: in tags or entities, the topic, or the project."""
+    def arr(key):
+        try:
+            return set(json.loads(row.get(key) or "[]"))
+        except ValueError:
+            return set()
+    named = arr("tags") | arr("entities") | {row.get("topic"), row.get("project")}
+    return [n for n in names if n in named]
+
+
 @notes.command("ls")
 @click.option("--project", "project_name", default=None,
               help="Only notes filed under this project.")
 @click.option("--session", "session_id", default=None, help="Only this session's notes.")
+@click.option("--about", multiple=True,
+              help="Notes about NAME wherever they were written: NAME in tags or "
+                   "entities, as the topic, or as the project. Repeatable; JSON rows "
+                   "then carry `about`, the names each one matched.")
 @click.option("--kind", "kind", type=click.Choice(KINDS), default=None,
               help="Only notes of this kind (handoff is the catch-up query).")
 @click.option("--limit", default=20, help="How many, newest first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
-def notes_ls(project_name, session_id, kind, limit, as_json):
+def notes_ls(project_name, session_id, about, kind, limit, as_json):
     """List notes, newest first.
 
     Metadata only — the body is not in the index at all, so this can say what
@@ -2541,18 +2664,35 @@ def notes_ls(project_name, session_id, kind, limit, as_json):
     if session_id:
         where.append("n.session_id = ?")
         params.append(session_id)
+    if about:
+        # A note about X is often written in Y: a field report on one project
+        # from another project's session, cross-tagged. Project alone found
+        # three of eight such notes. `tags` and `entities` are JSON arrays,
+        # so the quoted form matches a whole element and not a prefix.
+        clauses = []
+        for name in about:
+            clauses.append(f"(n.tags LIKE ? OR n.entities LIKE ? OR n.topic = ? "
+                           f"OR {NOTE_PROJECT_RESOLVED} = ?)")
+            quoted = f'%{json.dumps(name)}%'
+            params.extend([quoted, quoted, name, name])
+        where.append("(" + " OR ".join(clauses) + ")")
     if kind:
         where.append(f"{NOTE_KIND_SQL} = ?")
         params.append(kind)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = [dict(r) for r in conn.execute(
         f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, "
+        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
         f"       {NOTE_PROJECT_SQL}, s.name, s.agent "
         f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
         f"{clause} ORDER BY n.ts DESC LIMIT ?", (*params, limit))]
 
     if as_json:
+        if about:
+            # Which of the asked-for names each row matched, so one call over
+            # several names can still be joined per name by the consumer.
+            for r in rows:
+                r["about"] = _about_matches(r, about)
         click.echo(json.dumps(rows, ensure_ascii=False, default=str))
         return
     if not rows:
@@ -2783,8 +2923,10 @@ def _hidden_alias(group, command, name=None):
     return alias
 
 
+# `send` is not aliased: `session send` is the host-session turn now, and
+# `run send` keeps the container meaning.
 for _verb in ("start", "stop", "clean", "attach", "info",
-              "inject", "jobs", "logs", "send", "refresh"):
+              "inject", "jobs", "logs", "refresh"):
     _hidden_alias(session, run.commands[_verb])
 
 _hidden_alias(main, run.commands["ls"], "status")
@@ -2830,8 +2972,10 @@ def view(days, output, no_open, refresh, no_refresh):
         # been pruned.
         try:
             stats = run_reindex(archive_first=True)
+            replaced = (f", {stats['replaced']} session(s) re-read from a rewritten source"
+                        if stats.get("replaced") else "")
             click.echo(f"[scad] refreshed: {stats.get('sessions', 0)} new session(s), "
-                       f"{stats.get('turns', 0)} new turn(s)")
+                       f"{stats.get('turns', 0)} new turn(s){replaced}")
         except Exception as exc:
             # A refresh is a convenience wrapped around the thing actually asked
             # for. Failing the render because the sweep hit a full disk would

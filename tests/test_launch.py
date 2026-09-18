@@ -399,6 +399,7 @@ try:
 except Exception:
     is_pty = False
 (d / "isatty").write_text("tty" if is_pty else "pipe")
+sys.stdout.write("\033[?2004h"); sys.stdout.flush()   # bracketed paste on, as a TUI does
 
 keys = []
 
@@ -410,6 +411,8 @@ def emit(text):
     sys.stdout.write("\033[2J\033[H" + text)   # a TUI redraws; so does this
     sys.stdout.flush()
 
+PASTE_ON, PASTE_OFF = "\033[200~", "\033[201~"
+
 def read_line(echo=False, deaf_until=0.0):
     """Read a line, optionally echoing it and ignoring an early submit.
 
@@ -417,17 +420,26 @@ def read_line(echo=False, deaf_until=0.0):
     asynchronously, and a newline arriving before ingestion finishes is
     swallowed. The launcher must therefore wait for the text to appear on
     screen before pressing Enter, not fire both in the same breath.
+
+    Inside a bracketed paste a newline is text, not a submit, as in every
+    real TUI; the markers themselves are stripped and the paste is noted.
     """
     buf = ""
+    pasting = False
     while True:
         ch = sys.stdin.read(1)
         if ch == "":
             return buf
-        if ch in ("\r", "\n"):
+        buf += ch
+        if buf.endswith(PASTE_ON):
+            buf = buf[:-len(PASTE_ON)]; pasting = True; (d / "pasted").write_text("1"); continue
+        if buf.endswith(PASTE_OFF):
+            buf = buf[:-len(PASTE_OFF)]; pasting = False; continue
+        if ch in ("\r", "\n") and not pasting:
+            buf = buf[:-1]
             if time.monotonic() < deaf_until:
                 continue                      # too early — swallowed, as kimi does
             return buf
-        buf += ch
         if echo:
             emit("composer\n> " + buf)
 
@@ -550,17 +562,46 @@ class TestLaunching:
             ["--session-id", record["session_id"]]
         assert record["provenance"] == MINTED
 
-    def test_a_prompt_is_typed_then_submitted_separately(self, tmp_path):
-        """`send-keys` without `-l` drops the text silently, so the text and
-        the Enter are always two calls."""
+    def test_add_dirs_are_passed_to_claude_and_recorded(self, tmp_path):
+        """A unit of work spans several directories; the session should be
+        able to work in all of them. Claude takes --add-dir, repeatable."""
+        from scad.launch import launch
+
+        binary, stub = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        extra = tmp_path / "docs"
+        extra.mkdir()
+        record = launch("claude", tmp_path, binary=binary, add_dirs=[extra, "/a b"])
+
+        assert self._wait_for(stub / "argv.json")
+        assert json.loads((stub / "argv.json").read_text()) == \
+            ["--session-id", record["session_id"], "--add-dir", str(extra), "--add-dir", "/a b"]
+        assert record["add_dirs"] == [str(extra), "/a b"]
+
+    def test_add_dirs_are_refused_for_agents_without_the_flag(self, tmp_path):
+        """Dropping them silently would launch a session that cannot reach
+        the directories it was told about."""
+        from scad.launch import LaunchError, launch
+
+        binary, _ = self._stub(tmp_path, [{"print": "ready"}])
+        for agent in ("codex", "kimi"):
+            with pytest.raises(LaunchError, match="add-dir"):
+                launch(agent, tmp_path, binary=binary, add_dirs=["/x"])
+
+    def test_a_prompt_is_pasted_then_submitted_separately(self, tmp_path):
+        """The text arrives as one bracketed paste and the Enter is a separate
+        call. `send-keys -l` of a 1,442-character prompt was measured
+        (2026-09-18) to lose its first ~200 characters in the Claude Code TUI,
+        which treated the burst as a paste and dropped the head; a buffer
+        pasted with `-p` arrived whole at 7,806 bytes."""
         from scad.launch import launch
 
         binary, stub = self._stub(
             tmp_path, [{"print": CLAUDE_READY, "read": "line"}])
-        launch("claude", tmp_path, binary=binary, prompt="do the thing")
+        launch("claude", tmp_path, binary=binary, prompt="do the thing\nand the other")
 
         assert self._wait_for(stub / "keys.json")
-        assert json.loads((stub / "keys.json").read_text()) == ["do the thing"]
+        assert json.loads((stub / "keys.json").read_text()) == ["do the thing\nand the other"]
+        assert (stub / "pasted").exists()
 
     def test_a_tui_that_ingests_slowly_still_gets_its_turn(self, tmp_path):
         """Regression, found by launching kimi for real on 2026-07-30.
@@ -834,3 +875,42 @@ class TestAGateScadMayNotAnswer:
                   "› 2. Skip\n"
                   "Press enter to continue")
         assert gate_choice(update) == "2"
+
+
+class TestSendingATurn:
+    """`scad session send <id> TEXT`: a later turn into an open session, by
+    the same transport the first turn uses."""
+
+    def _ready(self, tmp_path, script):
+        from scad.launch import launch
+        binary, stub = TestLaunching._stub(self, tmp_path, script)
+        record = launch("claude", tmp_path, binary=binary)
+        return record, stub
+
+    def test_the_turn_lands_in_the_recorded_pane(self, tmp_path, monkeypatch):
+        from scad.launch import send_turn
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        record, stub = self._ready(tmp_path, [{"print": CLAUDE_READY, "read": "line"}])
+        result = send_turn(record["session_id"], "fill the Priority column")
+        assert TestLaunching._wait_for(self, stub / "keys.json")
+        assert json.loads((stub / "keys.json").read_text()) == ["fill the Priority column"]
+        assert result["tmux"] == record["tmux"] and result["bytes"] == 24
+
+    def test_a_session_with_no_open_pane_is_refused_with_the_way_in(self, tmp_path, monkeypatch):
+        from scad.launch import LaunchError, send_turn, write_record
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        write_record({"agent": "claude", "session_id": "GONE", "cwd": str(tmp_path),
+                      "tmux": "scad-cl-0000:0.0", "started": "2026-09-18T10:00:00Z",
+                      "resume": "claude --resume GONE", "provenance": "minted"})
+        with pytest.raises(LaunchError, match="session resume GONE"):
+            send_turn("GONE", "hello")
+
+    def test_a_pane_at_a_gate_is_not_typed_into(self, tmp_path, monkeypatch):
+        from scad.launch import LaunchError, send_turn
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        record, stub = self._ready(tmp_path, [{"print": CLAUDE_READY},
+                                              {"print": TRUST_DIALOG, "read": "key"}])
+        time.sleep(0.5)
+        with pytest.raises(LaunchError, match="dialog"):
+            send_turn(record["session_id"], "hello")
+        assert not (stub / "keys.json").exists()

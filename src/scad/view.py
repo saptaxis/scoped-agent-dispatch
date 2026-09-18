@@ -24,6 +24,7 @@ from scad.live import (
     claude_live_sessions,
     container_live_sessions,
     is_agent_command,
+    pane_occupants,
 )
 
 _RESUME = {"claude": "claude --resume {id}",
@@ -69,16 +70,30 @@ def _goto(target: str) -> str:
     return f"tmux select-window -t {window} \\; select-pane -t {target}"
 
 
-def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
+def live_pane_rows(conn, panes: list[TmuxPane],
+                   sessions: list[ClaudeSession] | None = None,
+                   records: list[dict] | None = None) -> list[dict]:
     """One row per live agent pane — the panes themselves, not sessions.
 
     This is the section that answers "what have I got open right now". It is
     pane-first because that is what exists: `list-panes -a` spans every tmux
     session, and a single window routinely holds several agents (three in
-    `main:3` here). Sessions cannot be matched one-to-one onto them, so the
-    newest session in the pane's directory is offered as a hint and labelled as
-    one — never as fact.
+    `main:3` here). A claude pane is matched to its session by process tree
+    and a scad-launched pane by its launch record, both exact; a pane neither
+    can name gets the newest session in its directory, labelled as the guess
+    it is.
     """
+    # Two proofs before the guess. The registry ties a claude pid to a
+    # session id, and the pane's process tree ties the pid to the pane; a
+    # launch record names the pane outright, for any family. Only a pane
+    # neither can name falls through to "the newest session in this cwd",
+    # which handed one session to two panes when they shared a directory.
+    proven = pane_occupants(panes, sessions or [])
+    if records is None:
+        from scad.launch import launch_records   # launch imports this module
+        records = launch_records()
+    recorded = {r["tmux"]: r["session_id"] for r in records
+                if r.get("tmux") and r.get("session_id")}
     rows = []
     for pane in panes:
         if not is_agent_command(pane.command):
@@ -88,14 +103,31 @@ def live_pane_rows(conn, panes: list[TmuxPane]) -> list[dict]:
         # family existed: a kimi pane was labelled claude, and then matched
         # against claude sessions for its occupant.
         agent = pane.command if pane.command in ("codex", "kimi") else "claude"
-        # Match the pane's own agent: a codex pane must not be offered a claude
-        # session as its likely occupant, which the unfiltered query did.
-        guess = conn.execute(
-            "SELECT id, project, name, title, outcome, ended FROM sessions "
-            "WHERE cwd = ? AND kind = 'main' AND agent = ? ORDER BY ended DESC LIMIT 1",
-            (pane.path, agent),
-        ).fetchone()
+        exact = (proven[pane.target].session_id if pane.target in proven
+                 else recorded.get(pane.target))
+        if exact:
+            occupant = "proven"
+            guess = conn.execute(
+                "SELECT id, project, name, title, outcome, ended FROM sessions "
+                "WHERE id = ?", (exact,),
+            ).fetchone()
+            if guess is None:
+                # Known to be running here; the index has not caught up. The
+                # id is still the fact, so it is still named.
+                guess = {"id": exact, "project": None, "name": None,
+                         "title": None, "outcome": None, "ended": None}
+        else:
+            occupant = "guessed"
+            # Match the pane's own agent: a codex pane must not be offered a
+            # claude session as its likely occupant, which the unfiltered
+            # query did.
+            guess = conn.execute(
+                "SELECT id, project, name, title, outcome, ended FROM sessions "
+                "WHERE cwd = ? AND kind = 'main' AND agent = ? ORDER BY ended DESC LIMIT 1",
+                (pane.path, agent),
+            ).fetchone()
         rows.append({
+            "occupant": occupant if guess else None,
             "target": pane.target,
             "tmux_session": pane.session,
             "window": pane.window,
@@ -653,7 +685,7 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
             # "no notes" is a fact worth stating rather than absent data.
             row["n_notes"] = note_counts.get(row.get("id"), 0)
 
-    pane_rows = live_pane_rows(conn, panes)
+    pane_rows = live_pane_rows(conn, panes, sessions)
     # A pane row is a pane, not a session — but it names the session it most
     # likely holds, and that is the row a reader is looking at when they ask
     # "what is this one". Same context, fetched once per distinct session.
@@ -1522,9 +1554,9 @@ def _grouped_panes_html(groups: list[dict]) -> str:
             for r in w["panes"]:
                 if r.get("likely_id"):
                     title = _label({"name": r.get("likely_name"), "id": r["likely_id"]})
-                    hint = f'~{e(r["likely_id"][:8])} · best guess'
-                    if r.get("likely_title"):
-                        hint += f' · {_clip(r["likely_title"], 70)}'
+                    # A proof (process tree or launch record) says nothing; a
+                    # cwd match says so, because it can be wrong and has been.
+                    hint = "" if r.get("occupant") == "proven" else "best guess by directory"
                 else:
                     title = '<span class="m">no indexed session here</span>'
                     hint = "unmatched"
@@ -1538,7 +1570,7 @@ def _grouped_panes_html(groups: list[dict]) -> str:
                     "project": r.get("project"), "ended": r.get("last_activity"),
                     "first_text": r.get("first_text"), "last_text": r.get("last_text"),
                     "goto": r.get("goto"), "target": r.get("target"),
-                }, extra=f'<div class="m">{hint}</div>' if not r.get("likely_id") else ""))
+                }, extra=f'<div class="m">{hint}</div>' if hint else ""))
             cwds = ", ".join(sorted({r.get("cwd") for r in w["panes"] if r.get("cwd")}))
             head = (f'<span class="clip" title="{e(cwds)}" data-full="{e(cwds)}" '
                     f'onclick="expand(event, this)">{e(w["label"] or w["target"])}</span>'

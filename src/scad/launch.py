@@ -30,6 +30,7 @@ was born. So every read degrades to None rather than raising.
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -91,6 +92,22 @@ def write_record(record: dict, *, key: str | None = None) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(record, indent=2, default=str) + "\n")
     return path
+
+
+def launch_records() -> list[dict]:
+    """Every launch record on disk. Unreadable ones are skipped, not fatal."""
+    root = launches_root()
+    if not root.is_dir():
+        return []
+    records = []
+    for path in sorted(root.glob("*.json")):
+        try:
+            record = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(record, dict):
+            records.append(record)
+    return records
 
 
 def read_record(session_id: str) -> dict | None:
@@ -181,13 +198,13 @@ _TMUX_TIMEOUT = 5
 _WIDTH, _HEIGHT = 200, 50
 
 
-def _tmux(args: list[str]) -> subprocess.CompletedProcess:
+def _tmux(args: list[str], stdin: str | None = None) -> subprocess.CompletedProcess:
     """Run one tmux command. Never raises — the caller reads returncode."""
     socket = os.environ.get(TMUX_SOCKET_ENV)
     prefix = ["tmux", "-L", socket] if socket else ["tmux"]
     try:
         return subprocess.run(prefix + args, capture_output=True, text=True,
-                              timeout=_TMUX_TIMEOUT)
+                              timeout=_TMUX_TIMEOUT, input=stdin)
     except (OSError, subprocess.SubprocessError) as exc:
         return subprocess.CompletedProcess(args=prefix + args, returncode=127,
                                            stdout="", stderr=str(exc))
@@ -247,15 +264,77 @@ def capture_pane(target: str) -> str:
     return result.stdout if result.returncode == 0 else ""
 
 
-def send_text(target: str, text: str) -> None:
-    """Type `text` into the pane, submitting nothing.
+_SHELLS = {"bash", "zsh", "sh", "fish", "-bash", "-zsh", "-sh", "-fish"}
+_PASTE_BUFFER = "scad-turn"
 
-    `-l` is not optional. Plain `send-keys` treats its argument as key names and
-    was observed to drop a prompt silently, leaving an empty composer and no
-    transcript — an hour to diagnose, because the pane looked idle rather than
-    broken.
+
+def pane_holds_program(target: str) -> bool:
+    """Is something other than a shell running in the pane?
+
+    `new_session` follows the agent with `exec bash`, so an agent that has
+    exited leaves a bare shell behind and the pane still exists. The pane's
+    own `pane_current_command` cannot say: it names the foreground process,
+    which for a command list is the shell running it. The process tree can.
+    Through this module's tmux so the test socket is honoured.
+    """
+    pane = _tmux(["display-message", "-p", "-t", target, "#{pane_pid}"])
+    if pane.returncode != 0 or not pane.stdout.strip().isdigit():
+        return False
+    root = int(pane.stdout.strip())
+    try:
+        ps = subprocess.run(["ps", "-axo", "pid=,ppid=,comm="], capture_output=True,
+                            text=True, timeout=_TMUX_TIMEOUT)
+    except Exception:
+        return False
+    children: dict[int, list[tuple[int, str]]] = {}
+    for line in ps.stdout.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append((pid, os.path.basename(parts[2])))
+    queue = [root]
+    while queue:
+        for pid, comm in children.get(queue.pop(), ()):
+            if comm not in _SHELLS:
+                return True
+            queue.append(pid)
+    return False
+_PASTE_INLINE = 200      # below this the TUI shows the text itself, not "[Pasted text]"
+
+
+def send_keys(target: str, text: str) -> None:
+    """Type `text` as keystrokes: a gate answer, a menu choice. Not a turn.
+
+    `-l` is not optional. Plain `send-keys` treats its argument as key names
+    and was observed to drop text silently.
     """
     _tmux(["send-keys", "-l", "-t", target, text])
+
+
+def send_text(target: str, text: str) -> None:
+    """Put `text` in the pane's composer as one bracketed paste, submitting
+    nothing. For a turn; a menu wants `send_keys`.
+
+    Not `send-keys`. Measured 2026-09-18 in the Claude Code TUI: `send-keys
+    -l` of 1,442 characters was taken as a paste, collapsed, and lost its
+    first ~200 characters; the model answered from the middle of the message.
+    `load-buffer` then `paste-buffer -p` delivered 7,806 bytes over 62 lines
+    verbatim. Bracketed (`-p`) is what keeps a newline inside the text from
+    being a submit. The buffer is deleted after the paste (`-d`).
+    """
+    _tmux(["load-buffer", "-b", _PASTE_BUFFER, "-"], stdin=text)
+    _tmux(["paste-buffer", "-d", "-p", "-b", _PASTE_BUFFER, "-t", target])
+
+
+def _echoed(target: str, probe: str) -> bool:
+    """Is the pasted text in the composer? A long paste is shown collapsed as
+    `[Pasted text #n]`, so that marker counts as the text."""
+    screen = capture_pane(target)
+    return bool(probe) and (probe in screen or "Pasted text" in screen)
 
 
 def submit(target: str) -> None:
@@ -392,7 +471,7 @@ def settle_pane(target: str, deadline: float = START_DEADLINE,
             if choice is None:
                 return GATE, text
             if text not in answered:
-                send_text(target, choice)
+                send_keys(target, choice)
                 answered.add(text)
         if time.monotonic() >= end:
             return pane_state(text), text
@@ -523,7 +602,7 @@ def _first_turn(target: str, text: str, agent: str = "") -> None:
     # The echo proves the paste was ingested; it does not prove the TUI is
     # ready to act on Enter. Both waits are needed, for different reasons.
     probe = text.strip()[:_ECHO_PROBE]
-    _wait(lambda: probe and probe in capture_pane(target), ECHO_DEADLINE)
+    _wait(lambda: _echoed(target, probe), ECHO_DEADLINE)
     time.sleep(SUBMIT_SETTLE.get(agent, SUBMIT_SETTLE_DEFAULT))
 
     for attempt in range(SUBMIT_TRIES):
@@ -531,7 +610,7 @@ def _first_turn(target: str, text: str, agent: str = "") -> None:
         if attempt + 1 == SUBMIT_TRIES:
             return
         time.sleep(SUBMIT_RETRY_INTERVAL)
-        if probe and probe not in capture_pane(target):
+        if not _echoed(target, probe):
             return          # composer cleared — weak, but worth exiting on
 
 
@@ -634,7 +713,7 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
 
 
 def launch(agent: str, cwd, *, prompt: str | None = None,
-           binary: str | None = None, say=None) -> dict:
+           binary: str | None = None, say=None, add_dirs=()) -> dict:
     """Start an interactive agent in tmux and record which session it became.
 
     Detached: the pane is left running and the caller keeps its terminal.
@@ -650,6 +729,12 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
 
     if agent not in AGENTS:
         raise LaunchError(f"Unknown agent {agent!r}. One of: {', '.join(AGENTS)}.")
+    add_dirs = [str(Path(d).expanduser()) for d in add_dirs]
+    if add_dirs and agent != "claude":
+        # Refused, not dropped: a session told about directories it cannot
+        # reach would look launched and be wrong. codex and kimi have no
+        # equivalent flag; their sandboxes are set elsewhere.
+        raise LaunchError(f"--add-dir is Claude-only; {agent} has no equivalent flag.")
 
     cwd = Path(cwd).expanduser()
     if not cwd.is_dir():
@@ -674,6 +759,8 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
     before_rollouts = rollout_ids() if agent == "codex" else set()
 
     command = f"{binary} {_FLAGS[agent].format(id=session_id)}".strip()
+    for d in add_dirs:
+        command += f" --add-dir {shlex.quote(d)}"
     target = new_session(name, cwd, command)
     say(f"launched {agent} in {target}")
 
@@ -704,6 +791,7 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
         "agent": agent,
         "session_id": session_id,
         "cwd": str(cwd),
+        "add_dirs": add_dirs,
         "tmux": target,
         "started": _now_iso(),
         "resume": resume_command({"id": session_id, "agent": agent,
@@ -721,3 +809,37 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
 
     write_record(record, key=session_id or f"unresolved-{name}")
     return record
+
+
+def send_turn(session_id: str, text: str) -> dict:
+    """Deliver a later turn to an open session, through its pane.
+
+    The pane is the launch record's, and it must still hold an agent: a
+    closed session gets `scad session resume`, not a paste into whatever
+    shell is there now. A pane sitting at a dialog is refused for the same
+    reason the first turn is never typed into one. Delivery is `_first_turn`,
+    so a later turn gets the same paste, echo wait and settle the first one
+    does.
+
+    Asked for after a 1,400-character follow-up sent with raw `send-keys`
+    arrived with its head missing (2026-09-18).
+    """
+    record = read_record(session_id)
+    if record is None or not record.get("tmux"):
+        raise LaunchError(
+            f"{session_id} has no launch record naming a pane; only sessions "
+            f"scad launched can be sent to. Attach and type, or: "
+            f"scad session resume {session_id}")
+    target = record["tmux"]
+    if not pane_holds_program(target):
+        raise LaunchError(
+            f"{session_id} is not open in {target} any more. Go back in with: "
+            f"scad session resume {session_id}")
+    screen = capture_pane(target)
+    gate = blocking_gate(screen)
+    if gate or pane_state(screen) == GATE:
+        raise LaunchError(
+            f"{target} is at a dialog scad will not answer"
+            f"{': ' + gate if gate else ''}. Answer it in the pane first.")
+    _first_turn(target, text, record.get("agent") or "")
+    return {"session_id": session_id, "tmux": target, "bytes": len(text.encode())}

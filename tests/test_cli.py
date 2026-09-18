@@ -1947,12 +1947,14 @@ class TestRunSessionSplit:
     group was misnamed, which is what made this mechanical.
     """
 
+    # `send` is not here: `session send` is now the host-session turn
+    # (2026-09-18), so the old container alias would shadow a real verb.
     CONTAINER_VERBS = ("start", "stop", "clean", "attach", "info",
-                       "inject", "jobs", "logs", "send", "refresh")
+                       "inject", "jobs", "logs", "refresh")
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "note", "notes")
+    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "note", "notes")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -2029,8 +2031,9 @@ class TestRenameLeftNoStaleDocs:
     it teaches agents the commands, so a stale copy makes every scad-skill agent
     call dead verbs."""
 
+    # `send` is absent: `session send` is a real verb since 0.5.0.
     VERBS = ("start", "stop", "clean", "attach", "info",
-             "inject", "jobs", "logs", "send", "refresh")
+             "inject", "jobs", "logs", "refresh")
 
     def _sources(self):
         root = Path(__file__).resolve().parent.parent
@@ -3089,7 +3092,43 @@ class TestResumeIsLiveFirst:
         self._record(tmp_path, monkeypatch)
         self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
-        assert result.output.strip() == "cd /repo && claude --resume S1"
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+
+    def test_print_warns_on_stderr_when_the_recorded_pane_is_live(
+            self, runner, tmp_path, monkeypatch):
+        """The payload does not change, but a person at a terminal is told.
+        A second `claude --resume` on an open session writes a fork into its
+        transcript, and later resumes follow the fork until the original
+        exits (backlog, Bugs, 2026-09-11)."""
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert "main:3.1" in result.stderr
+        assert "open" in result.stderr
+
+    def test_print_warns_on_stderr_when_the_registry_proves_it_live(
+            self, runner, tmp_path, monkeypatch):
+        from scad.live import ClaudeSession
+
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd="/repo")])
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert "4242" in result.stderr
+        assert "open" in result.stderr
+
+    def test_print_is_silent_for_a_closed_session(
+            self, runner, tmp_path, monkeypatch):
+        self._record(tmp_path, monkeypatch)
+        self._panes(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert result.stderr == ""
 
     def test_a_session_the_registry_proves_is_running_is_not_started_twice(
             self, runner, tmp_path, monkeypatch):
@@ -3270,6 +3309,30 @@ class TestSessionLaunch:
         # and it must NOT have offered the session as usable
         assert "resume:" not in result.output
 
+    def test_a_launch_hands_back_the_guarded_verb_not_the_raw_command(
+            self, runner, tmp_path, monkeypatch):
+        """The session is certainly open at this moment, which is exactly
+        when the raw resume command must not be run: it starts a second
+        process on the id and forks the transcript. `scad session resume`
+        attaches while the pane is open and resumes once it has closed."""
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
+                                      "--cwd", str(tmp_path)])
+        assert result.exit_code == 0, result.output
+        assert "scad session resume CX1" in result.output
+        assert "codex resume CX1" not in result.output
+        assert "pane: scad-cx-1430:0.0" in result.output
+
+    def test_add_dir_is_repeatable_and_reaches_the_launcher(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude",
+                                      "--cwd", str(tmp_path),
+                                      "--add-dir", "/docs", "--add-dir", "/other"])
+        assert result.exit_code == 0, result.output
+        assert calls[0]["add_dirs"] == ["/docs", "/other"]
+
     def test_json_emits_the_record_and_nothing_to_parse(
             self, runner, tmp_path, monkeypatch):
         """The id is a contract. A consumer must not regex the human lines for
@@ -3321,14 +3384,6 @@ class TestSessionLaunch:
         shown = runner.invoke(main, ["session", "show", "CX1"])
         assert shown.exit_code == 0, shown.output
         assert "codex" in shown.output
-
-    def test_it_hands_back_the_resume_command(self, runner, tmp_path, monkeypatch):
-        self._home(tmp_path, monkeypatch)
-        self._fake(monkeypatch)
-        result = runner.invoke(main, ["session", "launch", "--agent", "codex",
-                                      "--cwd", str(tmp_path)])
-        assert result.exit_code == 0, result.output
-        assert "cd /repo && codex resume CX1" in result.output
 
     def test_it_names_the_pane_it_launched_into(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
@@ -3448,7 +3503,7 @@ class TestLaunchChecksAttribution:
         result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
                                       "--cwd", str(loose)])
         assert result.exit_code == 0, result.output
-        assert "codex resume CX1" in result.output
+        assert "scad session resume CX1" in result.output
 
     def test_a_filed_target_is_not_warned_about(self, runner, tmp_path, monkeypatch):
         import subprocess as sp
@@ -3608,3 +3663,213 @@ class TestLaunchRecordsTheSessionItStarted:
         )
         assert ensure_launched_session(conn, "L1", "codex", "/elsewhere") is False
         assert session_row(conn, "L1")["cwd"] == "/real"
+
+
+class TestSessionLsExport:
+    """`session ls --json` as the contract a consumer reads instead of the
+    SQLite file. Filed by orglens on 2026-09-15 as the five query shapes it
+    runs against `~/.scad/index.sqlite`; this is shapes 1, 2, 3 and 5 in one
+    call, plus the parent link for subagents (its open question)."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        import time as _time
+        from scad.index import append_turns, connect, upsert_session
+        from scad.records import KIND_MAIN, KIND_SUBAGENT, SessionRecord, TurnRecord
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
+        now = int(_time.time() * 1000)
+        conn = connect()
+        for sid, kind, parent, started in (("M1", KIND_MAIN, None, now - 5000),
+                                           ("M2", KIND_MAIN, None, now - 9000),
+                                           ("A1", KIND_SUBAGENT, "M1", now - 4000)):
+            rec = SessionRecord(id=sid, kind=kind, agent="claude", source="claude-transcript",
+                                cwd="/repo", started=started, ended=started + 1000,
+                                outcome="awaiting-user", parent_session_id=parent)
+            upsert_session(conn, rec, machine="mac", project="proj",
+                           archive_path=f"/arc/{sid}.jsonl", source_size=1,
+                           source_mtime=1, parsed_offset=1)
+        conn.execute("UPDATE sessions SET needs = 'permission' WHERE id = 'M1'")
+        append_turns(conn, "M1", [
+            TurnRecord(ts=1000, role="user", kind="text", text="first"),
+            TurnRecord(ts=2000, role="assistant", kind="text", text="x" * 300),
+            TurnRecord(ts=3000, role="user", kind="tool_result", text=""),
+        ])
+        conn.commit()
+        return conn
+
+    def _rows(self, runner, *args):
+        result = runner.invoke(main, ["session", "ls", "--json", *args])
+        assert result.exit_code == 0, result.output
+        return {r["id"]: r for r in json.loads(result.stdout)}
+
+    def test_rows_carry_the_columns_a_consumer_joins_on(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        rows = self._rows(runner)
+        m1 = rows["M1"]
+        assert m1["cwd"] == "/repo"
+        assert m1["ended"] == m1["started"] + 1000
+        assert m1["needs"] == "permission"
+        assert m1["parent_session_id"] is None
+        assert rows["A1"]["parent_session_id"] == "M1"
+
+    def test_last_turn_is_the_newest_with_text_clipped_to_240(self, runner, tmp_path, monkeypatch):
+        """The empty tool_result at ts 3000 is skipped: a consumer wants the
+        last thing said, not the last row written."""
+        self._seed(tmp_path, monkeypatch)
+        last = self._rows(runner)["M1"]["last_turn"]
+        assert last["ts"] == 2000 and last["role"] == "assistant"
+        assert len(last["text"]) == 240
+        assert self._rows(runner)["M2"]["last_turn"] is None
+
+    def test_live_comes_from_the_registry_and_names_the_pid(self, runner, tmp_path, monkeypatch):
+        from scad.live import ClaudeSession
+        self._seed(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 4242, cwd="/repo", name="renamed", status="busy")])
+        rows = self._rows(runner)
+        assert rows["M1"]["live"] == {"pid": 4242, "name": "renamed", "status": "busy",
+                                      "waiting_for": ""}
+        assert rows["M2"]["live"] is None
+
+    def test_live_is_the_newest_registry_entry_when_a_session_has_two(self, runner, tmp_path, monkeypatch):
+        """A reattach leaves two <pid>.json for one id; /rename lands in the
+        newer. The older one was being reported (orglens, 2026-09-18)."""
+        from scad.live import ClaudeSession
+        self._seed(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 200, cwd="/repo", name="renamed", updated_at=20),
+            ClaudeSession("M1", 100, cwd="/repo", name="original", updated_at=10)])
+        assert self._rows(runner)["M1"]["live"]["name"] == "renamed"
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 100, cwd="/repo", name="original", updated_at=10),
+            ClaudeSession("M1", 200, cwd="/repo", name="renamed", updated_at=20)])
+        assert self._rows(runner)["M1"]["live"]["name"] == "renamed"
+
+    def test_parent_filter_lists_a_sessions_subagents(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        assert list(self._rows(runner, "--parent", "M1")) == ["A1"]
+
+    def test_the_text_listing_is_unchanged(self, runner, tmp_path, monkeypatch):
+        """The export grew; the human listing did not."""
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "ls"])
+        assert result.exit_code == 0
+        assert "last_turn" not in result.output and "/repo" not in result.output
+
+
+class TestNotesAbout:
+    """`notes ls --about NAME`: a note *about* X is often written *in* Y.
+
+    orglens found three of eight notes about itself by project alone; the
+    rest named it in tags, entities or topic from other projects' sessions."""
+
+    def _seed(self, tmp_path, monkeypatch):
+        import time as _time
+        from scad.index import append_notes, connect, upsert_session
+        from scad.records import KIND_MAIN, NoteRecord, SessionRecord
+
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        now = int(_time.time() * 1000)
+        conn = connect()
+        for sid, project in (("SA", "scad"), ("SO", "orglens")):
+            rec = SessionRecord(id=sid, kind=KIND_MAIN, agent="claude", source="claude-transcript",
+                                cwd="/x", started=now - 1000, ended=now, outcome="awaiting-user")
+            upsert_session(conn, rec, machine="mac", project=project,
+                           archive_path=f"/arc/{sid}.jsonl", source_size=1,
+                           source_mtime=1, parsed_offset=1)
+        append_notes(conn, "SA", [
+            NoteRecord(ts=now - 500, title="by tag", tags=["orglens", "x"]),
+            NoteRecord(ts=now - 400, title="by entity", entities=["orglens"]),
+            NoteRecord(ts=now - 300, title="by topic", topic="orglens"),
+            NoteRecord(ts=now - 200, title="by authored project", project="orglens"),
+            NoteRecord(ts=now - 100, title="unrelated", tags=["scad"]),
+        ], "/notes/SA.jsonl")
+        append_notes(conn, "SO", [NoteRecord(ts=now - 50, title="by session project")],
+                     "/notes/SO.jsonl")
+        conn.commit()
+
+    def test_about_matches_tags_entities_topic_and_project(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
+        assert result.exit_code == 0, result.output
+        titles = {r["title"] for r in json.loads(result.stdout)}
+        assert titles == {"by tag", "by entity", "by topic", "by authored project",
+                          "by session project"}
+
+    def test_json_rows_carry_entities(self, runner, tmp_path, monkeypatch):
+        """Without them a consumer cannot do the about-match from one export
+        and calls --about once per unit: 23 subprocesses (orglens, 2026-09-15)."""
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--json", "--limit", "100"])
+        by = {r["title"]: r for r in json.loads(result.stdout)}
+        assert json.loads(by["by entity"]["entities"]) == ["orglens"]
+        assert json.loads(by["by tag"]["tags"]) == ["orglens", "x"]
+
+    def test_about_takes_several_names_and_says_which_matched(self, runner, tmp_path, monkeypatch):
+        self._seed(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--about", "scad",
+                                      "--json", "--limit", "100"])
+        assert result.exit_code == 0, result.output
+        by = {r["title"]: r["about"] for r in json.loads(result.stdout)}
+        # "by tag" is tagged orglens and written in a scad session: both.
+        assert by["by tag"] == ["orglens", "scad"]
+        assert by["unrelated"] == ["scad"]
+        assert by["by session project"] == ["orglens"]
+
+    def test_about_is_a_whole_word_in_the_json_arrays(self, runner, tmp_path, monkeypatch):
+        """`orglens` must not match a tag `orglens-extras`."""
+        from scad.index import append_notes, connect
+        from scad.records import NoteRecord
+        self._seed(tmp_path, monkeypatch)
+        conn = connect()
+        append_notes(conn, "SA", [NoteRecord(ts=1, title="near miss", tags=["orglens-extras"])],
+                     "/notes/SA.jsonl")
+        conn.commit()
+        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
+        assert "near miss" not in {r["title"] for r in json.loads(result.stdout)}
+
+
+class TestSessionNotesCurrent:
+    """`session notes --current` reads the notes of the session you are in,
+    resolved the same way `session note --current` writes them."""
+
+    def test_current_resolves_like_note_current(self, runner, tmp_path, monkeypatch):
+        from scad.notes import append_note
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setattr("scad.cli.current_session_id", lambda agent="claude": "S9")
+        append_note({"title": "mine", "text": "b"}, session_id="S9")
+        result = runner.invoke(main, ["session", "notes", "--current"])
+        assert result.exit_code == 0, result.output
+        assert "mine" in result.output
+
+    def test_exactly_one_of_id_or_current(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        result = runner.invoke(main, ["session", "notes"])
+        assert result.exit_code != 0
+        assert "--current" in result.output
+
+
+class TestSessionSend:
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+    def test_text_or_file_reaches_send_turn(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = []
+        monkeypatch.setattr("scad.cli.send_turn", lambda sid, text: (
+            calls.append((sid, text)) or {"session_id": sid, "tmux": "t:0.0", "bytes": len(text)}))
+        r = runner.invoke(main, ["session", "send", "S1", "do it"])
+        assert r.exit_code == 0, r.output and "t:0.0" in r.output
+        f = tmp_path / "p.md"; f.write_text("a long\nprompt")
+        r = runner.invoke(main, ["session", "send", "S1", "--file", str(f), "--json"])
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.stdout)["bytes"] == 13
+        assert calls == [("S1", "do it"), ("S1", "a long\nprompt")]
+
+    def test_exactly_one_of_text_or_file(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        assert runner.invoke(main, ["session", "send", "S1"]).exit_code != 0

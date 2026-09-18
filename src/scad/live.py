@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TMUX_FORMAT = ("#{session_name}:#{window_index}.#{pane_index}|#{window_name}|"
-               "#{pane_current_path}|#{pane_current_command}")
+               "#{pane_current_path}|#{pane_current_command}|#{pane_pid}")
 _TIMEOUT = 5
 
 # Slack allowed between the registry's `procStart` and the kernel's start time.
@@ -45,6 +45,7 @@ class TmuxPane:
     path: str
     command: str
     window: str = ""   # tmuxinator's window name, e.g. "scad" — the human label
+    pid: int = 0       # the pane's shell; the agent is a descendant of it
 
     @property
     def session(self) -> str:
@@ -75,10 +76,16 @@ def tmux_panes() -> list[TmuxPane]:
         # Split from both ends: a path may contain "|", the others may not.
         head, _, rest = line.partition("|")
         window, _, rest = rest.partition("|")
+        # The pid is last and all digits; a command never is. Read it only
+        # when it is there, so a line without one still parses, pid 0.
+        before, _, last = rest.rpartition("|")
+        pid = 0
+        if last.isdigit():
+            pid, rest = int(last), before
         path, _, command = rest.rpartition("|")
         if not head or not command:
             continue
-        panes.append(TmuxPane(target=head, path=path, command=command, window=window))
+        panes.append(TmuxPane(target=head, path=path, command=command, window=window, pid=pid))
     return panes
 
 
@@ -225,6 +232,7 @@ class ClaudeSession:
     status: str = ""       # idle | busy | waiting
     waiting_for: str = ""
     started_at: int = 0    # epoch ms, when the *session* began
+    updated_at: int = 0    # epoch ms, the file's last write; a /rename lands here
     kind: str = ""         # interactive | ...
     entrypoint: str = ""   # cli | ...
     version: str = ""
@@ -327,10 +335,14 @@ def _read_entry(path: Path) -> tuple[ClaudeSession, float] | None:
     if proc_start is None:
         return None
 
-    try:
-        started_at = int(record.get("startedAt") or 0)
-    except (TypeError, ValueError):
-        started_at = 0
+    def epoch_ms(key: str) -> int:
+        try:
+            return int(record.get(key) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    started_at = epoch_ms("startedAt")
+    updated_at = epoch_ms("updatedAt")
 
     def text(key: str) -> str:
         value = record.get(key)
@@ -344,6 +356,7 @@ def _read_entry(path: Path) -> tuple[ClaudeSession, float] | None:
         status=text("status"),
         waiting_for=text("waitingFor"),
         started_at=started_at,
+        updated_at=updated_at,
         kind=text("kind"),
         entrypoint=text("entrypoint"),
         version=text("version"),
@@ -480,6 +493,22 @@ def claude_live_sessions(registry: Path | str | None = None) -> list[ClaudeSessi
     return sorted(sessions, key=lambda s: (-s.started_at, s.session_id))
 
 
+def newest_by_session(sessions: list[ClaudeSession]) -> dict[str, ClaudeSession]:
+    """One entry per session id: the one written most recently.
+
+    A reattach leaves the first process's registry file in place with both
+    pids alive, so one id can have two live entries. `/rename` and status
+    changes land in the newer file. Keying a dict on session id from the
+    registry's own order kept the older one, and a rename never showed.
+    """
+    best: dict[str, ClaudeSession] = {}
+    for s in sessions:
+        held = best.get(s.session_id)
+        if held is None or s.updated_at > held.updated_at:
+            best[s.session_id] = s
+    return best
+
+
 def agent_cwds(panes: list[TmuxPane] | None = None) -> set[str]:
     """Directories that currently have an agent running in them.
 
@@ -491,3 +520,63 @@ def agent_cwds(panes: list[TmuxPane] | None = None) -> set[str]:
     """
     panes = tmux_panes() if panes is None else panes
     return {p.path for p in panes if is_agent_command(p.command) and p.path}
+
+
+
+def _process_parents() -> dict[int, int]:
+    """pid -> parent pid for every process `ps` can see. Empty on any failure."""
+    try:
+        result = subprocess.run(
+            ["ps", "-axo", "pid=,ppid="],
+            capture_output=True, text=True, timeout=_TIMEOUT,
+        )
+    except Exception:
+        return {}
+    parents: dict[int, int] = {}
+    for line in result.stdout.splitlines():
+        pid, _, ppid = line.strip().partition(" ")
+        try:
+            parents[int(pid)] = int(ppid)
+        except ValueError:
+            continue
+    return parents
+
+
+def pane_occupants(panes: list[TmuxPane], sessions: list[ClaudeSession],
+                   parents: dict[int, int] | None = None) -> dict[str, ClaudeSession]:
+    """Which live claude session is inside which pane: pane target -> session.
+
+    A proof, not a guess. The registry names a session by the pid of the
+    process holding it; tmux names a pane by the pid of its shell; the agent
+    is a descendant of that shell. Matching on cwd instead hands the same
+    session to every agent pane in a directory, which is how one session came
+    to be shown twice.
+
+    One `ps` for the whole machine. A pane without a pid (an older fixture, or
+    a tmux that could not say) or whose tree holds no registered pid is absent
+    from the result rather than guessed at.
+    """
+    if not panes or not sessions:
+        return {}
+    if parents is None:
+        parents = _process_parents()
+    if not parents:
+        return {}
+    by_pid = {s.pid: s for s in sessions}
+    found: dict[str, ClaudeSession] = {}
+    for pane in panes:
+        if not pane.pid or not is_agent_command(pane.command):
+            continue
+        # Walk up from each registered pid; the first pane whose shell we hit
+        # owns it. Cheaper than enumerating every pane's descendants, and the
+        # tree is shallow: shell -> claude, sometimes one re-exec deeper.
+        for pid, session in by_pid.items():
+            cursor = parents.get(pid)
+            hops = 0
+            while cursor and hops < 16:
+                if cursor == pane.pid:
+                    found.setdefault(pane.target, session)
+                    break
+                cursor = parents.get(cursor)
+                hops += 1
+    return found

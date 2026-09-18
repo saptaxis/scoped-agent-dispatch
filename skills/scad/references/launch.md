@@ -7,19 +7,31 @@ No container. This is independent of `scad dispatch`, which is the same idea
 with isolation and a config.
 
 ```bash
-scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--attach]
+scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]... [--attach]
 scad session resume <session-id> [--print]
+scad session send <session-id> TEXT | --file PATH
 ```
 
 `launch` is detached by default: it starts the agent in tmux, prints the
-resume command and the pane, and exits. `--attach` opts into attaching.
+pane and `scad session resume <id>`, and exits. `--attach` opts into
+attaching. `--add-dir` is Claude-only and repeatable; it is refused, not
+dropped, for the other two.
+
+`send` delivers a later turn into the session's open pane and submits it.
+Use it instead of `tmux send-keys`: a 1,400-character turn sent that way was
+measured to arrive with its first ~200 characters missing, because the
+Claude Code TUI took the burst as a paste and collapsed it. `send` pastes
+through a tmux buffer with bracketed paste, waits for the echo, then presses
+Enter. It refuses a session that has closed (use `resume`) and a pane sitting
+at a dialog. Only sessions scad launched can be sent to; the pane comes from
+the launch record.
 
 `resume` attaches if the session is open and execs the agent if it is closed —
 never a second process against one live session id. It works for **every**
 indexed session, not only launched ones: the index already holds the agent, the
 cwd and the id, which is all a resume command needs.
 
-## Why tmux is not incidental
+## Why tmux is required
 
 It supplies the pty. Claude's `/resume` picker drops sessions whose entrypoint
 is `sdk-cli`, and entrypoint is decided at launch by `-p || --print ||
@@ -37,7 +49,7 @@ Diagnostic: `claude --debug` prints
 
 ## How each family yields its id
 
-Measured on a real machine, not read from documentation.
+Measured on a real machine.
 
 | Agent | Route | Known |
 |---|---|---|
@@ -59,14 +71,14 @@ command has to add it back — `kimi -S <bare-uuid>` answers `Session not found`
 never the index: `reindex --rebuild` drops every row, and this is an authored
 fact about an event with nothing to recompute it from.
 
-It is load-bearing rather than a convenience — a launched session may be one
-the agent's own picker never lists, so if scad does not record the id, the
-session is unreachable.
+A launched session may be one the agent's own picker never lists; without the
+record it is unreachable.
 
-## Traps, all paid for once already
+## Traps
 
-- **`tmux send-keys` without `-l` drops the text silently.** Always `-l`, then
-  a separate `Enter`.
+- **`tmux send-keys` is for gate answers, not turns.** Without `-l` it drops the
+  text silently; with `-l` a long turn loses its head. A turn goes through
+  `paste-buffer -p`. Enter is always a separate call.
 - **A cleared composer is not proof the turn ran.** kimi will take the text out
   of its composer and render it as sent while never dispatching it. Only the
   family's own progress signal is real.

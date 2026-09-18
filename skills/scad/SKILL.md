@@ -62,6 +62,7 @@ scad finish <run-id>                            # fetch + tear down
 # run an agent here, on the host
 scad session launch --agent codex --cwd .       # interactive, in tmux
 scad session resume <id>                        # attach if open, resume if not
+scad session send <id> "text" | --file f        # a later turn into the open pane
 
 # find what ran
 scad session ls                                 # every indexed session

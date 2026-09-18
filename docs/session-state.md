@@ -67,6 +67,35 @@ scad session ls --outcome awaiting-question   # sessions that asked you somethin
 from reading the prose. A session whose ending cannot be classified is left
 unlabelled.
 
+### Reading the index from another program
+
+`scad session ls --json` is the contract. Reading `~/.scad/index.sqlite` directly
+ties a consumer to a schema nothing checks. The export carries, per row: `id`, `kind`, `parent_session_id`, `agent`, `cwd`, `project`,
+`name`, `title`, `started`, `ended`, `n_turns`, `outcome`, `needs`, `grade`,
+`harness_state`; `last_turn` as `{ts, role, text}` with the text clipped to 240
+characters and empty turns skipped; and `live` as `{pid, name, status,
+waiting_for}` from Claude's process registry, or `null`. `live` is Claude-only,
+since the registry is Claude's; `name` there is fresher than the index's, which
+learns it on reindex.
+
+```bash
+scad session ls --json --kind main --limit 1000     # every main session, one call
+scad session ls --parent <id>                       # a session's subagents
+scad notes ls --about orglens --about scad --json   # notes about things, wherever written
+```
+
+`--about` matches the name in `tags` or `entities`, as the `topic`, or as the
+project, and can be given several times; each JSON row then carries `about`,
+the names it matched. A note about X is often written in Y's session and
+cross-tagged; by project alone, three of eight such notes were found. Rows also
+carry `tags` and `entities` themselves, so a consumer can do the match from one
+plain export instead.
+
+`live` is the newest registry entry for the session, by `updatedAt`; a reattach
+can leave two entries for one id, and a `/rename` lands in the newer.
+
+The index is in WAL mode, so a reader is not blocked while a reindex writes.
+
 ### Project attribution
 
 `scad where` reports which tier matched (`scad.yml`, then `.scad-project`, then
@@ -83,10 +112,10 @@ incremental pass is mtime-based, so re-filing what is already indexed needs
 Renders the index to a self-contained HTML page and opens it.
 
 ```bash
-scad view                 # waiting list, live sessions, everything, then open
+scad view                 # refresh, then: waiting list, live sessions, everything, then open
 scad view --days 30       # widen the waiting window
 scad view --no-open       # just write ~/.scad/view.html
-scad view --refresh       # archive and index new traces first
+scad view --no-refresh    # render the index as it is; the pure reader
 ```
 
 It answers who is waiting on you and how to get back to them. Each row carries a
@@ -94,22 +123,32 @@ command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.
 
-Live panes and containers are discovered at render time and are current.
-Everything else reflects the last `scad reindex`. `--refresh` runs an incremental
-pass (about a second) before rendering, and is opt-in so that plain `scad view`
-stays a reader. A refresh that fails warns and renders the existing index.
+Live panes and containers are discovered at render time and are current. The
+index is refreshed first by default, an incremental pass of about a second;
+`--no-refresh` keeps the pure reader. A refresh that fails warns and renders the
+existing index.
 
-Live panes are matched by working directory, which is approximate, since several
-panes can share one. Only panes running an agent count, and where more than one
-matches, every candidate is listed. tmux and docker are queried at render time
-and degrade to empty if either is unavailable.
+The archive keeps every version of a source file: one that was rewritten rather
+than appended to is stored as a fork beside the original. A refresh reads the
+newest fork and replaces that session's turns from it, once, and reports it as
+"re-read from a rewritten source". Codex did this to 133 rollouts at once in
+September 2026 when it changed its on-disk format.
+
+A claude pane is matched to its session through the process tree, from the
+pane's shell to the pid Claude's registry names, and a scad-launched pane through
+its launch record. A pane neither can name gets the newest session in its
+working directory, labelled as the guess it is. Only panes running an agent
+count. tmux and docker are queried at render time and degrade to empty if either
+is unavailable.
 
 ## Interactive launch
 
 ```bash
 scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
 scad session launch --agent claude --cwd . --json    # the launch record, for scripts
+scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
 scad session resume <id>                             # attach if open, resume if closed
+scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command
 ```
 
@@ -127,6 +166,18 @@ Launching goes through tmux for all three. tmux supplies the pty that keeps a
 Claude session stamped `entrypoint: cli` rather than `sdk-cli`, which is what
 keeps it in Claude's own `/resume` picker. A non-pty launch produces a session the
 picker hides, so a missing tmux refuses rather than degrading.
+
+A later turn goes in with `session send`, delivered as one bracketed paste and
+then submitted, the same transport as the first turn. `tmux send-keys` was
+measured to lose the head of a 1,400-character turn. `send` refuses a session
+that has closed, naming the resume command, and a pane sitting at a dialog.
+
+`session resume` attaches when the session is still open and only runs the agent's
+own resume when it has closed. A second `claude --resume <id>` against an open
+session is a second process on one transcript: it
+appends its own entries, the chain forks, and until the original process exits every
+later resume follows the fork and hides the original's turns. Go through `session
+resume`, or attach to the pane, while a session is open.
 
 Gates shown in the pane are answered by matching the option label, never by
 pressing Enter, whose default on codex's update gate runs `curl ... | sh`. Gates
@@ -161,6 +212,7 @@ are indexed as they are written.
 
 ```bash
 scad session notes <id>            # read them back, from the file
+scad session notes --current       # this session's
 scad notes ls --kind handoff       # what a session left for whoever comes next
 scad notes read <id> --last
 scad search "resolver" --notes     # topic, title, tags, entities, project

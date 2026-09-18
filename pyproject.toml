@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "scad"
-version = "0.4.0"
+version = "0.5.0"
 description = "Session state and isolated execution for coding agents. Indexes every local agent session from the agents' own logs, and runs agents in containers that never touch your working tree."
 requires-python = ">=3.11"
 license = "MIT"

@@ -2,6 +2,76 @@
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-09-18
+
+**The release where scad's index became an interface rather than a file.** 0.4.0 added the read
+tier; the first consumer of it, orglens, then reached past the CLI and queried the sqlite file
+directly, which made the schema a contract nobody had written down. This release writes it down:
+`session ls --json` carries what a consumer was fetching, `notes ls --about` answers the question
+a project join could not, and the index is in WAL mode so a reader is never stuck behind a
+reindex. It also closes the one bug 0.4.0 shipped with: the resume command a launch printed was
+the wrong command for the moment it was printed.
+
+### Added
+
+- `session ls --json` is now the export a consumer reads instead of the index file. Rows carry
+  `cwd`, `ended`, `needs` and `parent_session_id`, plus `last_turn` (the newest turn with text,
+  clipped to 240 characters) and `live` (pid, name, status from Claude's process registry, or
+  null). Filed by orglens as the five query shapes it ran against `~/.scad/index.sqlite`.
+- `session ls --parent <id>`: a session's subagents and workflow agents.
+- `session send <id> TEXT | --file PATH`: a later turn into an open session scad launched. The
+  text goes into the session's pane as one bracketed paste (`tmux load-buffer` then
+  `paste-buffer -p`), the echo is waited for, then it is submitted. Measured 2026-09-18: raw
+  `tmux send-keys` of a 1,442-character turn lost its first ~200 characters in the Claude Code
+  TUI; the paste delivered 7,806 bytes over 62 lines verbatim. A closed session is refused with
+  the resume command; a pane at a dialog is refused unanswered. `session launch --prompt` now
+  uses the same transport. Codex and kimi panes are untested with it.
+- `session launch --add-dir PATH`, repeatable. Claude-only, and refused rather than dropped for
+  codex and kimi. Recorded in the launch record as `add_dirs`.
+- `session notes --current`, resolved the same way `session note --current` writes.
+- `notes ls --about NAME`: notes naming NAME in `tags` or `entities`, as the topic, or as the
+  project. By project alone, three of eight notes about orglens were found; this finds all.
+- An index on `turns(session_id, ts)`, for "the last thing said" per session.
+- `notes ls --json` rows carry `entities`, and `--about` is repeatable; with several names each
+  JSON row carries `about`, the names it matched, so one call serves a consumer that joins per
+  name. Asked by orglens after adopting the export.
+
+### Changed
+
+- `scad session send` is the host-session turn. It was a hidden alias of `scad run send`, the
+  container turn, from the v2.1 rename; `run send` is unchanged.
+- The index opens in WAL mode. A reader in another process is no longer blocked for the whole
+  of a reindex; one external view had stalled 600s behind one.
+
+### Fixed
+
+- A source file the archive had forked (rewritten at the source, so a `<name>.<mtime>.jsonl`
+  copy sits beside the original) was parsed from zero and appended on every pass, alternating
+  between the two copies. Codex rewrote 133 rollouts in place on 2026-09-15; each `scad view`
+  then added 6,320 duplicate turns and took ten seconds. Both copies now resolve to one row by
+  name; the older is skipped unopened and a newer fork replaces that session's turns once,
+  reported as "re-read from a rewritten source". Later passes re-read nothing.
+- `session ls --json` `live` is the newest registry entry for a session, by `updatedAt`. A
+  reattach leaves the first process's `<pid>.json` in place with both pids alive, and `/rename`
+  writes into the newer file; the older name was being reported.
+- A note line edited after it was indexed now reaches the index. The unknown-project warning on
+  `session note` invites exactly that edit, and the pass never re-read an existing line, so a
+  corrected note stayed unfindable by project until a rebuild. A changed note file is read whole
+  and its rows replaced when they no longer match its lines; a pure append is still an append.
+- `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the
+  session is certainly open. A second `claude --resume` on an open session is a second process on
+  one transcript: it appends its own entries, the chain forks, and every later resume follows the
+  fork until the original process exits. It prints `scad session resume <id>` instead, which
+  attaches while the pane is open and resumes once it has closed. The launch record still carries
+  the raw command for then.
+- `session resume --print` warns on stderr when the session is open in a recorded pane or in
+  Claude's process registry. stdout is unchanged; it is what the viewer copies.
+- `scad view` no longer shows one session twice when two agent panes share a directory. A
+  claude pane is matched to its session through the process tree, from the pane's shell pid to
+  the pid Claude's registry names, and a scad-launched pane through its launch record; both are
+  exact and for any pane. Only a pane neither can name falls back to the newest session in its
+  directory, and the card now says "best guess by directory" when it does.
+
 ## [0.4.0] — 2026-09-09
 
 **The release where scad stopped being only a container dispatcher.** 0.3.0 could put a Claude

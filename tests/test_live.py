@@ -146,6 +146,16 @@ class TestAgentPanes:
         with patch("scad.live.subprocess.run", return_value=fake_run(out)):
             assert len(agent_panes()) == 3
 
+    def test_the_pane_pid_is_the_last_field(self):
+        """Added so a pane can be tied to the process inside it. Older
+        fixtures with four fields still parse, with pid 0."""
+        from scad.live import tmux_panes
+        out = "main:3.0|scad|/repo|2.1.205|2941\nmain:3.1|scad|/re|po|codex\n"
+        with patch("scad.live.subprocess.run", return_value=fake_run(out)):
+            panes = tmux_panes()
+        assert (panes[0].pid, panes[0].path, panes[0].command) == (2941, "/repo", "2.1.205")
+        assert (panes[1].pid, panes[1].path, panes[1].command) == (0, "/re|po", "codex")
+
     def test_session_name_is_derived_from_the_target(self):
         assert TmuxPane("main2:3.1", "/p", "codex").session == "main2"
 
@@ -224,6 +234,7 @@ class TestClaudeLiveSessions:
             session_id="sid-30036", pid=30036, cwd="/Users/vsr/code/scad",
             name="jul25-resolver-session-cli", status="waiting",
             waiting_for="permission prompt", started_at=1785307504101,
+            updated_at=1785307545649,
             kind="interactive", entrypoint="cli", version="2.1.220",
         )]
 
@@ -538,3 +549,69 @@ class TestSessionsInsideScadsOwnContainers:
         from scad.live import container_live_sessions
 
         assert container_live_sessions({"run-a"}, runs_root=tmp_path / "nope") == []
+
+
+class TestPaneOccupants:
+    """Which live claude session is inside which pane, by process tree.
+
+    The registry names a session by pid; tmux names a pane by its shell's pid;
+    the claude process is a descendant of the shell. That is a proof, where
+    matching on cwd is a guess that hands the same session to every pane in
+    the directory.
+    """
+
+    def _panes(self):
+        return [TmuxPane("main:5.0", "/docs", "2.1.270", pid=100),
+                TmuxPane("main:5.1", "/docs", "2.1.270", pid=200)]
+
+    def test_each_pane_gets_the_session_whose_process_it_holds(self):
+        from scad.live import ClaudeSession, pane_occupants
+        sessions = [ClaudeSession("SA", 150, cwd="/docs"),
+                    ClaudeSession("SB", 250, cwd="/docs")]
+        parents = {150: 100, 250: 200}
+        found = pane_occupants(self._panes(), sessions, parents=parents)
+        assert {t: s.session_id for t, s in found.items()} == {"main:5.0": "SA", "main:5.1": "SB"}
+
+    def test_a_grandchild_process_still_counts(self):
+        """claude re-execs; the registry pid may sit a level below the shell's child."""
+        from scad.live import ClaudeSession, pane_occupants
+        sessions = [ClaudeSession("SA", 160, cwd="/docs")]
+        parents = {160: 150, 150: 100}
+        found = pane_occupants(self._panes(), sessions, parents=parents)
+        assert found["main:5.0"].session_id == "SA"
+        assert "main:5.1" not in found
+
+    def test_a_pane_with_no_pid_or_no_live_process_is_absent(self):
+        from scad.live import ClaudeSession, pane_occupants
+        panes = [TmuxPane("main:1.0", "/x", "2.1.270")]
+        assert pane_occupants(panes, [ClaudeSession("S", 9, cwd="/x")], parents={9: 1}) == {}
+
+    def test_discovery_never_raises(self):
+        from scad.live import pane_occupants
+        with patch("scad.live.subprocess.run", side_effect=OSError("no ps")):
+            assert pane_occupants(self._panes(), []) == {}
+
+
+class TestOneSessionTwoRegistryFiles:
+    """A reattach leaves the first process's <pid>.json in place, both pids
+    alive. `/rename` writes into the newer file. Reported 2026-09-18: five
+    session ids on one machine had two live files each, and every consumer
+    that keyed a dict on session id kept the older name."""
+
+    def test_updated_at_is_read(self, tmp_path):
+        from scad.live import claude_live_sessions
+        write_entry(tmp_path, 100, updatedAt=1785307545649)
+        with patch("scad.live._process_start_times", return_value={100: START}), \
+             patch("scad.live._is_alive", return_value=True):
+            [s] = claude_live_sessions(tmp_path)
+        assert s.updated_at == 1785307545649
+
+    def test_newest_by_session_keeps_the_renamed_entry(self):
+        from scad.live import ClaudeSession, newest_by_session
+        old = ClaudeSession("S", 100, name="interview-prep-98", updated_at=1789711422078)
+        new = ClaudeSession("S", 200, name="intrvw-stories-3-branch-sep18", updated_at=1789711863973)
+        other = ClaudeSession("T", 300, name="t", updated_at=5)
+        for order in ((old, new, other), (new, old, other)):
+            by = newest_by_session(order)
+            assert by["S"].name == "intrvw-stories-3-branch-sep18"
+            assert by["T"] is other

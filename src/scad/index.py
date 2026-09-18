@@ -95,6 +95,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   source_size       INTEGER,
   parsed_offset     INTEGER NOT NULL DEFAULT 0,
   notes_offset      INTEGER NOT NULL DEFAULT 0,
+  notes_mtime       INTEGER,
   raw_present       INTEGER NOT NULL DEFAULT 1,
   extractor_version INTEGER NOT NULL DEFAULT 1
 );
@@ -140,6 +141,9 @@ CREATE INDEX IF NOT EXISTS idx_sessions_machine ON sessions(machine);
 CREATE INDEX IF NOT EXISTS idx_sessions_parent  ON sessions(parent_session_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_kind    ON sessions(kind);
 CREATE INDEX IF NOT EXISTS idx_turns_kind       ON turns(kind);
+-- "the last thing said across these ids" walks turns newest-first per
+-- session; without this it was a scan, and 85% of one consumer's cost.
+CREATE INDEX IF NOT EXISTS idx_turns_session_ts ON turns(session_id, ts);
 CREATE INDEX IF NOT EXISTS idx_sessions_outcome ON sessions(outcome);
 """
 
@@ -154,14 +158,18 @@ def index_path() -> Path:
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "sessions": {
         "name": "TEXT", "harness_state": "TEXT", "needs": "TEXT", "needs_detail": "TEXT",
+        # When the note file was last written, so an edit that leaves the size
+        # alone is still seen. NULL on an existing index reads as "never", and
+        # the next pass re-reads every note file once and stamps it.
+        "notes_mtime": "INTEGER",
     },
-    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass resumes from
-    # `notes_offset` — so on an index that already has rows, these stay NULL
-    # through any number of ordinary reindexes. Only re-reading the note files
-    # fills them: `scad reindex --rebuild`, or `DELETE FROM notes; UPDATE
-    # sessions SET notes_offset = 0;` followed by `scad reindex`. Both halves of
-    # that second recipe are needed — resetting the offset alone re-appends the
-    # same records under fresh idx values. Meanwhile queries read `kind` through
+    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass skips a
+    # file whose size and mtime it has seen — so on an index that already has
+    # rows, these stay NULL through any number of ordinary reindexes. Only
+    # re-reading the note files fills them: `scad reindex --rebuild`, or
+    # `UPDATE sessions SET notes_mtime = NULL;` followed by `scad reindex`,
+    # which re-reads every note file, finds the rows disagree with the lines,
+    # and replaces them. Meanwhile queries read `kind` through
     # COALESCE(kind,'info'), so an un-backfilled row answers as the default
     # rather than as nothing.
     "notes": {"kind": "TEXT", "project": "TEXT"},
@@ -185,6 +193,12 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     target.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(target)
     conn.row_factory = sqlite3.Row
+    # Other processes read this file while scad writes it. Under the default
+    # rollback journal a writer blocks every reader for the whole write, and
+    # one external view stalled 600s behind a reindex. WAL lets readers see
+    # the last committed state while the write is in progress. Persistent:
+    # set once in the file, honoured by every later connection.
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _migrate(conn)
     conn.execute(
@@ -548,13 +562,21 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
     stats = collections.Counter()
     session_id = path.stem
     row = session_row(conn, session_id)
-    size = path.stat().st_size
-    if row is not None and row["notes_offset"] >= size:
+    stat = path.stat()
+    size = stat.st_size
+    held = row["notes_offset"] if row is not None else 0
+    if row is not None and held >= size and int(stat.st_mtime) <= (row["notes_mtime"] or 0):
         return stats
 
-    start = row["notes_offset"] if row is not None else 0
+    # A note file is the one store a person edits by hand: the CLI warns
+    # about an unknown project and writes anyway, and the fix is to correct
+    # the line. Appending from the offset cannot see that. Notes are small,
+    # so a file that changed is read whole, and if the lines already indexed
+    # no longer say what the rows say, the rows are replaced from the file.
+    # The one case the offset rule still serves is the pure append, which
+    # stays an append so idx values are stable.
     try:
-        notes, end = read_notes(path, start)
+        notes, end = read_notes(path, 0)
     except Exception as exc:          # a note we cannot read must not stop the pass
         click.echo(f"[scad] skipped note {path.name}: {exc}")
         stats["skipped_files"] += 1
@@ -564,8 +586,19 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
         cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
         _ensure_note_session(conn, session_id, agent, cwd)
 
-    stats["notes"] += append_notes(conn, session_id, notes, str(path))
-    conn.execute("UPDATE sessions SET notes_offset = ? WHERE id = ?", (end, session_id))
+    stored = conn.execute(
+        "SELECT ts, topic, title, project, parent FROM notes WHERE session_id = ? "
+        "ORDER BY idx", (session_id,)).fetchall()
+    prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in notes[:len(stored)]]
+    if prefix == [tuple(r) for r in stored]:
+        new = notes[len(stored):]
+    else:
+        conn.execute("DELETE FROM notes WHERE session_id = ?", (session_id,))
+        stats["replaced"] += 1
+        new = notes
+    stats["notes"] += append_notes(conn, session_id, new, str(path))
+    conn.execute("UPDATE sessions SET notes_offset = ?, notes_mtime = ? WHERE id = ?",
+                 (end, int(stat.st_mtime), session_id))
     conn.commit()
     return stats
 
@@ -579,16 +612,24 @@ def _run_id_for(rel_parts: tuple) -> str | None:
     return rel_parts[1] if len(rel_parts) > 1 and rel_parts[0] == "runs" else None
 
 
-def _peek_session_id(conn, path: Path, *, kimi: bool = False) -> str | None:
+def _peek_session_id(conn, path: Path, *, label: str = "claude") -> str | None:
     """The row id a file maps to, without parsing it.
 
-    Identity is path-derived for Claude (see readers.identity_from_path) and for
-    kimi (readers.kimi_identity_from_path); codex rollouts key on session_meta,
-    so fall back to the archive path already stored.
+    Identity is path-derived for every family (readers.identity_from_path,
+    kimi_identity_from_path, codex_identity_from_path), and a fork stamp in
+    the filename is ignored, so the copies the archive keeps of one rewritten
+    source all resolve to one row. The stored archive path is consulted first
+    only because it is exact where a name is derived.
     """
-    from scad.readers import identity_from_path, kimi_identity_from_path
+    from scad.readers import (codex_identity_from_path, identity_from_path,
+                              kimi_identity_from_path)
 
-    ident = kimi_identity_from_path(path) if kimi else identity_from_path(path)
+    if label == "kimi":
+        ident = kimi_identity_from_path(path)
+    elif label == "codex":
+        ident = codex_identity_from_path(path)
+    else:
+        ident = identity_from_path(path)
     if ident["kind"] != "main":
         return ident["id"]
     row = conn.execute(
@@ -596,14 +637,37 @@ def _peek_session_id(conn, path: Path, *, kimi: bool = False) -> str | None:
     return row["id"] if row else ident["id"]
 
 
+def _fork_of(path: Path, held: str | None) -> int | None:
+    """How `path` relates to the file a row already holds, if they are copies
+    of one source: negative for older, positive for newer, None if unrelated.
+
+    Two files are copies of one source when they sit in the same directory
+    with the same stem once the fork stamp is removed. A skeleton row whose
+    archive path is `history.jsonl` is unrelated to the transcript that later
+    arrives for it, and must keep being upgraded by it.
+    """
+    from scad.readers import fork_order, unforked_stem
+
+    if not held:
+        return None
+    other = Path(held)
+    if other == path:
+        return 0
+    if other.parent != path.parent or unforked_stem(other) != unforked_stem(path):
+        return None
+    return fork_order(path) - fork_order(other)
+
+
 def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
             archive_first: bool = False) -> dict[str, int]:
     """Scan the archive into the index.
 
     Incremental by default: a file whose size already equals the session's
-    parsed_offset is skipped without being opened. Never deletes; `rebuild`
-    is the only destructive path and it refuses when any session's raw is gone,
-    because those turns cannot be re-derived from anything.
+    parsed_offset is skipped without being opened. Never deletes, with one
+    exception: a session whose source was rewritten (the archive holds a newer
+    fork of its file) has its turns replaced from the fork. `rebuild` is the
+    only whole-index destructive path and it refuses when any session's raw is
+    gone, because those turns cannot be re-derived from anything.
     """
     conn = conn or connect()
 
@@ -687,11 +751,23 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
 
         # Incremental: resolve the row this file maps to without parsing it, and
         # skip entirely when nothing has been appended since the last pass.
-        probe_id = _peek_session_id(conn, path, kimi=kimi)
+        probe_id = _peek_session_id(conn, path, label=rel[0])
         row = session_row(conn, probe_id) if probe_id else None
-        if row is not None and row["parsed_offset"] >= stat.st_size:
+
+        # A source that was rewritten rather than appended to is archived as a
+        # fork beside the original (archive._fork). Both copies name one
+        # session. The older copy is skipped without being opened; a newer one
+        # replaces the row's turns, because the text they came from no longer
+        # exists at the source. Without this, each copy in turn was parsed
+        # from zero and appended, and a pass over 133 forked rollouts added
+        # 6,320 duplicate turns every time it ran.
+        fork = _fork_of(path, row["archive_path"]) if row is not None else None
+        if fork is not None and fork < 0:
             continue
-        start = row["parsed_offset"] if row is not None else 0
+        replace = fork is not None and fork > 0
+        if not replace and row is not None and row["parsed_offset"] >= stat.st_size:
+            continue
+        start = 0 if replace else (row["parsed_offset"] if row is not None else 0)
 
         try:
             session, turns, end = reader(path, start)
@@ -734,7 +810,14 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
         )
         if not existed:
             stats["sessions"] += 1
-        stats["turns"] += append_turns(conn, session.id, turns)
+        if replace:
+            # The one delete outside --rebuild, and for the same reason
+            # rebuild exists: the derivation changed, for this session only.
+            conn.execute("DELETE FROM turns WHERE session_id = ?", (session.id,))
+            stats["replaced"] += 1
+            append_turns(conn, session.id, turns)
+        else:
+            stats["turns"] += append_turns(conn, session.id, turns)
         stats["files"] += 1
 
     # Second pass, once every row the scan will create exists.

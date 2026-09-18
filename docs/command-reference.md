@@ -97,6 +97,7 @@ No containers here. These start an agent in a **tmux pane on this machine** and 
 | Command | Does | When / conditions |
 |---|---|---|
 | `session launch --agent claude\|codex\|kimi` | start the agent in tmux, resolve its session id, write a launch record | Handing a piece of work to an agent — possibly a different family from the one you are talking to. `--cwd` (default: here), `--prompt` for the first turn, `--attach` to go in at the end. Detached otherwise. |
+| `session send <id> TEXT` / `--file PATH` | paste a later turn into the session's open pane and submit it | A follow-up to a session you launched. Refuses a closed session (use `resume`) and a pane at a dialog. |
 | `session resume <id>` | attach if the session is open, otherwise `exec` the agent with the cwd set | Getting back into any indexed session, launched by scad or not. `--print` emits the command instead — this is what the viewer copies. |
 
 Notes that matter:
@@ -105,6 +106,7 @@ Notes that matter:
 - **The id comes from a different place per family** — minted for claude, read back off its own index line for kimi, read off the rollout the first turn creates for codex. Codex is therefore the only one that must be sent a turn to exist at all; with no `--prompt` that turn is a fixed string that tells it to do nothing.
 - **Codex's update and trust gates are answered by label, never by Enter.** The update gate's highlighted default runs `curl … | sh`. A gate scad does not recognise is reported, not answered.
 - **An unresolved id is not a failed launch.** The pane is live and the session is real; the record says `provenance: unresolved` and the command exits non-zero so nothing downstream treats a missing id as a session.
+- **Resume is for closed sessions.** `session resume` attaches to an open one because a second `claude --resume` on a live id writes a fork into the transcript, and later resumes follow the fork until the original exits. `--print` skips that guard by design; do not run the printed command against a session that is still open.
 - **`project` is checked before launching.** An `unfiled` target warns and names the `.scad-project` fix, and launches anyway.
 
 Verified by hand rather than in CI — see [`interactive-launch-verification.md`](interactive-launch-verification.md).

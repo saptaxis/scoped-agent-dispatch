@@ -829,6 +829,8 @@ class TestSendToJob:
 
 
 class TestSessionSendCLI:
+    # `scad run send`, the container turn. `session send` is the host-session
+    # turn since 2026-09-18 and is no longer an alias of this.
     """Tests for session send CLI command."""
 
     @patch("scad.cli.validate_run_id")
@@ -837,7 +839,7 @@ class TestSessionSendCLI:
         """session send passes text to send_to_job."""
         runner = CliRunner()
         result = runner.invoke(main, [
-            "session", "send", "test-run", "summarize what you did",
+            "run", "send", "test-run", "summarize what you did",
         ])
         assert result.exit_code == 0
         mock_send.assert_called_once_with("test-run", "summarize what you did", job_id=None)
@@ -848,7 +850,7 @@ class TestSessionSendCLI:
         """session send --job targets specific job."""
         runner = CliRunner()
         result = runner.invoke(main, [
-            "session", "send", "test-run",
+            "run", "send", "test-run",
             "--job", "test-run-job-002",
             "do something",
         ])
@@ -862,7 +864,7 @@ class TestSessionSendCLI:
         mock_send.side_effect = RuntimeError("No interactive jobs")
         runner = CliRunner()
         result = runner.invoke(main, [
-            "session", "send", "test-run", "hello",
+            "run", "send", "test-run", "hello",
         ])
         assert result.exit_code != 0
         assert "No interactive" in result.output
