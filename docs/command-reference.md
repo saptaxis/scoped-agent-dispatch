@@ -97,6 +97,7 @@ No containers here. These start an agent in a **tmux pane on this machine** and 
 | Command | Does | When / conditions |
 |---|---|---|
 | `session launch --agent claude\|codex\|kimi` | start the agent in tmux, resolve its session id, write a launch record | Handing a piece of work to an agent — possibly a different family from the one you are talking to. `--cwd` (default: here), `--prompt` for the first turn, `--attach` to go in at the end. Detached otherwise. |
+| `session send <id> TEXT` / `--file PATH` | paste a later turn into the session's open pane and submit it | A follow-up to a session you launched. Refuses a closed session (use `resume`) and a pane at a dialog. |
 | `session resume <id>` | attach if the session is open, otherwise `exec` the agent with the cwd set | Getting back into any indexed session, launched by scad or not. `--print` emits the command instead — this is what the viewer copies. |
 
 Notes that matter:

@@ -148,6 +148,7 @@ scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
 scad session launch --agent claude --cwd . --json    # the launch record, for scripts
 scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
 scad session resume <id>                             # attach if open, resume if closed
+scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command
 ```
 
@@ -165,6 +166,12 @@ Launching goes through tmux for all three. tmux supplies the pty that keeps a
 Claude session stamped `entrypoint: cli` rather than `sdk-cli`, which is what
 keeps it in Claude's own `/resume` picker. A non-pty launch produces a session the
 picker hides, so a missing tmux refuses rather than degrading.
+
+A later turn goes in with `session send`. The text is delivered as one bracketed
+paste and then submitted, the way the first turn is; `tmux send-keys` of a long
+string is not that, and was measured to lose the head of a 1,400-character turn.
+`send` refuses a session that has closed, naming the resume command, and a pane
+sitting at a dialog.
 
 `session resume` attaches when the session is still open and only runs the agent's
 own resume when it has closed. That distinction is not cosmetic. A second `claude

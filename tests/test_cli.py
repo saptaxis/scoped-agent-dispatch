@@ -1947,12 +1947,14 @@ class TestRunSessionSplit:
     group was misnamed, which is what made this mechanical.
     """
 
+    # `send` is not here: `session send` is now the host-session turn
+    # (2026-09-18), so the old container alias would shadow a real verb.
     CONTAINER_VERBS = ("start", "stop", "clean", "attach", "info",
-                       "inject", "jobs", "logs", "send", "refresh")
+                       "inject", "jobs", "logs", "refresh")
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "note", "notes")
+    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "note", "notes")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -3847,3 +3849,26 @@ class TestSessionNotesCurrent:
         result = runner.invoke(main, ["session", "notes"])
         assert result.exit_code != 0
         assert "--current" in result.output
+
+
+class TestSessionSend:
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+    def test_text_or_file_reaches_send_turn(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        calls = []
+        monkeypatch.setattr("scad.cli.send_turn", lambda sid, text: (
+            calls.append((sid, text)) or {"session_id": sid, "tmux": "t:0.0", "bytes": len(text)}))
+        r = runner.invoke(main, ["session", "send", "S1", "do it"])
+        assert r.exit_code == 0, r.output and "t:0.0" in r.output
+        f = tmp_path / "p.md"; f.write_text("a long\nprompt")
+        r = runner.invoke(main, ["session", "send", "S1", "--file", str(f), "--json"])
+        assert r.exit_code == 0, r.output
+        assert json.loads(r.stdout)["bytes"] == 13
+        assert calls == [("S1", "do it"), ("S1", "a long\nprompt")]
+
+    def test_exactly_one_of_text_or_file(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        assert runner.invoke(main, ["session", "send", "S1"]).exit_code != 0

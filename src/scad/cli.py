@@ -100,6 +100,7 @@ from scad.launch import (
     AGENTS,
     LaunchError,
     launch as launch_agent,
+    send_turn,
     read_record,
     record_path,
 )
@@ -2527,6 +2528,33 @@ def _resolve_note_path(session_id: str, agent: str):
     return path                       # unchanged, so the error still names the shard asked for
 
 
+@session.command("send")
+@click.argument("session_id")
+@click.argument("text", required=False)
+@click.option("--file", "path", default=None, type=click.Path(exists=True, dir_okay=False),
+              help="Read the turn from this file instead of the argument.")
+@click.option("--json", "as_json", is_flag=True, help="Emit {session_id, tmux, bytes}.")
+def session_send_turn(session_id, text, path, as_json):
+    """Send a later turn to an open session scad launched.
+
+    The text goes into the session's pane as one bracketed paste and is then
+    submitted, the way the first turn is. Raw `tmux send-keys` is not that:
+    a long turn sent that way arrives with its head missing.
+    """
+    if bool(text) == bool(path):
+        raise click.ClickException("Pass exactly one of TEXT or --file PATH.")
+    if path:
+        text = Path(path).read_text()
+    try:
+        result = send_turn(session_id, text)
+    except LaunchError as exc:
+        raise click.ClickException(str(exc)) from exc
+    if as_json:
+        click.echo(json.dumps(result))
+        return
+    click.echo(f"[scad] sent {result['bytes']} bytes to {result['tmux']} ({session_id})")
+
+
 @session.command("notes")
 @click.argument("session_id", required=False)
 @click.option("--current", is_flag=True,
@@ -2895,8 +2923,10 @@ def _hidden_alias(group, command, name=None):
     return alias
 
 
+# `send` is not aliased: `session send` is the host-session turn now, and
+# `run send` keeps the container meaning.
 for _verb in ("start", "stop", "clean", "attach", "info",
-              "inject", "jobs", "logs", "send", "refresh"):
+              "inject", "jobs", "logs", "refresh"):
     _hidden_alias(session, run.commands[_verb])
 
 _hidden_alias(main, run.commands["ls"], "status")

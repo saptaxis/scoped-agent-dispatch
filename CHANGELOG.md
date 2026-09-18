@@ -17,6 +17,13 @@ the wrong command for the moment it was printed.
   clipped to 240 characters) and `live` (pid, name, status from Claude's process registry, or
   null). Filed by orglens as the five query shapes it ran against `~/.scad/index.sqlite`.
 - `session ls --parent <id>`: a session's subagents and workflow agents.
+- `session send <id> TEXT | --file PATH`: a later turn into an open session scad launched. The
+  text goes into the session's pane as one bracketed paste (`tmux load-buffer` then
+  `paste-buffer -p`), the echo is waited for, then it is submitted. Measured 2026-09-18: raw
+  `tmux send-keys` of a 1,442-character turn lost its first ~200 characters in the Claude Code
+  TUI; the paste delivered 7,806 bytes over 62 lines verbatim. A closed session is refused with
+  the resume command; a pane at a dialog is refused unanswered. `session launch --prompt` now
+  uses the same transport. Codex and kimi panes are untested with it.
 - `session launch --add-dir PATH`, repeatable. Claude-only, and refused rather than dropped for
   codex and kimi. Recorded in the launch record as `add_dirs`.
 - `session notes --current`, resolved the same way `session note --current` writes.
@@ -29,6 +36,8 @@ the wrong command for the moment it was printed.
 
 ### Changed
 
+- `scad session send` is the host-session turn. It was a hidden alias of `scad run send`, the
+  container turn, from the v2.1 rename; `run send` is unchanged.
 - The index opens in WAL mode. A reader in another process is no longer blocked for the whole
   of a reindex; one external view had stalled 600s behind one.
 
