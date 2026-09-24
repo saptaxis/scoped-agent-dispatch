@@ -108,6 +108,8 @@ from scad.live import (
     attach_argv,
     claude_live_sessions,
     newest_by_session,
+    other_holders,
+    pid_panes,
     find_pane,
     running_run_ids,
     tmux_panes,
@@ -2102,7 +2104,13 @@ def _session_export(conn, rows) -> list[dict]:
     includes every codex and kimi session; the registry is Claude's.
     """
     out = []
-    live = newest_by_session(claude_live_sessions())
+    all_live = claude_live_sessions()
+    live = newest_by_session(all_live)
+    # A doubly-held id is the norm rather than the exception here, and until
+    # this nothing said so: a reattach leaves the first process alive holding
+    # the same session, with context as old as the reattach.
+    others = other_holders(all_live)
+    panes = pid_panes(tmux_panes(), [s.pid for held in others.values() for s in held])
     for r in rows:
         row = dict(r)
         last = conn.execute(
@@ -2113,7 +2121,11 @@ def _session_export(conn, rows) -> list[dict]:
         row["last_turn"] = dict(last) if last else None
         s = live.get(row["id"])
         row["live"] = ({"pid": s.pid, "name": s.name, "status": s.status,
-                        "waiting_for": s.waiting_for} if s else None)
+                        "waiting_for": s.waiting_for,
+                        "also_held_by": [{"pid": h.pid, "name": h.name,
+                                          "pane": panes.get(h.pid)}
+                                         for h in others.get(row["id"], ())]}
+                       if s else None)
         out.append(row)
     return out
 

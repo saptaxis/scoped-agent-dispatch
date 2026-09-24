@@ -542,6 +542,54 @@ def _process_parents() -> dict[int, int]:
     return parents
 
 
+def pid_panes(panes: list[TmuxPane], pids, parents: dict[int, int] | None = None) -> dict[int, str]:
+    """Which pane each pid is running in: pid -> pane target.
+
+    A proof, not a guess. tmux names a pane by the pid of its shell and the
+    agent is a descendant of it, so walking up from a known pid says exactly
+    where that process sits. Pids whose tree reaches no pane are absent.
+
+    One `ps` for the whole machine, shared by every caller in a pass.
+    """
+    pids = [p for p in pids if p]
+    if not panes or not pids:
+        return {}
+    if parents is None:
+        parents = _process_parents()
+    if not parents:
+        return {}
+    by_shell = {pane.pid: pane.target for pane in panes if pane.pid}
+    found: dict[int, str] = {}
+    for pid in pids:
+        cursor, hops = parents.get(pid), 0
+        # Shallow in practice: shell -> agent, sometimes one re-exec deeper.
+        while cursor and hops < 16:
+            if cursor in by_shell:
+                found[pid] = by_shell[cursor]
+                break
+            cursor = parents.get(cursor)
+            hops += 1
+    return found
+
+
+def other_holders(sessions: list[ClaudeSession]) -> dict[str, list[ClaudeSession]]:
+    """Per session id, every live holder except the newest, oldest first.
+
+    A reattach leaves the first process's registry file in place with both pids
+    alive, so one id routinely has two. The newest is the one a `/rename` and a
+    status change land in, and `newest_by_session` reports it; these are the
+    rest. They are not harmless: the stale holder keeps old context, and typing
+    into its pane is what makes a transcript diverge.
+
+    Only ids with more than one holder appear.
+    """
+    by_id: dict[str, list[ClaudeSession]] = {}
+    for s in sessions:
+        by_id.setdefault(s.session_id, []).append(s)
+    return {sid: sorted(held, key=lambda s: s.updated_at)[:-1]
+            for sid, held in by_id.items() if len(held) > 1}
+
+
 def pane_occupants(panes: list[TmuxPane], sessions: list[ClaudeSession],
                    parents: dict[int, int] | None = None) -> dict[str, ClaudeSession]:
     """Which live claude session is inside which pane: pane target -> session.
@@ -556,27 +604,11 @@ def pane_occupants(panes: list[TmuxPane], sessions: list[ClaudeSession],
     a tmux that could not say) or whose tree holds no registered pid is absent
     from the result rather than guessed at.
     """
-    if not panes or not sessions:
+    if not sessions:
         return {}
-    if parents is None:
-        parents = _process_parents()
-    if not parents:
-        return {}
+    agent_panes_ = [p for p in panes if is_agent_command(p.command)]
     by_pid = {s.pid: s for s in sessions}
     found: dict[str, ClaudeSession] = {}
-    for pane in panes:
-        if not pane.pid or not is_agent_command(pane.command):
-            continue
-        # Walk up from each registered pid; the first pane whose shell we hit
-        # owns it. Cheaper than enumerating every pane's descendants, and the
-        # tree is shallow: shell -> claude, sometimes one re-exec deeper.
-        for pid, session in by_pid.items():
-            cursor = parents.get(pid)
-            hops = 0
-            while cursor and hops < 16:
-                if cursor == pane.pid:
-                    found.setdefault(pane.target, session)
-                    break
-                cursor = parents.get(cursor)
-                hops += 1
+    for pid, target in pid_panes(agent_panes_, by_pid, parents).items():
+        found.setdefault(target, by_pid[pid])
     return found

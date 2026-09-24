@@ -606,6 +606,16 @@ class TestOneSessionTwoRegistryFiles:
             [s] = claude_live_sessions(tmp_path)
         assert s.updated_at == 1785307545649
 
+    def test_pid_panes_names_the_pane_each_holder_sits_in(self):
+        """Which pane a given process is in, exactly, by process tree. A
+        doubly-held session has one holder per pane and the human needs to be
+        told which one is which."""
+        from scad.live import pid_panes
+        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", pid=100),
+                 TmuxPane("main:5.1", "/docs", "2.1.270", pid=200)]
+        found = pid_panes(panes, [150, 250, 999], parents={150: 100, 250: 200, 999: 1})
+        assert found == {150: "main:5.0", 250: "main:5.1"}
+
     def test_newest_by_session_keeps_the_renamed_entry(self):
         from scad.live import ClaudeSession, newest_by_session
         old = ClaudeSession("S", 100, name="interview-prep-98", updated_at=1789711422078)
@@ -615,3 +625,19 @@ class TestOneSessionTwoRegistryFiles:
             by = newest_by_session(order)
             assert by["S"].name == "intrvw-stories-3-branch-sep18"
             assert by["T"] is other
+
+
+class TestOtherHolders:
+    def test_it_names_every_holder_but_the_newest(self):
+        from scad.live import ClaudeSession, other_holders
+        old = ClaudeSession("S", 100, name="stale", updated_at=10)
+        new = ClaudeSession("S", 200, name="current", updated_at=20)
+        alone = ClaudeSession("T", 300, name="t", updated_at=5)
+        got = other_holders([new, old, alone])
+        assert list(got) == ["S"]
+        assert [h.pid for h in got["S"]] == [100]
+
+    def test_three_holders_are_all_named_oldest_first(self):
+        from scad.live import ClaudeSession, other_holders
+        s = [ClaudeSession("S", p, updated_at=t) for p, t in ((100, 10), (200, 30), (300, 20))]
+        assert [h.pid for h in other_holders(s)["S"]] == [100, 300]

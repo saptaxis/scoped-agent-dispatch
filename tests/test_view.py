@@ -1474,3 +1474,43 @@ class TestAContainerSessionCannotBeResumedOnTheHost:
 
         host = {"id": "H1", "agent": "claude", "kind": "main", "cwd": "/repo"}
         assert resume_command(host) == "cd /repo && claude --resume H1"
+
+
+class TestOneRowPerOpenSession:
+    """Measured 2026-09-24: `open_now_rows` returned 19 rows for 14 distinct
+    sessions, so five sessions appeared twice on the page. A session is one
+    row; the extra processes holding its id belong on that row."""
+
+    def _held(self):
+        from scad.live import ClaudeSession
+        return [ClaudeSession("S", 200, cwd="/docs", name="current", updated_at=20,
+                              started_at=2000),
+                ClaudeSession("S", 100, cwd="/docs", name="stale", updated_at=10,
+                              started_at=1000),
+                ClaudeSession("T", 300, cwd="/other", name="t", updated_at=5,
+                              started_at=500)]
+
+    def test_a_doubly_held_session_gets_one_row(self, monkeypatch):
+        from scad.view import open_now_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = open_now_rows(self._held(), [], [], set())
+        assert [r["id"] for r in rows] == ["S", "T"]
+        assert rows[0]["pid"] == 200 and rows[0]["name"] == "current"
+
+    def test_the_other_holders_are_on_the_row_with_their_pane(self, monkeypatch):
+        from scad.live import TmuxPane
+        from scad.view import open_now_rows
+        panes = [TmuxPane("scad-cl-1128:0.0", "/docs", "2.1.270", pid=90)]
+        monkeypatch.setattr("scad.live._process_parents", lambda: {100: 90})
+        rows = open_now_rows(self._held(), [], panes, set())
+        assert rows[0]["also_held_by"] == [
+            {"pid": 100, "name": "stale", "pane": "scad-cl-1128:0.0"}]
+        assert rows[1]["also_held_by"] == []
+
+    def test_the_page_says_a_session_is_held_twice(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        from scad.view import gather, render
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        conn = connect(tmp_path / "i.sqlite")
+        html = render(gather(conn, [], set(), live_sessions=self._held()))
+        assert "also open" in html

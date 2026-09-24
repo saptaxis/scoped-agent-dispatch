@@ -24,7 +24,10 @@ from scad.live import (
     claude_live_sessions,
     container_live_sessions,
     is_agent_command,
+    newest_by_session,
+    other_holders,
     pane_occupants,
+    pid_panes,
 )
 
 _RESUME = {"claude": "claude --resume {id}",
@@ -498,8 +501,18 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
     for it, and it keeps a brand-new session near the top where it belongs.
     """
     by_id = {row["id"]: row for row in indexed}
+    # One row per SESSION, not per process. A reattach leaves the first
+    # process's registry file in place with both pids alive, so iterating the
+    # registry rendered a doubly-held session twice: 19 rows for 14 sessions on
+    # this machine, five of them duplicates. The newest holder is the one whose
+    # name and status are current; the others are named on its row, because a
+    # stale holder with old context is the thing that diverges a transcript.
+    others = other_holders(sessions)
+    holder_panes = pid_panes(
+        [p for p in panes if is_agent_command(p.command)],
+        [h.pid for held in others.values() for h in held])
     rows = []
-    for session in sessions:
+    for session in newest_by_session(sessions).values():
         known = by_id.get(session.session_id)
         base = known or {}
         row = {
@@ -527,6 +540,9 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
             "outcome": base.get("outcome"),
             "scad_run_id": base.get("scad_run_id"),
             "indexed": known is not None,
+            "also_held_by": [{"pid": h.pid, "name": h.name,
+                              "pane": holder_panes.get(h.pid)}
+                             for h in others.get(session.session_id, ())],
         }
         re_ = reentry_for(row, panes, running)
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
@@ -874,7 +890,8 @@ _PAGE = """<!doctype html>
  .flabel {{ font-size: var(--label); letter-spacing: .09em; text-transform: uppercase;
             color: var(--faint); }}
  .facet input {{ width: 100%; margin: 0; }}
- .tabs, .agents {{ display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; }}
+ .warn {{ color: var(--warn, #b45309); }}
+.tabs, .agents {{ display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; }}
  /* Only shown once something is filtered: the seam to a server-run query. */
  .summary {{ margin-top: var(--s3); font-size: .74rem; color: var(--dim);
              display: flex; gap: var(--s2); align-items: baseline; }}
@@ -1039,6 +1056,16 @@ function ctxFold(r) {{
   return '<details class="ctx"><summary>' + blocks + '</summary></details>';
 }}
 
+// A second process on one session id, which a reattach leaves behind. Said on
+// the row because the stale holder keeps old context and typing into its pane
+// is what makes a transcript diverge — and until this, nothing reported it.
+function heldTwice(r) {{
+  var held = r.also_held_by || [];
+  if (!held.length) return '';
+  return ' · <span class="warn">also open: ' + held.map(h =>
+    esc(h.pane || ('pid ' + h.pid))).join(', ') + '</span>';
+}}
+
 function rows(list) {{
   if (!list.length) return '<div class="empty">' +
     (scopeLabel() ? 'No sessions for ' + esc(scopeLabel()) + '.' : 'Nothing here.') + '</div>';
@@ -1049,7 +1076,8 @@ function rows(list) {{
     '<div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
-    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') + '</div>' +
+    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
+    heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
     esc(r.reentry.command) + '" title="' + esc(r.reentry.command) +
     '" onclick="copy(this)">\u29c9 resume</button>' : '') + '</div></div>' +

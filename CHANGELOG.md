@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `scad view` showed a session once per process holding it, so five sessions appeared twice in
+  "Open now" (19 rows for 14 sessions, measured 2026-09-24). One row per session now, with the
+  other holders named on it.
+- `session ls --json` `live` gains `also_held_by`: the other live processes on that session id,
+  each with the pane it sits in. Six ids were doubly held on this machine and nothing said so.
+
 ## [0.5.0] — 2026-09-18
 
 **The release where scad's index became an interface rather than a file.** 0.4.0 added the read
