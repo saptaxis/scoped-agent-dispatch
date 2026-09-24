@@ -156,6 +156,12 @@ def _day_ms(day: str) -> int:
         raise click.ClickException(f"Invalid date {day!r}; expected YYYY-MM-DD.")
 
 
+def _epoch_ms(value) -> int | None:
+    """The launch record's ISO timestamp as epoch ms, or None."""
+    from scad.readers import _epoch_ms as parse
+    return parse(value)
+
+
 def _fmt_ms(ms) -> str | None:
     """Epoch MILLISECONDS -> a readable local stamp.
 
@@ -2198,11 +2204,17 @@ def _exec(argv: list[str]) -> None:
 @click.option("--prompt", default=None, help="The session's first turn.")
 @click.option("--add-dir", "add_dirs", multiple=True, type=click.Path(),
               help="A directory the session may also work in (claude only; repeatable).")
+@click.option("--name", default=None,
+              help="The session's display name, shown in listings and, for claude, in its "
+                   "own prompt box and /resume picker.")
+@click.option("--window", default=None, is_flag=False, flag_value="",
+              help="Land the agent as a named window in this tmux session instead of a "
+                   "detached one. Bare --window names it after the directory.")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, name, window, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the pane and the way back in, and leaves your
@@ -2241,6 +2253,7 @@ def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
 
     try:
         record = launch_agent(agent, target_cwd, prompt=prompt, add_dirs=list(add_dirs),
+                              name=name, window=window,
                               say=lambda msg: note(f"[scad] {msg}"))
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc
@@ -2268,8 +2281,14 @@ def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
         # and upgrades this one, exactly as history.jsonl skeletons have always
         # been upgraded. Never fatal; the launch succeeded either way.
         try:
+            # The launch time matters more than it looks: `session ls` orders
+            # by `started DESC`, and without it every launch-seeded row sorted
+            # to the bottom of the listing — the session started ten seconds
+            # ago, hardest of all to find.
             ensure_launched_session(
-                index_connect(), record["session_id"], agent, str(target_cwd))
+                index_connect(), record["session_id"], agent, str(target_cwd),
+                started_ms=_epoch_ms(record.get("started")),
+                name=record.get("name"))
         except Exception as exc:
             click.echo(f"[scad] launched, but not recorded in the index "
                        f"({exc}); run: scad reindex", err=True)

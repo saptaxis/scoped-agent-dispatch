@@ -7,12 +7,20 @@ No container. This is independent of `scad dispatch`, which is the same idea
 with isolation and a config.
 
 ```bash
-scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]... [--attach]
+scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]...
+                   [--window [NAME]] [--name NAME] [--attach]
 scad session resume <session-id> [--print]
 scad session send <session-id> TEXT | --file PATH
 ```
 
-`launch` is detached by default: it starts the agent in tmux, prints the
+`launch` opens its own detached tmux session by default. **`--window [NAME]`
+puts it in the caller's tmux session as a named window instead**, and the
+recorded target becomes e.g. `main:7.0`; bare `--window` names it after the
+directory. Prefer it: a launch the human cannot see is one they re-enter by
+hand with `claude` + `/resume`, which is a second process on one session id.
+`--name NAME` sets the display name — in the index row at launch, and for
+claude also `claude -n`, which shows it in the prompt box and the `/resume`
+picker. It starts the agent in tmux, prints the
 pane and `scad session resume <id>`, and exits. `--attach` opts into
 attaching. `--add-dir` is Claude-only and repeatable; it is refused, not
 dropped, for the other two.

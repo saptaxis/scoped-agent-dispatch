@@ -2,11 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- `session launch --window [NAME]`: land the agent as a named window in the caller's tmux
+  session instead of a detached `scad-cl-HHMM` sibling. `NAME` defaults to the cwd basename.
+  Outside tmux, unchanged. The launch record's target becomes e.g. `main:7.0`.
+- `session launch --name NAME`: the session's display name, passed to `claude -n` and written
+  into the index row at launch, so a listing can tell several sessions apart before any of them
+  has taken a turn. Recorded for codex and kimi too, which have no flag of their own.
+
 ### Fixed
 
 - `scad view` showed a session once per process holding it, so five sessions appeared twice in
   "Open now" (19 rows for 14 sessions, measured 2026-09-24). One row per session now, with the
   other holders named on it.
+- A launch-seeded index row carries the launch time. `session ls` orders by `started DESC` and
+  every one of these rows had it NULL, so the session you started ten seconds ago sorted to the
+  bottom of the listing.
 - `session ls --json` `live` gains `also_held_by`: the other live processes on that session id,
   each with the pane it sits in. Six ids were doubly held on this machine and nothing said so.
 

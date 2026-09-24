@@ -479,7 +479,8 @@ def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> 
 
 
 def ensure_launched_session(
-    conn, session_id: str, agent: str, cwd: str | None, started_ms: int | None = None
+    conn, session_id: str, agent: str, cwd: str | None, started_ms: int | None = None,
+    name: str | None = None,
 ) -> bool:
     """Record a session at the moment scad launches it. Returns True if inserted.
 
@@ -501,6 +502,14 @@ def ensure_launched_session(
     records in one repo came to be labelled with another. The cwd named at
     launch is the intended one, so seeding it here pins the right answer.
 
+    `name` is the launch label, and it belongs on the row from this moment for
+    the reason the flag exists: a listing has to tell several sessions apart
+    before any of them has taken a turn, and the transcript that would supply
+    a name does not exist yet. It shares the column with `/rename` because they
+    are the same kind of fact — the human's own label — and the upsert reads
+    `name = COALESCE(excluded.name, sessions.name)`, so a later rename wins and
+    a quiet append never blanks it.
+
     `raw_present=1` for the same reason the note row uses it: a 0 makes
     `--rebuild` refuse forever over a row with nothing to lose. On a rebuild
     this row is dropped and re-derived from the trace; if the agent died before
@@ -512,11 +521,11 @@ def ensure_launched_session(
         """
         INSERT INTO sessions (
             id, kind, agent, machine, cwd, project, grade, source,
-            started, parsed_offset, raw_present, extractor_version
-        ) VALUES (?,?,?,?,?,?,?,?,?,0,1,?)
+            started, name, parsed_offset, raw_present, extractor_version
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,0,1,?)
         """,
         (session_id, KIND_MAIN, agent, platform.node(), cwd,
-         resolve_project(cwd), GRADE_SKELETON, SOURCE_LAUNCH, started_ms,
+         resolve_project(cwd), GRADE_SKELETON, SOURCE_LAUNCH, started_ms, name,
          EXTRACTOR_VERSION),
     )
     conn.commit()

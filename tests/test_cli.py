@@ -3896,3 +3896,55 @@ class TestSessionSend:
     def test_exactly_one_of_text_or_file(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         assert runner.invoke(main, ["session", "send", "S1"]).exit_code != 0
+
+
+class TestLaunchName:
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+    def _fake(self, monkeypatch, **overrides):
+        calls = []
+
+        def fake_launch(agent, cwd, **kw):
+            calls.append({"agent": agent, "cwd": str(cwd), **kw})
+            return {"agent": agent, "session_id": "S1", "cwd": str(cwd),
+                    "tmux": "scad-cl-1430:0.0", "started": "2026-09-24T14:30:00Z",
+                    "resume": "claude --resume S1", "provenance": "minted",
+                    "name": kw.get("name"), **overrides}
+
+        monkeypatch.setattr("scad.cli.launch_agent", fake_launch)
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+        return calls
+
+    def test_the_name_reaches_the_launcher_and_the_index_row(self, runner, tmp_path, monkeypatch):
+        """The point of the flag is a listing you can read: the name has to be
+        on the row at launch, not after a first turn and an index pass."""
+        from scad.index import connect, session_row
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        r = runner.invoke(main, ["session", "launch", "--agent", "claude",
+                                 "--cwd", str(tmp_path), "--name", "triage-loop"])
+        assert r.exit_code == 0, r.output
+        assert calls[0]["name"] == "triage-loop"
+        assert session_row(connect(), "S1")["name"] == "triage-loop"
+
+    def test_the_row_carries_the_launch_time_so_it_sorts_to_the_top(self, runner, tmp_path, monkeypatch):
+        """`session ls` orders by `started DESC`. Every launch-seeded row on
+        this machine had `started` NULL (measured 2026-09-24), so a session you
+        had just started sorted to the bottom of the listing — which is where
+        you are least likely to look for it, and the reason --name exists."""
+        from scad.index import connect, session_row
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude",
+                             "--cwd", str(tmp_path), "--name", "x"])
+        # 2026-09-24T14:30:00Z, as the fake record states it
+        assert session_row(connect(), "S1")["started"] == 1790260200000
+
+    def test_a_launch_without_a_name_leaves_the_column_alone(self, runner, tmp_path, monkeypatch):
+        from scad.index import connect, session_row
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude", "--cwd", str(tmp_path)])
+        assert session_row(connect(), "S1")["name"] is None

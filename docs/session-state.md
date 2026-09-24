@@ -92,7 +92,10 @@ carry `tags` and `entities` themselves, so a consumer can do the match from one
 plain export instead.
 
 `live` is the newest registry entry for the session, by `updatedAt`; a reattach
-can leave two entries for one id, and a `/rename` lands in the newer.
+can leave two entries for one id, and a `/rename` lands in the newer. The others
+are listed in `live.also_held_by`, each with the pane it sits in, because a
+stale holder keeps the context it had when it was left and typing into it is
+what makes a transcript diverge.
 
 The index is in WAL mode, so a reader is not blocked while a reindex writes.
 
@@ -147,6 +150,7 @@ is unavailable.
 scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
 scad session launch --agent claude --cwd . --json    # the launch record, for scripts
 scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
+scad session launch --agent claude --window triage --name "triage loop"   # a window here, named
 scad session resume <id>                             # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command
@@ -161,6 +165,20 @@ expose that differently:
 | claude | minted by scad and passed in with `--session-id` |
 | kimi | its own index line at TUI start, confirmed against the working directory |
 | codex | the rollout its first turn creates, so a turn is sent to get one |
+
+By default a launch opens its own detached tmux session, `scad-cl-HHMM`. `--window
+[NAME]` puts it in the tmux session you are already in, as a named window, and
+the launch record's target becomes e.g. `main:7.0`; with no NAME the window is
+named after the directory. That is worth preferring where it applies: a launch
+you cannot see is one you go back into by hand, and the hand route — `claude`
+then `/resume` — starts a second process on one session id. All five
+doubly-held sessions on this machine were launched panes re-entered that way.
+
+`--name NAME` sets the session's display name. It goes into the index row at
+launch, so a listing can tell several sessions apart before any of them has
+taken a turn, and for claude it is also passed to `claude -n`, which shows it in
+the prompt box, the `/resume` picker and the terminal title. codex and kimi have
+no equivalent flag, so there the name is scad's label alone.
 
 Launching goes through tmux for all three. tmux supplies the pty that keeps a
 Claude session stamped `entrypoint: cli` rather than `sdk-cli`, which is what

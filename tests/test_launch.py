@@ -577,6 +577,69 @@ class TestLaunching:
             ["--session-id", record["session_id"], "--add-dir", str(extra), "--add-dir", "/a b"]
         assert record["add_dirs"] == [str(extra), "/a b"]
 
+    def test_a_window_lands_in_the_callers_tmux_session(self, tmp_path, monkeypatch):
+        """Requested 2026-09-20: launches were siblings of the caller's tmux
+        session (`scad-cl-HHMM`), so the owner could not see them in `main` and
+        worked around it with `/resume` + `/rename` — a second process on one
+        session id, which is the cause of the double-holder problem."""
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        caller = subprocess.run(["tmux", "-L", TEST_SOCKET, "new-session", "-d",
+                                 "-s", "callerbox", "-x", "80", "-y", "24"],
+                                capture_output=True)
+        monkeypatch.setenv("TMUX", "/fake/socket,1,0")
+        monkeypatch.setattr("scad.launch._caller_tmux_session", lambda: "callerbox")
+        record = launch("claude", tmp_path, binary=binary, window="triage")
+
+        assert record["tmux"].startswith("callerbox:"), record["tmux"]
+        names = subprocess.run(["tmux", "-L", TEST_SOCKET, "list-windows", "-t", "callerbox",
+                                "-F", "#{window_name}"], capture_output=True, text=True).stdout
+        assert "triage" in names
+        assert record["window"] == "triage"
+
+    def test_outside_tmux_a_window_falls_back_to_its_own_session(self, tmp_path, monkeypatch):
+        """No caller session to land in. Refusing would be worse than the
+        behaviour that has always worked."""
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        monkeypatch.delenv("TMUX", raising=False)
+        record = launch("claude", tmp_path, binary=binary, window="triage")
+        assert record["tmux"].startswith("scad-cl-")
+
+    def test_the_window_name_defaults_to_the_cwd_basename(self, tmp_path, monkeypatch):
+        from scad.launch import window_name_for
+        assert window_name_for(True, tmp_path / "orglens-extras") == "orglens-extras"
+        assert window_name_for("triage", tmp_path / "x") == "triage"
+        assert window_name_for(None, tmp_path / "x") is None
+
+    def test_a_name_is_passed_to_claude_and_recorded(self, tmp_path):
+        """`claude -n` sets the display name in the prompt box, the /resume
+        picker and the terminal title. Verified against the real binary
+        2026-09-24: it reaches the registry before any turn."""
+        from scad.launch import launch
+
+        binary, stub = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        record = launch("claude", tmp_path, binary=binary, name="triage loop")
+
+        assert self._wait_for(stub / "argv.json")
+        assert json.loads((stub / "argv.json").read_text()) == \
+            ["--session-id", record["session_id"], "-n", "triage loop"]
+        assert record["name"] == "triage loop"
+
+    def test_a_name_is_recorded_for_agents_without_the_flag(self, tmp_path):
+        """codex and kimi cannot set a display name — neither has a flag and
+        `rename` appears nowhere in codex's help. scad still records it, so its
+        own listings can show one; nothing is claimed of the agent."""
+        from scad.launch import launch
+
+        binary, stub = self._stub(tmp_path, [{"print": "ready"}])
+        record = launch("kimi", tmp_path, binary=binary, name="triage loop")
+        assert record["name"] == "triage loop"
+        assert self._wait_for(stub / "argv.json")
+        assert json.loads((stub / "argv.json").read_text()) == []
+
     def test_add_dirs_are_refused_for_agents_without_the_flag(self, tmp_path):
         """Dropping them silently would launch a session that cannot reach
         the directories it was told about."""
