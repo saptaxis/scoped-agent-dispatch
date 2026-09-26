@@ -151,6 +151,7 @@ scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
 scad session launch --agent claude --cwd . --json    # the launch record, for scripts
 scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
 scad session launch --agent claude --window triage --name "triage loop"   # a window here, named
+scad session launch --agent claude --split                     # a pane beside this one
 scad session resume <id>                             # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command
@@ -173,6 +174,12 @@ named after the directory. That is worth preferring where it applies: a launch
 you cannot see is one you go back into by hand, and the hand route — `claude`
 then `/resume` — starts a second process on one session id. All five
 doubly-held sessions on this machine were launched panes re-entered that way.
+
+`--split` goes one step further and opens the agent in a pane beside the one you
+typed in, in the window you already have arranged. The pane comes from
+`$TMUX_PANE`, which tmux exports into every pane, so it is exact rather than
+matched. Taking the caller's pane over instead was considered and not built: the
+process in it is the shell running scad, so scad would be killing its own parent.
 
 `--name NAME` sets the session's display name. It goes into the index row at
 launch, so a listing can tell several sessions apart before any of them has

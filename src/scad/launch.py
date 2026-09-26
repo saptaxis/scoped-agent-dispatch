@@ -259,6 +259,33 @@ def window_name_for(window, cwd: Path) -> str | None:
     return window if isinstance(window, str) and window else Path(cwd).name
 
 
+def caller_pane() -> str | None:
+    """The pane this process was run from, as a pane id, or None.
+
+    tmux exports `$TMUX_PANE` into every pane's environment, so a child knows
+    exactly where it was started with nothing to guess and nothing to match.
+    It is an id (`%38`), not an index path, so it stays true across
+    `join-pane`, `move-window`, renames and renumbering.
+    """
+    return os.environ.get("TMUX_PANE") or None
+
+
+def split_pane(caller: str, cwd: Path, command: str) -> str:
+    """Put a pane beside `caller` in the same window and return its pane id.
+
+    `--split` rather than taking the pane over: the process in the caller's
+    pane is the shell running scad, so replacing it (`respawn-pane -k`) would
+    have scad kill its own parent, and anything not already flushed to disk
+    would be lost for the session that is now running.
+    """
+    result = _tmux(["split-window", "-d", "-t", caller, "-c", str(cwd),
+                    "-P", "-F", "#{pane_id}", f"{command}; exec bash"])
+    if result.returncode != 0:
+        raise LaunchError(f"tmux refused to split the pane: "
+                          f"{result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout.strip()
+
+
 def pane_id_of(target: str) -> str | None:
     """The pane id behind an index path, or None if it does not resolve."""
     result = _tmux(["display-message", "-p", "-t", target, "#{pane_id}"])
@@ -777,7 +804,7 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
 
 def launch(agent: str, cwd, *, prompt: str | None = None,
            binary: str | None = None, say=None, add_dirs=(),
-           name: str | None = None, window=None) -> dict:
+           name: str | None = None, window=None, split: bool = False) -> dict:
     """Start an interactive agent in tmux and record which session it became.
 
     Detached: the pane is left running and the caller keeps its terminal.
@@ -834,18 +861,24 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
     if name and agent == "claude":
         command += f" -n {shlex.quote(name)}"
     wanted = window_name_for(window, cwd)
-    caller = _caller_tmux_session() if wanted else None
-    if wanted and caller:
-        target = new_window(caller, wanted, cwd, command)
+    here = caller_pane() if split else None
+    pane = None
+    if here:
+        pane = split_pane(here, cwd, command)
+        target = _tmux(["display-message", "-p", "-t", pane,
+                        "#{session_name}:#{window_index}.#{pane_index}"]).stdout.strip()
+        wanted = None
+    elif wanted and _caller_tmux_session():
+        target = new_window(_caller_tmux_session(), wanted, cwd, command)
     else:
-        # No caller session to land in, or none asked for. Refusing would be
-        # worse than the behaviour that has always worked.
+        # No caller pane or session to land in, or none asked for. Refusing
+        # would be worse than the behaviour that has always worked.
         target = new_session(tmux_name, cwd, command)
         wanted = None
     # The id, not only the path: every reader of this record wants the pane
     # that is running the agent, and the path stops naming it the moment a
     # window is moved or renumbered.
-    pane = pane_id_of(target)
+    pane = pane or pane_id_of(target)
     say(f"launched {agent} in {target}")
 
     extra: dict = {}

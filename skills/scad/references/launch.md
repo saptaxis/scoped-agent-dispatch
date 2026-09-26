@@ -8,7 +8,7 @@ with isolation and a config.
 
 ```bash
 scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]...
-                   [--window [NAME]] [--name NAME] [--attach]
+                   [--window [NAME]] [--split] [--name NAME] [--attach]
 scad session resume <session-id> [--print]
 scad session send <session-id> TEXT | --file PATH
 ```
@@ -18,6 +18,7 @@ puts it in the caller's tmux session as a named window instead**, and the
 recorded target becomes e.g. `main:7.0`; bare `--window` names it after the
 directory. Prefer it: a launch the human cannot see is one they re-enter by
 hand with `claude` + `/resume`, which is a second process on one session id.
+`--split` opens it in a pane beside the caller's own, from `$TMUX_PANE`.
 `--name NAME` sets the display name — in the index row at launch, and for
 claude also `claude -n`, which shows it in the prompt box and the `/resume`
 picker. It starts the agent in tmux, prints the

@@ -7,6 +7,9 @@
 - `session launch --window [NAME]`: land the agent as a named window in the caller's tmux
   session instead of a detached `scad-cl-HHMM` sibling. `NAME` defaults to the cwd basename.
   Outside tmux, unchanged. The launch record's target becomes e.g. `main:7.0`.
+- `session launch --split`: land the agent in a pane beside the one the command was typed in,
+  in that window, rather than a new window or a detached session. The pane comes from
+  `$TMUX_PANE`, so it is exact. Outside tmux, unchanged.
 - `session launch --name NAME`: the session's display name, passed to `claude -n` and written
   into the index row at launch, so a listing can tell several sessions apart before any of them
   has taken a turn. Recorded for codex and kimi too, which have no flag of their own.

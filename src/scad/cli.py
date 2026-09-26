@@ -2211,11 +2211,13 @@ def _exec(argv: list[str]) -> None:
 @click.option("--window", default=None, is_flag=False, flag_value="",
               help="Land the agent as a named window in this tmux session instead of a "
                    "detached one. Bare --window names it after the directory.")
+@click.option("--split", is_flag=True,
+              help="Land the agent in a pane beside this one, in the window you are in.")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, add_dirs, name, window, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the pane and the way back in, and leaves your
@@ -2254,7 +2256,7 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, attach, as_json):
 
     try:
         record = launch_agent(agent, target_cwd, prompt=prompt, add_dirs=list(add_dirs),
-                              name=name, window=window,
+                              name=name, window=window, split=split,
                               say=lambda msg: note(f"[scad] {msg}"))
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc

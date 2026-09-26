@@ -608,6 +608,34 @@ class TestLaunching:
         record = launch("claude", tmp_path, binary=binary, window="triage")
         assert record["tmux"].startswith("scad-cl-")
 
+    def test_split_puts_the_agent_beside_the_caller_in_its_pane(self, tmp_path, monkeypatch):
+        """`--window` gives a new window; `--split` gives a pane next to where
+        the command was typed, which is what "here" means when the human has
+        already arranged the window. `$TMUX_PANE` names that pane exactly."""
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        subprocess.run(["tmux", "-L", TEST_SOCKET, "new-session", "-d", "-s", "splitbox",
+                        "-x", "80", "-y", "24"], capture_output=True)
+        caller = subprocess.run(["tmux", "-L", TEST_SOCKET, "list-panes", "-t", "splitbox",
+                                 "-F", "#{pane_id}"], capture_output=True, text=True).stdout.strip()
+        monkeypatch.setenv("TMUX_PANE", caller)
+        record = launch("claude", tmp_path, binary=binary, split=True)
+
+        panes = subprocess.run(["tmux", "-L", TEST_SOCKET, "list-panes", "-t", "splitbox",
+                                "-F", "#{pane_id}"], capture_output=True, text=True).stdout.split()
+        assert len(panes) == 2, panes
+        assert record["pane_id"] in panes and record["pane_id"] != caller
+        assert record["tmux"].startswith("splitbox:")
+
+    def test_split_without_a_caller_pane_falls_back(self, tmp_path, monkeypatch):
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+        record = launch("claude", tmp_path, binary=binary, split=True)
+        assert record["tmux"].startswith("scad-cl-")
+
     def test_every_launch_records_the_pane_id(self, tmp_path):
         """The index path is a snapshot: a pane joined into another window keeps
         its id and loses its path (measured 2026-09-25, `%45` moved from
@@ -635,6 +663,7 @@ class TestLaunching:
                         "-x", "80", "-y", "24"], capture_output=True)
         subprocess.run(["tmux", "-L", TEST_SOCKET, "join-pane", "-s", record["pane_id"],
                         "-t", "elsewhere:0"], capture_output=True)
+        assert pane_target(record) == pane_target({"pane_id": record["pane_id"]})
         assert pane_target(record).startswith("elsewhere:")
         assert pane_target({"tmux": record["tmux"]}) != pane_target(record)
 
