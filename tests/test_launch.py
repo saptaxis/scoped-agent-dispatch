@@ -608,6 +608,42 @@ class TestLaunching:
         record = launch("claude", tmp_path, binary=binary, window="triage")
         assert record["tmux"].startswith("scad-cl-")
 
+    def test_every_launch_records_the_pane_id(self, tmp_path):
+        """The index path is a snapshot: a pane joined into another window keeps
+        its id and loses its path (measured 2026-09-25, `%45` moved from
+        `main:11.0` to `main:0.1`). Five readers trust this field, and a wrong
+        target in the resume path is how a second writer opens on one
+        transcript."""
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        record = launch("claude", tmp_path, binary=binary)
+        assert record["pane_id"].startswith("%"), record["pane_id"]
+        resolved = subprocess.run(["tmux", "-L", TEST_SOCKET, "display-message", "-p",
+                                   "-t", record["pane_id"],
+                                   "#{session_name}:#{window_index}.#{pane_index}"],
+                                  capture_output=True, text=True).stdout.strip()
+        assert resolved == record["tmux"]
+
+    def test_a_moved_pane_is_still_found_by_its_id(self, tmp_path):
+        """The whole point: rearrange the window and the record still resolves."""
+        from scad.launch import launch, pane_target
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        record = launch("claude", tmp_path, binary=binary)
+        subprocess.run(["tmux", "-L", TEST_SOCKET, "new-session", "-d", "-s", "elsewhere",
+                        "-x", "80", "-y", "24"], capture_output=True)
+        subprocess.run(["tmux", "-L", TEST_SOCKET, "join-pane", "-s", record["pane_id"],
+                        "-t", "elsewhere:0"], capture_output=True)
+        assert pane_target(record).startswith("elsewhere:")
+        assert pane_target({"tmux": record["tmux"]}) != pane_target(record)
+
+    def test_pane_target_falls_back_to_the_recorded_path(self, tmp_path):
+        """Records written before the id existed keep working unchanged."""
+        from scad.launch import pane_target
+        assert pane_target({"tmux": "main:3.0"}) == "main:3.0"
+        assert pane_target({}) is None
+
     def test_the_window_name_defaults_to_the_cwd_basename(self, tmp_path, monkeypatch):
         from scad.launch import window_name_for
         assert window_name_for(True, tmp_path / "orglens-extras") == "orglens-extras"

@@ -13,6 +13,11 @@
 
 ### Fixed
 
+- A launch record now holds the pane's **id** (`%45`) as well as its index path, and every
+  reader resolves through the id: `session resume`'s attach, `session show`, `session send`, and
+  the viewer's pane-to-session proof. An index path is a snapshot — a pane joined into another
+  window keeps its id and goes from `main:11.0` to `main:0.1` — and the resume path is where a
+  stale target opens a second process on one session id. Records without an id behave as before.
 - `scad view` showed a session once per process holding it, so five sessions appeared twice in
   "Open now" (19 rows for 14 sessions, measured 2026-09-24). One row per session now, with the
   other holders named on it.

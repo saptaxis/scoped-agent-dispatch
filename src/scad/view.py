@@ -95,8 +95,16 @@ def live_pane_rows(conn, panes: list[TmuxPane],
     if records is None:
         from scad.launch import launch_records   # launch imports this module
         records = launch_records()
-    recorded = {r["tmux"]: r["session_id"] for r in records
-                if r.get("tmux") and r.get("session_id")}
+    from scad.launch import pane_target
+    # Keyed by where each recorded pane is now, not where it was at launch:
+    # a pane keeps its id and loses its index path when a window is moved.
+    recorded = {}
+    for r in records:
+        if not r.get("session_id"):
+            continue
+        where = pane_target(r)
+        if where:
+            recorded[where] = r["session_id"]
     rows = []
     for pane in panes:
         if not is_agent_command(pane.command):

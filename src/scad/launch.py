@@ -259,6 +259,29 @@ def window_name_for(window, cwd: Path) -> str | None:
     return window if isinstance(window, str) and window else Path(cwd).name
 
 
+def pane_id_of(target: str) -> str | None:
+    """The pane id behind an index path, or None if it does not resolve."""
+    result = _tmux(["display-message", "-p", "-t", target, "#{pane_id}"])
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    return pid if pid.startswith("%") else None
+
+
+def pane_target(record: dict) -> str | None:
+    """Where a launched session's pane is *now*, from its record.
+
+    The record's `tmux` is an index path and an index path is a snapshot:
+    measured 2026-09-25, a pane joined into another window kept its id `%45`
+    and went from `main:11.0` to `main:0.1`. So `pane_id` is authoritative
+    where it exists and the path is what a human reads. Records written before
+    the id existed fall back to the path and behave exactly as they did.
+    """
+    pane = record.get("pane_id")
+    if pane:
+        return _tmux(["display-message", "-p", "-t", pane,
+                      "#{session_name}:#{window_index}.#{pane_index}"]).stdout.strip() or None
+    return record.get("tmux") or None
+
+
 def new_window(session: str, window: str, cwd: Path, command: str) -> str:
     """Add a window to an existing tmux session and return its target.
 
@@ -819,6 +842,10 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
         # worse than the behaviour that has always worked.
         target = new_session(tmux_name, cwd, command)
         wanted = None
+    # The id, not only the path: every reader of this record wants the pane
+    # that is running the agent, and the path stops naming it the moment a
+    # window is moved or renumbered.
+    pane = pane_id_of(target)
     say(f"launched {agent} in {target}")
 
     extra: dict = {}
@@ -852,6 +879,7 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
         "name": name,
         "window": wanted,
         "tmux": target,
+        "pane_id": pane,
         "started": _now_iso(),
         "resume": resume_command({"id": session_id, "agent": agent,
                                   "cwd": str(cwd), "kind": "main"}),
@@ -889,7 +917,7 @@ def send_turn(session_id: str, text: str) -> dict:
             f"{session_id} has no launch record naming a pane; only sessions "
             f"scad launched can be sent to. Attach and type, or: "
             f"scad session resume {session_id}")
-    target = record["tmux"]
+    target = pane_target(record) or record["tmux"]
     if not pane_holds_program(target):
         raise LaunchError(
             f"{session_id} is not open in {target} any more. Go back in with: "

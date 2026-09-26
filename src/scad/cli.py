@@ -100,6 +100,7 @@ from scad.launch import (
     AGENTS,
     LaunchError,
     launch as launch_agent,
+    pane_target,
     send_turn,
     read_record,
     record_path,
@@ -2258,7 +2259,7 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, attach, as_json):
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    pane = record.get("tmux") or ""
+    pane = pane_target(record) or record.get("tmux") or ""
 
     # A launch that stopped at a gate scad may not answer is not a launch.
     # Say what is wanted, where, and how to finish it — then exit non-zero, so
@@ -2343,9 +2344,9 @@ def _open_in(session_id: str, record: dict) -> str | None:
     launch record's pane if it still holds an agent, then Claude's own
     process registry. Neither is inferred from cwd or time.
     """
-    pane_target = record.get("tmux")
-    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
-        return f"pane {pane_target}"
+    pane = pane_target(record)
+    if pane and find_pane(pane, tmux_panes()) is not None:
+        return f"pane {pane}"
     live = next((s for s in claude_live_sessions() if s.session_id == session_id), None)
     if live is not None:
         return f"pid {live.pid}"
@@ -2410,10 +2411,13 @@ def session_resume(session_id, print_only):
     # The launch record is the only thing that can name the pane a specific
     # session id is in — a pane matched by cwd is "something is running here",
     # which is not the same session and would attach you to a stranger.
-    pane_target = record.get("tmux")
-    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
-        click.echo(f"[scad] {session_id} is open in {pane_target} — attaching.")
-        _exec(attach_argv(pane_target))
+    # Through the recorded pane id where there is one: an index path stops
+    # naming the pane as soon as a window is moved or renumbered, and this is
+    # the decision that keeps a second process off one session id.
+    pane = pane_target(record)
+    if pane and find_pane(pane, tmux_panes()) is not None:
+        click.echo(f"[scad] {session_id} is open in {pane} — attaching.")
+        _exec(attach_argv(pane))
         return
 
     # Proven live, nowhere to attach. The registry names the session exactly but

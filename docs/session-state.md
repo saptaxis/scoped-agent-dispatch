@@ -203,7 +203,12 @@ with no safe answer, such as Claude Code's folder-trust dialog, stop the launch:
 nothing is sent, and the command exits non-zero naming the dialog and the pane.
 
 Every launch writes `~/.scad/launches/<session-id>.json` with the agent, cwd,
-pane, resume command, and how the session was born. A file rather than a row,
+pane, resume command, and how the session was born. The pane is recorded twice:
+`pane_id` (`%45`) is authoritative and `tmux` (`main:11.0`) is a snapshot for
+reading, because an index path stops naming the pane the moment a window is
+moved or renumbered while the id survives every rearrangement. Everything that
+needs the pane resolves the id; a record written before the id existed falls
+back to the path. A file rather than a row,
 since `reindex --rebuild` would drop it. `scad session resume` reads it when it
 exists and falls back to the index when it does not, so resume works for every
 session on the machine.

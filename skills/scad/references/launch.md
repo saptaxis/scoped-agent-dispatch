@@ -75,7 +75,10 @@ command has to add it back — `kimi -S <bare-uuid>` answers `Session not found`
 
 ## The launch record
 
-`~/.scad/launches/<session-id>.json`, written as soon as the id exists. A file,
+`~/.scad/launches/<session-id>.json`, written as soon as the id exists. It
+holds the pane as an id (`pane_id: %45`) and as an index path (`tmux:
+main:11.0`); the id is the one to trust, since a moved window changes the path
+and not the id. A file,
 never the index: `reindex --rebuild` drops every row, and this is an authored
 fact about an event with nothing to recompute it from.
 

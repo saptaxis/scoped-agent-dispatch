@@ -3041,6 +3041,24 @@ class TestResumeIsLiveFirst:
 
         monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: list(panes))
 
+    def test_a_moved_pane_is_still_attached_to_by_its_id(self, runner, tmp_path, monkeypatch):
+        """The record's index path is a snapshot. Resume trusts this field to
+        decide attach-versus-start, and a wrong answer there opens a second
+        writer on one transcript — the hazard resume exists to prevent."""
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch, target="main:11.0", pane_id="%45")
+        # The pane was joined into another window: same id, new path.
+        self._panes(monkeypatch, TmuxPane("main:0.1", "/repo", "2.1.270", pid=1))
+        monkeypatch.setattr("scad.cli.pane_target", lambda rec: "main:0.1")
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code == 0, result.output
+        assert calls and "main:0.1" in calls[0]
+
     def test_a_live_recorded_pane_is_attached_to(self, runner, tmp_path, monkeypatch):
         from scad.live import TmuxPane
 
