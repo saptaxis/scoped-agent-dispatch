@@ -16,6 +16,10 @@
 
 ### Changed
 
+- Spacing in the viewer's stylesheet uses the `--s1`…`--s5` scale wherever a value was already
+  exactly on it — seven declarations, byte-identical output. Nineteen off-scale values remain and
+  are left alone on purpose: snapping `.3rem` to `.25rem` changes how the page looks, CSS has no
+  test that would catch it, and the list belongs in front of someone who can see the page.
 - `scad view` puts a session's notes on its row, as a third block of the context fold beside
   what it opened with and what it last said, and the separate Notes section is gone. A note was
   previously findable only by scrolling to that section and matching session ids by eye, which is

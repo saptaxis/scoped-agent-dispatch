@@ -871,7 +871,7 @@ _PAGE = """<!doctype html>
  body {{ font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
         margin: 0; padding: 2.5rem 1.5rem 5rem; background: var(--bg); color: var(--ink); }}
  .wrap {{ max-width: 68rem; margin: 0 auto; }}
- header {{ margin-bottom: 2rem; }}
+ header {{ margin-bottom: var(--s5); }}
  h1 {{ font-size: 1.05rem; font-weight: 650; margin: 0; letter-spacing: -.01em; }}
  .sub {{ color: var(--dim); font-size: .82rem; margin-top: .3rem; }}
  h2 {{ font-size: .74rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em;
@@ -1016,11 +1016,11 @@ h3.bucket:first-child {{ margin-top: 0; }}
  .summary b {{ color: var(--ink); font-weight: 600; }}
  .clearf {{ font: inherit; font-size: .72rem; background: none; cursor: pointer;
             border: 1px solid var(--line); border-radius: 999px;
-            padding: 0 .5rem; color: var(--dim); }}
+            padding: 0 var(--s2); color: var(--dim); }}
  @media (max-width: 640px) {{
    .facet {{ grid-template-columns: 1fr; gap: var(--s1); }}
  }}
- .achip {{ font: inherit; font-size: .76rem; padding: .12rem .5rem; cursor: pointer;
+ .achip {{ font: inherit; font-size: .76rem; padding: .12rem var(--s2); cursor: pointer;
            border: 1px solid var(--line); border-radius: 999px;
            background: transparent; color: var(--dim); }}
  .achip.claude {{ color: var(--claude); }}
@@ -1029,7 +1029,7 @@ h3.bucket:first-child {{ margin-top: 0; }}
  .achip.on {{ background: var(--chip); border-color: currentColor; }}
  .q {{ box-shadow: inset 3px 0 0 var(--ask); }}
  .needs {{ color: var(--ask); font-size: .82rem; margin-top: .2rem; }}
- .ctx {{ margin-top: .25rem; font-size: .82rem; }}
+ .ctx {{ margin-top: var(--s1); font-size: .82rem; }}
  /* ONE rule for the closed summary. There were two, and the later one set
     white-space:nowrap, so the line-clamp above it never applied and the
     preview was a single clipped line inside a box sized for six. */
@@ -1050,14 +1050,14 @@ h3.bucket:first-child {{ margin-top: 0; }}
  .fold-tag {{ display: inline-block; min-width: 3.2rem; color: var(--faint);
               text-transform: uppercase; font-size: var(--label);
               letter-spacing: .08em; }}
- .snip {{ color: var(--dim); font-size: .82rem; margin-top: .25rem;
+ .snip {{ color: var(--dim); font-size: .82rem; margin-top: var(--s1);
           display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
  .empty {{ color: var(--faint); font-size: .85rem; padding: .9rem; background: var(--card);
            border: 1px dashed var(--line); border-radius: 10px; }}
- input {{ font: inherit; padding: .5rem .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
+ input {{ font: inherit; padding: var(--s2) .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
           border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); }}
  input:focus {{ outline: 2px solid var(--claude); outline-offset: -1px; }}
- .tags {{ margin-top: .3rem; display: flex; flex-wrap: wrap; gap: .25rem; }}
+ .tags {{ margin-top: .3rem; display: flex; flex-wrap: wrap; gap: var(--s1); }}
  .tag {{ font-size: .7rem; padding: .08rem .35rem; border-radius: 4px;
          background: var(--chip); color: var(--dim); border: 1px solid var(--line); }}
  .clip {{ cursor: zoom-in; border-bottom: 1px dotted var(--faint); }}
