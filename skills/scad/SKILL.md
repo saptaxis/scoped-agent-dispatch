@@ -61,6 +61,8 @@ scad finish <run-id>                            # fetch + tear down
 
 # run an agent here, on the host
 scad session launch --agent codex --cwd .       # interactive, in tmux
+scad session launch --agent claude --split --name "triage"   # a pane beside yours, named
+scad session launch --agent claude --window docs             # a named window in your tmux session
 scad session resume <id>                        # attach if open, resume if not
 scad session send <id> "text" | --file f        # a later turn into the open pane
 

@@ -102,6 +102,8 @@ scad harvest|finish <run-id>                        # fetch, then review or tear
 
 # Sessions
 scad session launch --agent claude|codex|kimi --cwd <dir>
+scad session launch --split --name "triage"          # a pane beside this one, named
+scad session launch --window docs                   # or a named window in your tmux session
 scad session resume <id>                            # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session ls|show|read <id>
@@ -144,7 +146,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 
 ```bash
 pip install -e ".[dev]"
-pytest                 # 1464 tests
+pytest                 # 1486 tests
 ```
 
 The interactive launch routes are verified by hand, since every run costs a model

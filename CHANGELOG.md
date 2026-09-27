@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-27
+
+**The release where a launched session lands where you are looking.** A launch opened its own
+detached tmux session, so an agent ran in a window nobody watched, and the way back in was
+`claude --resume` typed by hand. That habit is what produced three separate bug reports: a second
+process on one session id, a `/rename` landing in the wrong registry file, and forked transcripts.
+`--window` and `--split` put the agent in the tmux session and the pane you are already in, and
+the launch record now names its pane by an id that survives being moved, so nothing downstream has
+to guess where a session went.
+
 ### Added
 
 - `session launch --window [NAME]`: land the agent as a named window in the caller's tmux
