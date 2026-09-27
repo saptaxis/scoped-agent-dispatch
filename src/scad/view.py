@@ -991,6 +991,10 @@ _PAGE = """<!doctype html>
             color: var(--faint); }}
  .facet input {{ width: 100%; margin: 0; }}
  .warn {{ color: var(--warn, #b45309); }}
+h3.bucket {{ font-weight: 600; font-size: .78rem; line-height: 1; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--dim); margin: var(--s4) 0 var(--s2);
+  display: flex; align-items: baseline; gap: var(--s2); }}
+h3.bucket:first-child {{ margin-top: 0; }}
 .tabs, .agents {{ display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; }}
  /* Only shown once something is filtered: the seam to a server-run query. */
  .summary {{ margin-top: var(--s3); font-size: .74rem; color: var(--dim);
@@ -1195,6 +1199,46 @@ function copy(el) {{
   setTimeout(() => el.textContent = was, 800);
 }}
 
+// Which slice of time a session ended in. The all-sessions list is a flat wall
+// of hundreds of rows, most of them months old, and the alternative on the
+// table was a finite `--days` default — a threshold nobody could pick without
+// guessing, which hides rows rather than ordering them. Grouping needs no
+// number: the old ones fall to the bottom under a heading and stay reachable.
+const BUCKETS = ["Today", "Yesterday", "This week", "This month", "Older"];
+function bucketOf(ms) {{
+  if (!ms) return "Older";
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86400000;
+  if (ms >= start) return "Today";
+  if (ms >= start - day) return "Yesterday";
+  // Seven days back from midnight, not "this calendar week": on a Monday a
+  // calendar week would put Friday's work under "This month".
+  if (ms >= start - 7 * day) return "This week";
+  if (ms >= start - 30 * day) return "This month";
+  return "Older";
+}}
+
+// One heading per non-empty bucket, in BUCKETS order. Built from the filtered
+// list rather than the whole corpus, so a heading never survives its rows.
+function bucketed(list) {{
+  if (!list.length) return rows(list);
+  const groups = new Map();
+  for (const r of list) {{
+    const b = bucketOf(r.ended);
+    if (!groups.has(b)) groups.set(b, []);
+    groups.get(b).push(r);
+  }}
+  let out = "";
+  for (const b of BUCKETS) {{
+    const rs = groups.get(b);
+    if (!rs) continue;
+    out += '<h3 class="bucket">' + esc(b) +
+           '<span class="n">' + rs.length + '</span></h3>' + rows(rs);
+  }}
+  return out;
+}}
+
 const f = document.getElementById("f");
 const draw = () => {{
   const q = f.value.toLowerCase();
@@ -1203,7 +1247,7 @@ const draw = () => {{
     (!AGENT || (r.agent || "") === AGENT) &&
     (!q || [r.name, r.project, r.cwd, r.title, r.id]
              .some(v => (v ?? "").toLowerCase().includes(q))));
-  document.getElementById("all").innerHTML = rows(list);
+  document.getElementById("all").innerHTML = bucketed(list);
   const n = document.querySelector('section[data-sec="all"] [data-count]');
   if (n) n.textContent = list.length;
   renderSummary(list.length, DATA.all.length);

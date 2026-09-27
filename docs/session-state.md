@@ -131,6 +131,11 @@ command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.
 
+All sessions are grouped by when they last ran — Today, Yesterday, This week,
+This month, Older — so the months-old rows fall to the bottom under a heading
+rather than being cut off by a day threshold. The grouping happens in the
+browser, over whatever the facets and the search box have left.
+
 Live panes and containers are discovered at render time and are current. The
 index is refreshed first by default, an incremental pass of about a second;
 `--no-refresh` keeps the pure reader. A refresh that fails warns and renders the

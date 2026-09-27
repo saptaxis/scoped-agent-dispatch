@@ -16,6 +16,11 @@
 
 ### Changed
 
+- `scad view` groups the all-sessions list by recency: Today, Yesterday, This week, This month,
+  Older, newest first, with a count per heading. This answers the standing question of whether
+  `--days` should default to something finite — grouping needs no threshold and hides nothing,
+  where a default would have had to be guessed and would cut rows off. Headings are built from
+  the filtered list, so one never outlives its rows.
 - `scad view` has one **Live** section where it had `Open now` and `Agent panes`. They were the
   same rows sourced two ways — the registry names the session and not the place, tmux names the
   place and guessed the occupant by directory — and the duplication was more visible under a

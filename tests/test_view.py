@@ -1581,3 +1581,35 @@ class TestOneLiveSection:
         assert 'data-sec="live"' in html
         assert "Agent panes" not in html
         assert 'data-sec="open-now"' not in html and 'data-sec="panes"' not in html
+
+
+class TestRecencyBuckets:
+    """The all-sessions list is a flat wall — ~337 rows here, some months old.
+    The open item asked whether `--days` should default to something finite;
+    grouping answers it without a threshold, because nothing gets hidden. The
+    list is drawn in the browser from DATA, so the buckets are JS.
+    """
+
+    def _html(self, tmp_path):
+        from scad.index import connect
+        from scad.view import gather, render
+        return render(gather(connect(tmp_path / "i.sqlite"), [], set()))
+
+    def test_the_page_carries_a_bucket_function_and_its_labels(self, tmp_path):
+        html = self._html(tmp_path)
+        assert "function bucketOf" in html
+        for label in ("Today", "Yesterday", "This week", "This month", "Older"):
+            assert label in html, label
+
+    def test_the_buckets_are_ordered_newest_first(self, tmp_path):
+        html = self._html(tmp_path)
+        order = [html.index(f'"{lab}"') for lab in
+                 ("Today", "Yesterday", "This week", "This month", "Older")]
+        assert order == sorted(order), "bucket labels must be declared newest first"
+
+    def test_rows_are_grouped_under_bucket_headings(self, tmp_path):
+        """The grouping has to happen where the list is built, or a filter would
+        leave headings with nothing under them."""
+        html = self._html(tmp_path)
+        assert "bucketed(" in html
+        assert 'class="bucket"' in html
