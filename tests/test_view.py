@@ -1025,7 +1025,10 @@ class TestOpenNow:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "CX", "awaiting-user", cwd="/repo", agent="codex")
         data = gather(conn, [TmuxPane("main:1.0", "/repo", "codex")], set())
-        assert data["open_now"] == []
+        # The pane lists — something is running there — but as a pane, with no
+        # session claimed for it. That is the honest half of what is known.
+        assert [(r["id"], r["is_pane"], r["agent"]) for r in data["live_now"]] == \
+            [(None, True, "codex")]
         assert data["waiting"][0]["status"] == "maybe-open"
 
 
@@ -1037,8 +1040,8 @@ class TestOpenNowSection:
 
     def test_it_is_the_first_section_on_the_page(self, tmp_path):
         html = self._html(tmp_path, [_session("S1", name="mine")])
-        assert html.index("Open now") < html.index("Waiting")
-        assert html.index("Open now") < html.index("Agent panes")
+        assert html.index(">Live ") < html.index("Waiting")
+        assert html.index(">Live ") < html.index("All sessions")
 
     def test_the_registry_status_is_visible(self, tmp_path):
         html = self._html(tmp_path, [_session("S1", status="busy")])
@@ -1060,7 +1063,7 @@ class TestOpenNowSection:
 
     def test_nothing_open_says_so_plainly(self, tmp_path):
         html = self._html(tmp_path, [])
-        assert "No Claude sessions are running" in html
+        assert "Nothing is running" in html
 
     def test_it_reuses_the_shared_row_markup(self, tmp_path):
         html = self._html(tmp_path, [_session("S1")])
@@ -1143,7 +1146,7 @@ class TestTabsInThePage:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
         html = render(gather(conn, [], set(), live_sessions=[_session("S1")]))
-        section = html[html.index("Open now"):html.index("Agent panes")]
+        section = html[html.index(">Live "):html.index("Waiting")]
         assert 'data-project="alpha"' in section
 
     def test_notes_rows_declare_their_project(self, tmp_path):
@@ -1514,3 +1517,67 @@ class TestOneRowPerOpenSession:
         conn = connect(tmp_path / "i.sqlite")
         html = render(gather(conn, [], set(), live_sessions=self._held()))
         assert "also open" in html
+
+
+class TestOneLiveSection:
+    """`Open now` and `Agent panes` were mostly the same rows sourced two ways:
+    the registry gives exact identity and no location, tmux gives exact location
+    and a guessed occupant. Approved in design 2026-08-02, blocked until the
+    pane could be a fact rather than a guess — which `pane_occupants` made true
+    in 0.6.0. One row per live session, plus any agent pane that cannot be
+    resolved to one, saying so."""
+
+    def _sessions(self):
+        from scad.live import ClaudeSession
+        return [ClaudeSession("S", 200, cwd="/docs", name="current", updated_at=20,
+                              started_at=2000)]
+
+    def _panes(self):
+        from scad.live import TmuxPane
+        return [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=90),
+                TmuxPane("main:6.0", "/other", "codex", window="cx", pid=91)]
+
+    def test_a_resolved_pane_is_not_listed_twice(self, monkeypatch):
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {200: 90})
+        rows = live_rows(self._sessions(), self._panes(), [], set())
+        assert [(r["id"], r["is_pane"]) for r in rows] == [("S", False), (None, True)]
+        assert rows[0]["target"] == "main:5.0", "the session carries its proven pane"
+
+    def test_an_unresolvable_pane_still_lists_and_says_so(self, monkeypatch):
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = live_rows([], self._panes(), [], set())
+        assert len(rows) == 2 and all(r["is_pane"] for r in rows)
+        assert {r["agent"] for r in rows} == {"claude", "codex"}
+
+    def test_a_launch_record_names_a_codex_pane_as_its_session(self, monkeypatch, tmp_path):
+        """codex and kimi publish no registry, so the process tree cannot name
+        their session — but a launch record does, for any family. Without this
+        a scad-launched codex session showed as an anonymous pane."""
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = live_rows([], self._panes(), [{"id": "CX1", "project": "p", "n_turns": 3}], set(),
+                         records=[{"session_id": "CX1", "tmux": "main:6.0", "agent": "codex"}])
+        by = {(r["id"], r["is_pane"]) for r in rows}
+        assert ("CX1", False) in by, rows
+        assert (None, True) in by, "the unrecorded claude pane still lists as a pane"
+
+    def test_a_live_session_with_no_pane_at_all_still_lists(self, monkeypatch):
+        """A session the registry proves is running, whose pane scad cannot
+        name. Losing it from the live list is the worst failure here."""
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = live_rows(self._sessions(), [], [], set())
+        assert [r["id"] for r in rows] == ["S"]
+        assert rows[0]["target"] in (None, "")
+
+    def test_the_page_has_one_live_section_and_no_agent_panes_heading(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        from scad.view import gather, render
+        monkeypatch.setattr("scad.live._process_parents", lambda: {200: 90})
+        html = render(gather(connect(tmp_path / "i.sqlite"), self._panes(), set(),
+                             live_sessions=self._sessions()))
+        assert 'data-sec="live"' in html
+        assert "Agent panes" not in html
+        assert 'data-sec="open-now"' not in html and 'data-sec="panes"' not in html

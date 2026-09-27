@@ -23,6 +23,7 @@ from scad.live import (
     agent_panes,
     claude_live_sessions,
     container_live_sessions,
+    find_pane,
     is_agent_command,
     newest_by_session,
     other_holders,
@@ -560,6 +561,91 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
     return rows
 
 
+def live_rows(sessions: list[ClaudeSession], panes: list[TmuxPane],
+              indexed: list[dict], running: set[str],
+              records: list[dict] | None = None) -> list[dict]:
+    """Everything running right now, once each.
+
+    Two sections used to show this: `Open now` from the process registry, which
+    names the session exactly and cannot say where it is, and `Agent panes` from
+    tmux, which names the place exactly and guessed the occupant by cwd. They
+    were mostly the same rows, and under a page-wide filter the duplication was
+    more visible rather than less.
+
+    They can be one list now because the pane stopped being a guess: the
+    registry gives a pid, the process tree gives the pane holding it, and a
+    launch record names the pane for families with no registry. So a live
+    session carries its own pane, and the only rows left over are panes running
+    an agent that nothing can resolve to a session — a codex or kimi pane scad
+    did not launch. Those still list, marked as panes, because "something is
+    running here and I cannot tell you what" is an answer and dropping it is not.
+    """
+    rows = open_now_rows(sessions, indexed, panes, running)
+    agent_panes_ = [p for p in panes if is_agent_command(p.command)]
+    by_id = {r["id"]: r for r in indexed}
+    occupied = set()
+    for session in newest_by_session(sessions).values():
+        pane = pid_panes(agent_panes_, [session.pid]).get(session.pid)
+        if pane:
+            occupied.add(pane)
+    for row in rows:
+        row["is_pane"] = False
+        # The proven pane, where there is one, so the row that names the session
+        # also names the place. reentry already carries it when it is known.
+        row.setdefault("target", (row.get("reentry") or {}).get("target"))
+
+    # A launch record names a pane for any family, which is the only way a codex
+    # or kimi session can be named at all: neither publishes a process registry,
+    # so the tree walk above cannot see them. Without this a session scad
+    # launched itself showed up as an anonymous pane.
+    if records is None:
+        from scad.launch import launch_records
+        records = launch_records()
+    from scad.launch import pane_target
+    live_ids = {s.session_id for s in sessions}
+    for rec in records:
+        sid = rec.get("session_id")
+        where = pane_target(rec) if rec.get("pane_id") else rec.get("tmux")
+        if not sid or not where or where in occupied or sid in live_ids:
+            continue
+        if find_pane(where, agent_panes_) is None:
+            continue
+        occupied.add(where)
+        base = by_id.get(sid) or {}
+        rows.append({
+            "id": sid, "is_pane": False, "pid": None,
+            "agent": rec.get("agent") or base.get("agent") or "claude",
+            "kind": "main", "name": base.get("name") or "",
+            "first_text": base.get("first_text") or "", "last_text": base.get("last_text") or "",
+            "status": "", "waiting_for": "", "started_at": 0,
+            "cwd": base.get("cwd") or rec.get("cwd") or "", "project": base.get("project"),
+            "n_turns": base.get("n_turns") or 0, "ended": base.get("ended"),
+            "title": base.get("title"), "outcome": base.get("outcome"),
+            "scad_run_id": base.get("scad_run_id"), "indexed": sid in by_id,
+            "also_held_by": [], "target": where, "goto": _goto(where),
+            "reentry": {"kind": "tmux", "command": "", "note": "",
+                        "target": where, "goto": _goto(where)},
+        })
+
+    for pane in agent_panes_:
+        if pane.target in occupied:
+            continue
+        agent = pane.command if pane.command in ("codex", "kimi") else "claude"
+        rows.append({
+            "id": None, "is_pane": True, "pid": None, "agent": agent,
+            "kind": "main", "name": "", "first_text": "", "last_text": "",
+            "status": "", "waiting_for": "", "started_at": 0,
+            "cwd": pane.path, "project": None, "n_turns": 0, "ended": None,
+            "title": None, "outcome": None, "scad_run_id": None,
+            "indexed": False, "also_held_by": [], "target": pane.target,
+            "window": pane.window, "version": pane.command,
+            "reentry": {"kind": "tmux", "command": "", "note": "",
+                        "target": pane.target, "goto": _goto(pane.target)},
+            "goto": _goto(pane.target),
+        })
+    return rows
+
+
 # Openers the agent writes for itself, not the human's ask. Measured over 400
 # sessions: 3% of first user turns are one of these, and they are useless as
 # "what is this session about" — the real question is the turn after them.
@@ -702,7 +788,7 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
             note_counts[sid] = note_counts.get(sid, 0) + 1
     # Built here rather than inline in the return so it can be counted too — a
     # running session is the likeliest one to have just been written about.
-    open_now = open_now_rows(sessions, all_rows, panes, running)
+    open_now = live_rows(sessions, panes, all_rows, running)
     for collection in (waiting, all_rows, open_now):
         for row in collection:
             # 0, never None: the renderer should be able to test a number, and
@@ -727,6 +813,12 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "waiting_closed": closed_waiting,
         "notes": notes,
         "grouped_notes": group_notes(notes),
+        "live_now": open_now,
+        # Unrendered since the two live sections became one (0.6.0): `live_rows`
+        # resolves a pane to its session by process tree and by launch record,
+        # which is what `live_pane_rows` and `group_panes` were for. Kept only
+        # so neither becomes dead code with a test harness attached; the backlog
+        # carries the removal, which cascades to `pane_occupants`.
         "grouped_panes": group_panes(pane_rows),
         "grouped_closed": group_by_project(closed_waiting),
         "live": live,
@@ -982,7 +1074,7 @@ _PAGE = """<!doctype html>
       What the page CAN do honestly is say how old it is, and keep saying it. -->
  <div class="sub">generated {generated} · <b id="gen">just now</b> ·
    regenerate with <code onclick="copy(this)">scad view</code></div>
- <div class="sub">{n_open_now} open now · {n_panes} panes open ·
+ <div class="sub">{n_live_now} live ·
    {n_at_hand} waiting at hand · {n_closed} waiting closed · {n_all} sessions ·
    click any command to copy</div>
 </header>
@@ -1003,15 +1095,9 @@ _PAGE = """<!doctype html>
   <div class="summary" id="sum" hidden></div>
 </div>
 
-<section data-sec="open-now">
-<h2>Open now <span class="n" data-count>{n_open_now}</span></h2>
-<div class="body">{open_now}</div>
-<div class="empty scoped" hidden></div>
-</section>
-
-<section data-sec="panes">
-<h2>Agent panes <span class="n" data-count>{n_panes}</span></h2>
-<div class="body">{grouped_panes}</div>
+<section data-sec="live">
+<h2>Live <span class="n" data-count>{n_live_now}</span></h2>
+<div class="body">{live_now}</div>
 <div class="empty scoped" hidden></div>
 </section>
 
@@ -1554,19 +1640,30 @@ def _note_badge(n: int) -> str:
     return f'<span class="nn" title="{n} note{"" if n == 1 else "s"}">{n}</span>' if n else ""
 
 
-def _open_now_html(rows: list[dict]) -> str:
-    """Sessions the registry proves are running, newest activity first.
+def _live_now_html(rows: list[dict]) -> str:
+    """Everything running now, once each: sessions first, then unnamed panes.
 
-    The status pill is the point of the section: `waiting` is the one asking
-    for you, `busy` is working without you, `idle` is open and quiet.
+    The status pill is the point of a session row — `waiting` is the one asking
+    for you, `busy` is working without you, `idle` is open and quiet. A pane row
+    has no pill, because nothing about it is proven except that an agent is in
+    it, and saying so plainly is better than a pill that implies otherwise.
     """
     if not rows:
-        return _empty("No Claude sessions are running — nothing is provably open. "
-                      "(codex and kimi publish no registry, so they never appear here.)")
+        return _empty("Nothing is running: no Claude session in the process "
+                      "registry, and no tmux pane holding an agent.")
     e = _html.escape
     out = []
     for r in rows:
         extra = ""
+        if r.get("is_pane"):
+            where = r.get("target") or "a pane"
+            extra = (f'<div class="m">{e(where)} is running {e(r.get("agent") or "an agent")}'
+                     f' — scad cannot tell which session is in it. '
+                     f'{"codex and kimi publish no process registry." if r.get("agent") in ("codex", "kimi") else ""}'
+                     f'</div>')
+            out.append(session_row({**r, "id": None, "name": r.get("window") or ""},
+                                   extra=extra))
+            continue
         if r.get("waiting_for"):
             extra = f'<div class="needs">waiting on {e(str(r["waiting_for"]))}</div>'
         if not r.get("indexed"):
@@ -1576,48 +1673,6 @@ def _open_now_html(rows: list[dict]) -> str:
             extra += '<div class="m">not indexed yet</div>'
         out.append(session_row(r, extra=extra))
     return f'<div class="card">{"".join(out)}</div>'
-
-
-def _grouped_panes_html(groups: list[dict]) -> str:
-    """tmux session -> window card -> one row per agent pane."""
-    if not groups:
-        return _empty("No agent panes open.")
-    e = _html.escape
-    out = []
-    for g in groups:
-        for w in g["windows"]:
-            rows = []
-            for r in w["panes"]:
-                if r.get("likely_id"):
-                    title = _label({"name": r.get("likely_name"), "id": r["likely_id"]})
-                    # A proof (process tree or launch record) says nothing; a
-                    # cwd match says so, because it can be wrong and has been.
-                    hint = "" if r.get("occupant") == "proven" else "best guess by directory"
-                else:
-                    title = '<span class="m">no indexed session here</span>'
-                    hint = "unmatched"
-                # A pane is not a session, but the row a human reads is the
-                # same object: give it the session shape and let the one
-                # renderer decide what a row looks like.
-                rows.append(session_row({
-                    "id": r.get("likely_id"), "name": r.get("likely_name"),
-                    "title": r.get("likely_title"), "outcome": r.get("likely_outcome"),
-                    "cwd": r.get("cwd"), "agent": r.get("agent"), "kind": "main",
-                    "project": r.get("project"), "ended": r.get("last_activity"),
-                    "first_text": r.get("first_text"), "last_text": r.get("last_text"),
-                    "goto": r.get("goto"), "target": r.get("target"),
-                }, extra=f'<div class="m">{hint}</div>' if hint else ""))
-            cwds = ", ".join(sorted({r.get("cwd") for r in w["panes"] if r.get("cwd")}))
-            head = (f'<span class="clip" title="{e(cwds)}" data-full="{e(cwds)}" '
-                    f'onclick="expand(event, this)">{e(w["label"] or w["target"])}</span>'
-                    if cwds else e(w["label"] or w["target"]))
-            out.append(_card(
-                head,
-                f'{e(g["session"])} · {e(w["target"])} · {len(w["panes"])} agent'
-                f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}',
-                rows,
-            ))
-    return "".join(out)
 
 
 def _context_fold(r: dict) -> str:
@@ -1734,12 +1789,10 @@ def render(data: dict) -> str:
         tabs=_tabs_html(data.get("tabs") or [], len(data["all"]), len(data["waiting"])),
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
-        n_panes=len(data.get("panes") or []),
-        n_open_now=len(data.get("open_now") or []),
-        open_now=_open_now_html(data.get("open_now") or []),
+        n_live_now=len(data.get("live_now") or []),
+        live_now=_live_now_html(data.get("live_now") or []),
         n_at_hand=len(data.get("waiting_at_hand") or []),
         n_closed=len(data.get("waiting_closed") or []),
-        grouped_panes=_grouped_panes_html(data.get("grouped_panes") or []),
         grouped_closed=_grouped_closed_html(data.get("grouped_closed") or []),
         n_notes=len(data.get("notes") or []),
         notes=_notes_html(data.get("grouped_notes") or []),

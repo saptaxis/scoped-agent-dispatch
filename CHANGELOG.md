@@ -14,6 +14,15 @@
   into the index row at launch, so a listing can tell several sessions apart before any of them
   has taken a turn. Recorded for codex and kimi too, which have no flag of their own.
 
+### Changed
+
+- `scad view` has one **Live** section where it had `Open now` and `Agent panes`. They were the
+  same rows sourced two ways — the registry names the session and not the place, tmux names the
+  place and guessed the occupant by directory — and the duplication was more visible under a
+  filter, not less. A live session now carries its own pane, resolved by process tree or by launch
+  record, and the only rows left are panes running an agent that nothing can name, which say so.
+  On this machine all 12 agent panes resolved, so the guess is gone rather than relabelled.
+
 ### Fixed
 
 - A launch record now holds the pane's **id** (`%45`) as well as its index path, and every
