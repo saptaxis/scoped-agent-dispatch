@@ -92,7 +92,10 @@ carry `tags` and `entities` themselves, so a consumer can do the match from one
 plain export instead.
 
 `live` is the newest registry entry for the session, by `updatedAt`; a reattach
-can leave two entries for one id, and a `/rename` lands in the newer.
+can leave two entries for one id, and a `/rename` lands in the newer. The others
+are listed in `live.also_held_by`, each with the pane it sits in, because a
+stale holder keeps the context it had when it was left and typing into it is
+what makes a transcript diverge.
 
 The index is in WAL mode, so a reader is not blocked while a reindex writes.
 
@@ -118,10 +121,25 @@ scad view --no-open       # just write ~/.scad/view.html
 scad view --no-refresh    # render the index as it is; the pure reader
 ```
 
+One **Live** section covers everything running: a session per row with the pane
+it is in, and a row for any agent pane that cannot be resolved to a session,
+saying so. It replaced a pair of sections that showed mostly the same rows from
+the registry and from tmux.
+
 It answers who is waiting on you and how to get back to them. Each row carries a
 command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.
+
+A session's notes ride on its row, in the same fold as its opening ask and its
+last word, so the authored tier is visible where the session is rather than in a
+list of its own. Tags are not on the row; `scad notes ls --about NAME` and
+`scad search --notes` are how a tag is searched.
+
+All sessions are grouped by when they last ran — Today, Yesterday, This week,
+This month, Older — so the months-old rows fall to the bottom under a heading
+rather than being cut off by a day threshold. The grouping happens in the
+browser, over whatever the facets and the search box have left.
 
 Live panes and containers are discovered at render time and are current. The
 index is refreshed first by default, an incremental pass of about a second;
@@ -147,6 +165,8 @@ is unavailable.
 scad session launch --agent codex --cwd ~/code/thing --prompt "port the parser"
 scad session launch --agent claude --cwd . --json    # the launch record, for scripts
 scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
+scad session launch --agent claude --window triage --name "triage loop"   # a window here, named
+scad session launch --agent claude --split                     # a pane beside this one
 scad session resume <id>                             # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command
@@ -161,6 +181,26 @@ expose that differently:
 | claude | minted by scad and passed in with `--session-id` |
 | kimi | its own index line at TUI start, confirmed against the working directory |
 | codex | the rollout its first turn creates, so a turn is sent to get one |
+
+By default a launch opens its own detached tmux session, `scad-cl-HHMM`. `--window
+[NAME]` puts it in the tmux session you are already in, as a named window, and
+the launch record's target becomes e.g. `main:7.0`; with no NAME the window is
+named after the directory. That is worth preferring where it applies: a launch
+you cannot see is one you go back into by hand, and the hand route — `claude`
+then `/resume` — starts a second process on one session id. All five
+doubly-held sessions on this machine were launched panes re-entered that way.
+
+`--split` goes one step further and opens the agent in a pane beside the one you
+typed in, in the window you already have arranged. The pane comes from
+`$TMUX_PANE`, which tmux exports into every pane, so it is exact rather than
+matched. Taking the caller's pane over instead was considered and not built: the
+process in it is the shell running scad, so scad would be killing its own parent.
+
+`--name NAME` sets the session's display name. It goes into the index row at
+launch, so a listing can tell several sessions apart before any of them has
+taken a turn, and for claude it is also passed to `claude -n`, which shows it in
+the prompt box, the `/resume` picker and the terminal title. codex and kimi have
+no equivalent flag, so there the name is scad's label alone.
 
 Launching goes through tmux for all three. tmux supplies the pty that keeps a
 Claude session stamped `entrypoint: cli` rather than `sdk-cli`, which is what
@@ -185,7 +225,12 @@ with no safe answer, such as Claude Code's folder-trust dialog, stop the launch:
 nothing is sent, and the command exits non-zero naming the dialog and the pane.
 
 Every launch writes `~/.scad/launches/<session-id>.json` with the agent, cwd,
-pane, resume command, and how the session was born. A file rather than a row,
+pane, resume command, and how the session was born. The pane is recorded twice:
+`pane_id` (`%45`) is authoritative and `tmux` (`main:11.0`) is a snapshot for
+reading, because an index path stops naming the pane the moment a window is
+moved or renumbered while the id survives every rearrangement. Everything that
+needs the pane resolves the id; a record written before the id existed falls
+back to the path. A file rather than a row,
 since `reindex --rebuild` would drop it. `scad session resume` reads it when it
 exists and falls back to the index when it does not, so resume works for every
 session on the machine.

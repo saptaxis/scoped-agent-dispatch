@@ -7,12 +7,21 @@ No container. This is independent of `scad dispatch`, which is the same idea
 with isolation and a config.
 
 ```bash
-scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]... [--attach]
+scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]...
+                   [--window [NAME]] [--split] [--name NAME] [--attach]
 scad session resume <session-id> [--print]
 scad session send <session-id> TEXT | --file PATH
 ```
 
-`launch` is detached by default: it starts the agent in tmux, prints the
+`launch` opens its own detached tmux session by default. **`--window [NAME]`
+puts it in the caller's tmux session as a named window instead**, and the
+recorded target becomes e.g. `main:7.0`; bare `--window` names it after the
+directory. Prefer it: a launch the human cannot see is one they re-enter by
+hand with `claude` + `/resume`, which is a second process on one session id.
+`--split` opens it in a pane beside the caller's own, from `$TMUX_PANE`.
+`--name NAME` sets the display name — in the index row at launch, and for
+claude also `claude -n`, which shows it in the prompt box and the `/resume`
+picker. It starts the agent in tmux, prints the
 pane and `scad session resume <id>`, and exits. `--attach` opts into
 attaching. `--add-dir` is Claude-only and repeatable; it is refused, not
 dropped, for the other two.
@@ -67,7 +76,10 @@ command has to add it back — `kimi -S <bare-uuid>` answers `Session not found`
 
 ## The launch record
 
-`~/.scad/launches/<session-id>.json`, written as soon as the id exists. A file,
+`~/.scad/launches/<session-id>.json`, written as soon as the id exists. It
+holds the pane as an id (`pane_id: %45`) and as an index path (`tmux:
+main:11.0`); the id is the one to trust, since a moved window changes the path
+and not the id. A file,
 never the index: `reindex --rebuild` drops every row, and this is an authored
 fact about an event with nothing to recompute it from.
 

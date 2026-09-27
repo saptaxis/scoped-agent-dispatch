@@ -100,6 +100,7 @@ from scad.launch import (
     AGENTS,
     LaunchError,
     launch as launch_agent,
+    pane_target,
     send_turn,
     read_record,
     record_path,
@@ -108,6 +109,8 @@ from scad.live import (
     attach_argv,
     claude_live_sessions,
     newest_by_session,
+    other_holders,
+    pid_panes,
     find_pane,
     running_run_ids,
     tmux_panes,
@@ -152,6 +155,12 @@ def _day_ms(day: str) -> int:
         return int(datetime.strptime(day, "%Y-%m-%d").timestamp() * 1000)
     except ValueError:
         raise click.ClickException(f"Invalid date {day!r}; expected YYYY-MM-DD.")
+
+
+def _epoch_ms(value) -> int | None:
+    """The launch record's ISO timestamp as epoch ms, or None."""
+    from scad.readers import _epoch_ms as parse
+    return parse(value)
 
 
 def _fmt_ms(ms) -> str | None:
@@ -2102,7 +2111,13 @@ def _session_export(conn, rows) -> list[dict]:
     includes every codex and kimi session; the registry is Claude's.
     """
     out = []
-    live = newest_by_session(claude_live_sessions())
+    all_live = claude_live_sessions()
+    live = newest_by_session(all_live)
+    # A doubly-held id is the norm rather than the exception here, and until
+    # this nothing said so: a reattach leaves the first process alive holding
+    # the same session, with context as old as the reattach.
+    others = other_holders(all_live)
+    panes = pid_panes(tmux_panes(), [s.pid for held in others.values() for s in held])
     for r in rows:
         row = dict(r)
         last = conn.execute(
@@ -2113,7 +2128,11 @@ def _session_export(conn, rows) -> list[dict]:
         row["last_turn"] = dict(last) if last else None
         s = live.get(row["id"])
         row["live"] = ({"pid": s.pid, "name": s.name, "status": s.status,
-                        "waiting_for": s.waiting_for} if s else None)
+                        "waiting_for": s.waiting_for,
+                        "also_held_by": [{"pid": h.pid, "name": h.name,
+                                          "pane": panes.get(h.pid)}
+                                         for h in others.get(row["id"], ())]}
+                       if s else None)
         out.append(row)
     return out
 
@@ -2186,11 +2205,19 @@ def _exec(argv: list[str]) -> None:
 @click.option("--prompt", default=None, help="The session's first turn.")
 @click.option("--add-dir", "add_dirs", multiple=True, type=click.Path(),
               help="A directory the session may also work in (claude only; repeatable).")
+@click.option("--name", default=None,
+              help="The session's display name, shown in listings and, for claude, in its "
+                   "own prompt box and /resume picker.")
+@click.option("--window", default=None, is_flag=False, flag_value="",
+              help="Land the agent as a named window in this tmux session instead of a "
+                   "detached one. Bare --window names it after the directory.")
+@click.option("--split", is_flag=True,
+              help="Land the agent in a pane beside this one, in the window you are in.")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the pane and the way back in, and leaves your
@@ -2229,11 +2256,12 @@ def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
 
     try:
         record = launch_agent(agent, target_cwd, prompt=prompt, add_dirs=list(add_dirs),
+                              name=name, window=window, split=split,
                               say=lambda msg: note(f"[scad] {msg}"))
     except LaunchError as exc:
         raise click.ClickException(str(exc)) from exc
 
-    pane = record.get("tmux") or ""
+    pane = pane_target(record) or record.get("tmux") or ""
 
     # A launch that stopped at a gate scad may not answer is not a launch.
     # Say what is wanted, where, and how to finish it — then exit non-zero, so
@@ -2256,8 +2284,14 @@ def session_launch(agent, cwd, prompt, add_dirs, attach, as_json):
         # and upgrades this one, exactly as history.jsonl skeletons have always
         # been upgraded. Never fatal; the launch succeeded either way.
         try:
+            # The launch time matters more than it looks: `session ls` orders
+            # by `started DESC`, and without it every launch-seeded row sorted
+            # to the bottom of the listing — the session started ten seconds
+            # ago, hardest of all to find.
             ensure_launched_session(
-                index_connect(), record["session_id"], agent, str(target_cwd))
+                index_connect(), record["session_id"], agent, str(target_cwd),
+                started_ms=_epoch_ms(record.get("started")),
+                name=record.get("name"))
         except Exception as exc:
             click.echo(f"[scad] launched, but not recorded in the index "
                        f"({exc}); run: scad reindex", err=True)
@@ -2312,9 +2346,9 @@ def _open_in(session_id: str, record: dict) -> str | None:
     launch record's pane if it still holds an agent, then Claude's own
     process registry. Neither is inferred from cwd or time.
     """
-    pane_target = record.get("tmux")
-    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
-        return f"pane {pane_target}"
+    pane = pane_target(record)
+    if pane and find_pane(pane, tmux_panes()) is not None:
+        return f"pane {pane}"
     live = next((s for s in claude_live_sessions() if s.session_id == session_id), None)
     if live is not None:
         return f"pid {live.pid}"
@@ -2379,10 +2413,13 @@ def session_resume(session_id, print_only):
     # The launch record is the only thing that can name the pane a specific
     # session id is in — a pane matched by cwd is "something is running here",
     # which is not the same session and would attach you to a stranger.
-    pane_target = record.get("tmux")
-    if pane_target and find_pane(pane_target, tmux_panes()) is not None:
-        click.echo(f"[scad] {session_id} is open in {pane_target} — attaching.")
-        _exec(attach_argv(pane_target))
+    # Through the recorded pane id where there is one: an index path stops
+    # naming the pane as soon as a window is moved or renumbered, and this is
+    # the decision that keeps a second process off one session id.
+    pane = pane_target(record)
+    if pane and find_pane(pane, tmux_panes()) is not None:
+        click.echo(f"[scad] {session_id} is open in {pane} — attaching.")
+        _exec(attach_argv(pane))
         return
 
     # Proven live, nowhere to attach. The registry names the session exactly but

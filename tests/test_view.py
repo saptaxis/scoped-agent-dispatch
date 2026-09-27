@@ -872,10 +872,16 @@ class TestNotesSection:
         assert len(data["notes"]) == 1
         assert data["grouped_notes"][0]["session_id"] == "S1"
 
-    def test_tags_render_as_chips(self, tmp_path):
+    def test_a_notes_title_and_kind_reach_the_page(self, tmp_path):
+        """Notes moved onto their session's row (2026-09-27) and the row carries
+        what identifies a note — its kind and what it said. **Tag chips went
+        with the section**: up to twelve per note, four notes per row, would
+        have dominated every row. Tags stay searchable through
+        `scad notes ls --about` and `scad search --notes`."""
         html = render(gather(self._with_note(tmp_path), [], set()))
-        assert 'class="tag">append-only<' in html
-        assert 'class="tag">jsonl<' in html
+        assert 'class="fold-tag">notes<' in html
+        assert 'class="note-kind"' in html
+        assert 'class="tag">append-only<' not in html
 
     def test_topic_and_relation_are_shown(self, tmp_path):
         # relation is derived, not stored: a first note on a fresh topic with no
@@ -902,6 +908,9 @@ class TestNotesSection:
         assert "</html>" in render(gather(conn, [], set()))
 
     def test_an_empty_notes_store_says_how_to_write_one(self, tmp_path):
+        """The Notes section was the only place the page named the tier. With
+        the section gone the hint has to live somewhere, or removing it to make
+        notes visible would have made them harder to discover."""
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/repo")
         assert "/remember" in render(gather(conn, [], set()))
@@ -1025,7 +1034,10 @@ class TestOpenNow:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "CX", "awaiting-user", cwd="/repo", agent="codex")
         data = gather(conn, [TmuxPane("main:1.0", "/repo", "codex")], set())
-        assert data["open_now"] == []
+        # The pane lists — something is running there — but as a pane, with no
+        # session claimed for it. That is the honest half of what is known.
+        assert [(r["id"], r["is_pane"], r["agent"]) for r in data["live_now"]] == \
+            [(None, True, "codex")]
         assert data["waiting"][0]["status"] == "maybe-open"
 
 
@@ -1037,8 +1049,8 @@ class TestOpenNowSection:
 
     def test_it_is_the_first_section_on_the_page(self, tmp_path):
         html = self._html(tmp_path, [_session("S1", name="mine")])
-        assert html.index("Open now") < html.index("Waiting")
-        assert html.index("Open now") < html.index("Agent panes")
+        assert html.index(">Live ") < html.index("Waiting")
+        assert html.index(">Live ") < html.index("All sessions")
 
     def test_the_registry_status_is_visible(self, tmp_path):
         html = self._html(tmp_path, [_session("S1", status="busy")])
@@ -1060,7 +1072,7 @@ class TestOpenNowSection:
 
     def test_nothing_open_says_so_plainly(self, tmp_path):
         html = self._html(tmp_path, [])
-        assert "No Claude sessions are running" in html
+        assert "Nothing is running" in html
 
     def test_it_reuses_the_shared_row_markup(self, tmp_path):
         html = self._html(tmp_path, [_session("S1")])
@@ -1143,7 +1155,7 @@ class TestTabsInThePage:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
         html = render(gather(conn, [], set(), live_sessions=[_session("S1")]))
-        section = html[html.index("Open now"):html.index("Agent panes")]
+        section = html[html.index(">Live "):html.index("Waiting")]
         assert 'data-project="alpha"' in section
 
     def test_notes_rows_declare_their_project(self, tmp_path):
@@ -1153,8 +1165,10 @@ class TestTabsInThePage:
                      "VALUES ('S1', 0, 1, 'topic', 'a note', '/n.jsonl')")
         conn.commit()
         html = render(gather(conn, [], set()))
-        section = html[html.index("<h2>Notes"):html.index("<h2>All sessions")]
-        assert 'data-project="alpha"' in section
+        # Notes ride on their session's row now, so they inherit the row's
+        # project rather than declaring one of their own.
+        assert 'data-project="alpha"' in html
+        assert "a note" in html
 
     def test_an_empty_section_says_so_in_words(self, tmp_path):
         html = self._html(tmp_path)
@@ -1474,3 +1488,197 @@ class TestAContainerSessionCannotBeResumedOnTheHost:
 
         host = {"id": "H1", "agent": "claude", "kind": "main", "cwd": "/repo"}
         assert resume_command(host) == "cd /repo && claude --resume H1"
+
+
+class TestOneRowPerOpenSession:
+    """Measured 2026-09-24: `open_now_rows` returned 19 rows for 14 distinct
+    sessions, so five sessions appeared twice on the page. A session is one
+    row; the extra processes holding its id belong on that row."""
+
+    def _held(self):
+        from scad.live import ClaudeSession
+        return [ClaudeSession("S", 200, cwd="/docs", name="current", updated_at=20,
+                              started_at=2000),
+                ClaudeSession("S", 100, cwd="/docs", name="stale", updated_at=10,
+                              started_at=1000),
+                ClaudeSession("T", 300, cwd="/other", name="t", updated_at=5,
+                              started_at=500)]
+
+    def test_a_doubly_held_session_gets_one_row(self, monkeypatch):
+        from scad.view import open_now_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = open_now_rows(self._held(), [], [], set())
+        assert [r["id"] for r in rows] == ["S", "T"]
+        assert rows[0]["pid"] == 200 and rows[0]["name"] == "current"
+
+    def test_the_other_holders_are_on_the_row_with_their_pane(self, monkeypatch):
+        from scad.live import TmuxPane
+        from scad.view import open_now_rows
+        panes = [TmuxPane("scad-cl-1128:0.0", "/docs", "2.1.270", pid=90)]
+        monkeypatch.setattr("scad.live._process_parents", lambda: {100: 90})
+        rows = open_now_rows(self._held(), [], panes, set())
+        assert rows[0]["also_held_by"] == [
+            {"pid": 100, "name": "stale", "pane": "scad-cl-1128:0.0"}]
+        assert rows[1]["also_held_by"] == []
+
+    def test_the_page_says_a_session_is_held_twice(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        from scad.view import gather, render
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        conn = connect(tmp_path / "i.sqlite")
+        html = render(gather(conn, [], set(), live_sessions=self._held()))
+        assert "also open" in html
+
+
+class TestOneLiveSection:
+    """`Open now` and `Agent panes` were mostly the same rows sourced two ways:
+    the registry gives exact identity and no location, tmux gives exact location
+    and a guessed occupant. Approved in design 2026-08-02, blocked until the
+    pane could be a fact rather than a guess — which `pane_occupants` made true
+    in 0.6.0. One row per live session, plus any agent pane that cannot be
+    resolved to one, saying so."""
+
+    def _sessions(self):
+        from scad.live import ClaudeSession
+        return [ClaudeSession("S", 200, cwd="/docs", name="current", updated_at=20,
+                              started_at=2000)]
+
+    def _panes(self):
+        from scad.live import TmuxPane
+        return [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=90),
+                TmuxPane("main:6.0", "/other", "codex", window="cx", pid=91)]
+
+    def test_a_resolved_pane_is_not_listed_twice(self, monkeypatch):
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {200: 90})
+        rows = live_rows(self._sessions(), self._panes(), [], set())
+        assert [(r["id"], r["is_pane"]) for r in rows] == [("S", False), (None, True)]
+        assert rows[0]["target"] == "main:5.0", "the session carries its proven pane"
+
+    def test_an_unresolvable_pane_still_lists_and_says_so(self, monkeypatch):
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = live_rows([], self._panes(), [], set())
+        assert len(rows) == 2 and all(r["is_pane"] for r in rows)
+        assert {r["agent"] for r in rows} == {"claude", "codex"}
+
+    def test_a_launch_record_names_a_codex_pane_as_its_session(self, monkeypatch, tmp_path):
+        """codex and kimi publish no registry, so the process tree cannot name
+        their session — but a launch record does, for any family. Without this
+        a scad-launched codex session showed as an anonymous pane."""
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = live_rows([], self._panes(), [{"id": "CX1", "project": "p", "n_turns": 3}], set(),
+                         records=[{"session_id": "CX1", "tmux": "main:6.0", "agent": "codex"}])
+        by = {(r["id"], r["is_pane"]) for r in rows}
+        assert ("CX1", False) in by, rows
+        assert (None, True) in by, "the unrecorded claude pane still lists as a pane"
+
+    def test_a_live_session_with_no_pane_at_all_still_lists(self, monkeypatch):
+        """A session the registry proves is running, whose pane scad cannot
+        name. Losing it from the live list is the worst failure here."""
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        rows = live_rows(self._sessions(), [], [], set())
+        assert [r["id"] for r in rows] == ["S"]
+        assert rows[0]["target"] in (None, "")
+
+    def test_the_page_has_one_live_section_and_no_agent_panes_heading(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        from scad.view import gather, render
+        monkeypatch.setattr("scad.live._process_parents", lambda: {200: 90})
+        html = render(gather(connect(tmp_path / "i.sqlite"), self._panes(), set(),
+                             live_sessions=self._sessions()))
+        assert 'data-sec="live"' in html
+        assert "Agent panes" not in html
+        assert 'data-sec="open-now"' not in html and 'data-sec="panes"' not in html
+
+
+class TestRecencyBuckets:
+    """The all-sessions list is a flat wall — ~337 rows here, some months old.
+    The open item asked whether `--days` should default to something finite;
+    grouping answers it without a threshold, because nothing gets hidden. The
+    list is drawn in the browser from DATA, so the buckets are JS.
+    """
+
+    def _html(self, tmp_path):
+        from scad.index import connect
+        from scad.view import gather, render
+        return render(gather(connect(tmp_path / "i.sqlite"), [], set()))
+
+    def test_the_page_carries_a_bucket_function_and_its_labels(self, tmp_path):
+        html = self._html(tmp_path)
+        assert "function bucketOf" in html
+        for label in ("Today", "Yesterday", "This week", "This month", "Older"):
+            assert label in html, label
+
+    def test_the_buckets_are_ordered_newest_first(self, tmp_path):
+        html = self._html(tmp_path)
+        order = [html.index(f'"{lab}"') for lab in
+                 ("Today", "Yesterday", "This week", "This month", "Older")]
+        assert order == sorted(order), "bucket labels must be declared newest first"
+
+    def test_rows_are_grouped_under_bucket_headings(self, tmp_path):
+        """The grouping has to happen where the list is built, or a filter would
+        leave headings with nothing under them."""
+        html = self._html(tmp_path)
+        assert "bucketed(" in html
+        assert 'class="bucket"' in html
+
+
+class TestNotesOnTheRow:
+    """Notes are the authored tier — the one thing here that can never be
+    re-derived — and they sat in a section of their own, invisible unless you
+    scrolled to it and matched session ids by eye. On the row, the separate
+    section has nothing left to do."""
+
+    def _seed(self, tmp_path):
+        import json as _json
+        import time as _time
+        from scad.index import append_notes, connect
+        from scad.records import NoteRecord
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo", project="proj")
+        now = int(_time.time() * 1000)
+        append_notes(conn, "S1", [
+            NoteRecord(ts=now - 200, kind="handoff", topic="the-topic", title="first note"),
+            NoteRecord(ts=now - 100, kind="bug", topic="a-bug", title="second note"),
+        ], "/notes/S1.jsonl")
+        conn.commit()
+        return conn
+
+    def test_a_rows_notes_are_on_the_row(self, tmp_path):
+        from scad.view import gather
+        conn = self._seed(tmp_path)
+        row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S1")
+        assert row["n_notes"] == 2
+        # Newest first, and enough to read: what kind it was and what it said.
+        assert [n["title"] for n in row["notes"]] == ["second note", "first note"]
+        assert row["notes"][0]["kind"] == "bug"
+        assert row["notes"][0]["topic"] == "a-bug"
+
+    def test_a_session_with_no_notes_carries_an_empty_list(self, tmp_path):
+        from scad.index import connect
+        from scad.view import gather
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S2", "awaiting-user", cwd="/repo")
+        row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S2")
+        assert row["notes"] == [] and row["n_notes"] == 0
+
+    def test_the_server_rendered_row_shows_them(self, tmp_path):
+        from scad.view import session_row
+        html = session_row({"id": "S1", "agent": "claude", "kind": "main", "n_notes": 1,
+                            "notes": [{"kind": "handoff", "topic": "t", "title": "the note",
+                                       "ts": 1}]})
+        assert "the note" in html and "handoff" in html
+
+    def test_the_page_has_no_notes_section_of_its_own(self, tmp_path):
+        from scad.view import gather, render
+        html = render(gather(self._seed(tmp_path), [], set()))
+        assert 'data-sec="notes"' not in html
+        assert "second note" in html, "the note itself must still be on the page"
+
+    def test_the_client_side_list_renders_them_too(self, tmp_path):
+        from scad.view import gather, render
+        html = render(gather(self._seed(tmp_path), [], set()))
+        assert "function noteBlock" in html

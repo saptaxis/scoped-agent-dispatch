@@ -2,6 +2,70 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-27
+
+**The release where a launched session lands where you are looking.** A launch opened its own
+detached tmux session, so an agent ran in a window nobody watched, and the way back in was
+`claude --resume` typed by hand. That habit is what produced three separate bug reports: a second
+process on one session id, a `/rename` landing in the wrong registry file, and forked transcripts.
+`--window` and `--split` put the agent in the tmux session and the pane you are already in, and
+the launch record now names its pane by an id that survives being moved, so nothing downstream has
+to guess where a session went.
+
+### Added
+
+- `session launch --window [NAME]`: land the agent as a named window in the caller's tmux
+  session instead of a detached `scad-cl-HHMM` sibling. `NAME` defaults to the cwd basename.
+  Outside tmux, unchanged. The launch record's target becomes e.g. `main:7.0`.
+- `session launch --split`: land the agent in a pane beside the one the command was typed in,
+  in that window, rather than a new window or a detached session. The pane comes from
+  `$TMUX_PANE`, so it is exact. Outside tmux, unchanged.
+- `session launch --name NAME`: the session's display name, passed to `claude -n` and written
+  into the index row at launch, so a listing can tell several sessions apart before any of them
+  has taken a turn. Recorded for codex and kimi too, which have no flag of their own.
+
+### Changed
+
+- Spacing in the viewer's stylesheet uses the `--s1`…`--s5` scale wherever a value was already
+  exactly on it — seven declarations, byte-identical output. Nineteen off-scale values remain and
+  are left alone on purpose: snapping `.3rem` to `.25rem` changes how the page looks, CSS has no
+  test that would catch it, and the list belongs in front of someone who can see the page.
+- `scad view` puts a session's notes on its row, as a third block of the context fold beside
+  what it opened with and what it last said, and the separate Notes section is gone. A note was
+  previously findable only by scrolling to that section and matching session ids by eye, which is
+  a poor fate for the one tier that cannot be re-derived. Up to four per row, newest first, with
+  `+N more` beyond that. **Tag chips went with the section** — twelve per note across four notes
+  would have dominated every row; tags stay searchable through `notes ls --about` and
+  `search --notes`. The `/remember` hint the section used to carry moved to the page header, so
+  removing the section did not make the tier harder to discover.
+- `scad view` groups the all-sessions list by recency: Today, Yesterday, This week, This month,
+  Older, newest first, with a count per heading. This answers the standing question of whether
+  `--days` should default to something finite — grouping needs no threshold and hides nothing,
+  where a default would have had to be guessed and would cut rows off. Headings are built from
+  the filtered list, so one never outlives its rows.
+- `scad view` has one **Live** section where it had `Open now` and `Agent panes`. They were the
+  same rows sourced two ways — the registry names the session and not the place, tmux names the
+  place and guessed the occupant by directory — and the duplication was more visible under a
+  filter, not less. A live session now carries its own pane, resolved by process tree or by launch
+  record, and the only rows left are panes running an agent that nothing can name, which say so.
+  On this machine all 12 agent panes resolved, so the guess is gone rather than relabelled.
+
+### Fixed
+
+- A launch record now holds the pane's **id** (`%45`) as well as its index path, and every
+  reader resolves through the id: `session resume`'s attach, `session show`, `session send`, and
+  the viewer's pane-to-session proof. An index path is a snapshot — a pane joined into another
+  window keeps its id and goes from `main:11.0` to `main:0.1` — and the resume path is where a
+  stale target opens a second process on one session id. Records without an id behave as before.
+- `scad view` showed a session once per process holding it, so five sessions appeared twice in
+  "Open now" (19 rows for 14 sessions, measured 2026-09-24). One row per session now, with the
+  other holders named on it.
+- A launch-seeded index row carries the launch time. `session ls` orders by `started DESC` and
+  every one of these rows had it NULL, so the session you started ten seconds ago sorted to the
+  bottom of the listing.
+- `session ls --json` `live` gains `also_held_by`: the other live processes on that session id,
+  each with the pane it sits in. Six ids were doubly held on this machine and nothing said so.
+
 ## [0.5.0] — 2026-09-18
 
 **The release where scad's index became an interface rather than a file.** 0.4.0 added the read

@@ -1,0 +1,10 @@
+tree 9af631ec051e1b2b8ab71c65b2845a4918e12e88
+parent 81b735802d056830e62b43793c0bec052fbe406d
+author Vignesh Saptarishi <vignesh.saptarishi@gmail.com> 1789729997 +0530
+committer Vignesh Saptarishi <vignesh.saptarishi@gmail.com> 1789729997 +0530
+
+release: 0.5.0
+
+README: session send, session ls --json, notes ls --about, the test count.
+The scad skill teaches send and --add-dir. A prose pass over the docs this
+version touched.

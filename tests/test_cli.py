@@ -3041,6 +3041,24 @@ class TestResumeIsLiveFirst:
 
         monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: list(panes))
 
+    def test_a_moved_pane_is_still_attached_to_by_its_id(self, runner, tmp_path, monkeypatch):
+        """The record's index path is a snapshot. Resume trusts this field to
+        decide attach-versus-start, and a wrong answer there opens a second
+        writer on one transcript — the hazard resume exists to prevent."""
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch, target="main:11.0", pane_id="%45")
+        # The pane was joined into another window: same id, new path.
+        self._panes(monkeypatch, TmuxPane("main:0.1", "/repo", "2.1.270", pid=1))
+        monkeypatch.setattr("scad.cli.pane_target", lambda rec: "main:0.1")
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code == 0, result.output
+        assert calls and "main:0.1" in calls[0]
+
     def test_a_live_recorded_pane_is_attached_to(self, runner, tmp_path, monkeypatch):
         from scad.live import TmuxPane
 
@@ -3730,7 +3748,7 @@ class TestSessionLsExport:
             ClaudeSession("M1", 4242, cwd="/repo", name="renamed", status="busy")])
         rows = self._rows(runner)
         assert rows["M1"]["live"] == {"pid": 4242, "name": "renamed", "status": "busy",
-                                      "waiting_for": ""}
+                                      "waiting_for": "", "also_held_by": []}
         assert rows["M2"]["live"] is None
 
     def test_live_is_the_newest_registry_entry_when_a_session_has_two(self, runner, tmp_path, monkeypatch):
@@ -3746,6 +3764,29 @@ class TestSessionLsExport:
             ClaudeSession("M1", 100, cwd="/repo", name="original", updated_at=10),
             ClaudeSession("M1", 200, cwd="/repo", name="renamed", updated_at=20)])
         assert self._rows(runner)["M1"]["live"]["name"] == "renamed"
+
+    def test_live_names_the_other_holders_of_the_same_id(self, runner, tmp_path, monkeypatch):
+        """Six ids on this machine were held by two live processes each and
+        nothing said so (2026-09-24). `live` reports the newest holder; the
+        others belong on it, with the pane each sits in."""
+        from scad.live import ClaudeSession
+        self._seed(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 200, cwd="/repo", name="current", updated_at=20),
+            ClaudeSession("M1", 100, cwd="/repo", name="stale", updated_at=10)])
+        monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: [])
+        monkeypatch.setattr("scad.live._process_parents", lambda: {100: 7, 200: 8})
+        live = self._rows(runner)["M1"]["live"]
+        assert live["pid"] == 200 and live["name"] == "current"
+        assert live["also_held_by"] == [{"pid": 100, "name": "stale", "pane": None}]
+        assert self._rows(runner)["M2"]["live"] is None
+
+    def test_a_singly_held_session_says_so_with_an_empty_list(self, runner, tmp_path, monkeypatch):
+        from scad.live import ClaudeSession
+        self._seed(tmp_path, monkeypatch)
+        monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [
+            ClaudeSession("M1", 200, cwd="/repo", name="only", updated_at=20)])
+        assert self._rows(runner)["M1"]["live"]["also_held_by"] == []
 
     def test_parent_filter_lists_a_sessions_subagents(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
@@ -3873,3 +3914,55 @@ class TestSessionSend:
     def test_exactly_one_of_text_or_file(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         assert runner.invoke(main, ["session", "send", "S1"]).exit_code != 0
+
+
+class TestLaunchName:
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+
+    def _fake(self, monkeypatch, **overrides):
+        calls = []
+
+        def fake_launch(agent, cwd, **kw):
+            calls.append({"agent": agent, "cwd": str(cwd), **kw})
+            return {"agent": agent, "session_id": "S1", "cwd": str(cwd),
+                    "tmux": "scad-cl-1430:0.0", "started": "2026-09-24T14:30:00Z",
+                    "resume": "claude --resume S1", "provenance": "minted",
+                    "name": kw.get("name"), **overrides}
+
+        monkeypatch.setattr("scad.cli.launch_agent", fake_launch)
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+        return calls
+
+    def test_the_name_reaches_the_launcher_and_the_index_row(self, runner, tmp_path, monkeypatch):
+        """The point of the flag is a listing you can read: the name has to be
+        on the row at launch, not after a first turn and an index pass."""
+        from scad.index import connect, session_row
+        self._home(tmp_path, monkeypatch)
+        calls = self._fake(monkeypatch)
+        r = runner.invoke(main, ["session", "launch", "--agent", "claude",
+                                 "--cwd", str(tmp_path), "--name", "triage-loop"])
+        assert r.exit_code == 0, r.output
+        assert calls[0]["name"] == "triage-loop"
+        assert session_row(connect(), "S1")["name"] == "triage-loop"
+
+    def test_the_row_carries_the_launch_time_so_it_sorts_to_the_top(self, runner, tmp_path, monkeypatch):
+        """`session ls` orders by `started DESC`. Every launch-seeded row on
+        this machine had `started` NULL (measured 2026-09-24), so a session you
+        had just started sorted to the bottom of the listing — which is where
+        you are least likely to look for it, and the reason --name exists."""
+        from scad.index import connect, session_row
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude",
+                             "--cwd", str(tmp_path), "--name", "x"])
+        # 2026-09-24T14:30:00Z, as the fake record states it
+        assert session_row(connect(), "S1")["started"] == 1790260200000
+
+    def test_a_launch_without_a_name_leaves_the_column_alone(self, runner, tmp_path, monkeypatch):
+        from scad.index import connect, session_row
+        self._home(tmp_path, monkeypatch)
+        self._fake(monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude", "--cwd", str(tmp_path)])
+        assert session_row(connect(), "S1")["name"] is None

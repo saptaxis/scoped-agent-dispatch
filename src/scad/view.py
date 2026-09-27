@@ -23,8 +23,12 @@ from scad.live import (
     agent_panes,
     claude_live_sessions,
     container_live_sessions,
+    find_pane,
     is_agent_command,
+    newest_by_session,
+    other_holders,
     pane_occupants,
+    pid_panes,
 )
 
 _RESUME = {"claude": "claude --resume {id}",
@@ -92,8 +96,16 @@ def live_pane_rows(conn, panes: list[TmuxPane],
     if records is None:
         from scad.launch import launch_records   # launch imports this module
         records = launch_records()
-    recorded = {r["tmux"]: r["session_id"] for r in records
-                if r.get("tmux") and r.get("session_id")}
+    from scad.launch import pane_target
+    # Keyed by where each recorded pane is now, not where it was at launch:
+    # a pane keeps its id and loses its index path when a window is moved.
+    recorded = {}
+    for r in records:
+        if not r.get("session_id"):
+            continue
+        where = pane_target(r)
+        if where:
+            recorded[where] = r["session_id"]
     rows = []
     for pane in panes:
         if not is_agent_command(pane.command):
@@ -498,8 +510,18 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
     for it, and it keeps a brand-new session near the top where it belongs.
     """
     by_id = {row["id"]: row for row in indexed}
+    # One row per SESSION, not per process. A reattach leaves the first
+    # process's registry file in place with both pids alive, so iterating the
+    # registry rendered a doubly-held session twice: 19 rows for 14 sessions on
+    # this machine, five of them duplicates. The newest holder is the one whose
+    # name and status are current; the others are named on its row, because a
+    # stale holder with old context is the thing that diverges a transcript.
+    others = other_holders(sessions)
+    holder_panes = pid_panes(
+        [p for p in panes if is_agent_command(p.command)],
+        [h.pid for held in others.values() for h in held])
     rows = []
-    for session in sessions:
+    for session in newest_by_session(sessions).values():
         known = by_id.get(session.session_id)
         base = known or {}
         row = {
@@ -527,12 +549,100 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
             "outcome": base.get("outcome"),
             "scad_run_id": base.get("scad_run_id"),
             "indexed": known is not None,
+            "also_held_by": [{"pid": h.pid, "name": h.name,
+                              "pane": holder_panes.get(h.pid)}
+                             for h in others.get(session.session_id, ())],
         }
         re_ = reentry_for(row, panes, running)
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
                           "target": re_.target, "goto": re_.goto}
         rows.append(row)
     rows.sort(key=lambda r: r["ended"] or r["started_at"] or 0, reverse=True)
+    return rows
+
+
+def live_rows(sessions: list[ClaudeSession], panes: list[TmuxPane],
+              indexed: list[dict], running: set[str],
+              records: list[dict] | None = None) -> list[dict]:
+    """Everything running right now, once each.
+
+    Two sections used to show this: `Open now` from the process registry, which
+    names the session exactly and cannot say where it is, and `Agent panes` from
+    tmux, which names the place exactly and guessed the occupant by cwd. They
+    were mostly the same rows, and under a page-wide filter the duplication was
+    more visible rather than less.
+
+    They can be one list now because the pane stopped being a guess: the
+    registry gives a pid, the process tree gives the pane holding it, and a
+    launch record names the pane for families with no registry. So a live
+    session carries its own pane, and the only rows left over are panes running
+    an agent that nothing can resolve to a session — a codex or kimi pane scad
+    did not launch. Those still list, marked as panes, because "something is
+    running here and I cannot tell you what" is an answer and dropping it is not.
+    """
+    rows = open_now_rows(sessions, indexed, panes, running)
+    agent_panes_ = [p for p in panes if is_agent_command(p.command)]
+    by_id = {r["id"]: r for r in indexed}
+    occupied = set()
+    for session in newest_by_session(sessions).values():
+        pane = pid_panes(agent_panes_, [session.pid]).get(session.pid)
+        if pane:
+            occupied.add(pane)
+    for row in rows:
+        row["is_pane"] = False
+        # The proven pane, where there is one, so the row that names the session
+        # also names the place. reentry already carries it when it is known.
+        row.setdefault("target", (row.get("reentry") or {}).get("target"))
+
+    # A launch record names a pane for any family, which is the only way a codex
+    # or kimi session can be named at all: neither publishes a process registry,
+    # so the tree walk above cannot see them. Without this a session scad
+    # launched itself showed up as an anonymous pane.
+    if records is None:
+        from scad.launch import launch_records
+        records = launch_records()
+    from scad.launch import pane_target
+    live_ids = {s.session_id for s in sessions}
+    for rec in records:
+        sid = rec.get("session_id")
+        where = pane_target(rec) if rec.get("pane_id") else rec.get("tmux")
+        if not sid or not where or where in occupied or sid in live_ids:
+            continue
+        if find_pane(where, agent_panes_) is None:
+            continue
+        occupied.add(where)
+        base = by_id.get(sid) or {}
+        rows.append({
+            "id": sid, "is_pane": False, "pid": None,
+            "agent": rec.get("agent") or base.get("agent") or "claude",
+            "kind": "main", "name": base.get("name") or "",
+            "first_text": base.get("first_text") or "", "last_text": base.get("last_text") or "",
+            "status": "", "waiting_for": "", "started_at": 0,
+            "cwd": base.get("cwd") or rec.get("cwd") or "", "project": base.get("project"),
+            "n_turns": base.get("n_turns") or 0, "ended": base.get("ended"),
+            "title": base.get("title"), "outcome": base.get("outcome"),
+            "scad_run_id": base.get("scad_run_id"), "indexed": sid in by_id,
+            "also_held_by": [], "target": where, "goto": _goto(where),
+            "reentry": {"kind": "tmux", "command": "", "note": "",
+                        "target": where, "goto": _goto(where)},
+        })
+
+    for pane in agent_panes_:
+        if pane.target in occupied:
+            continue
+        agent = pane.command if pane.command in ("codex", "kimi") else "claude"
+        rows.append({
+            "id": None, "is_pane": True, "pid": None, "agent": agent,
+            "kind": "main", "name": "", "first_text": "", "last_text": "",
+            "status": "", "waiting_for": "", "started_at": 0,
+            "cwd": pane.path, "project": None, "n_turns": 0, "ended": None,
+            "title": None, "outcome": None, "scad_run_id": None,
+            "indexed": False, "also_held_by": [], "target": pane.target,
+            "window": pane.window, "version": pane.command,
+            "reentry": {"kind": "tmux", "command": "", "note": "",
+                        "target": pane.target, "goto": _goto(pane.target)},
+            "goto": _goto(pane.target),
+        })
     return rows
 
 
@@ -672,18 +782,26 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     # Counted from the notes already loaded above rather than re-queried: same
     # numbers by construction, so the row and the section cannot disagree.
     note_counts: dict[str, int] = {}
+    by_session: dict[str, list[dict]] = {}
     for note in notes:
         sid = note.get("session_id")
         if sid:
             note_counts[sid] = note_counts.get(sid, 0) + 1
+            # Newest first and capped: the row shows what was written, and a
+            # session with thirty notes should not push every other row off the
+            # screen. `notes read` is the place for all of them.
+            if len(by_session.setdefault(sid, [])) < _NOTES_ON_ROW:
+                by_session[sid].append({"kind": note.get("kind"), "topic": note.get("topic"),
+                                        "title": note.get("title"), "ts": note.get("ts")})
     # Built here rather than inline in the return so it can be counted too — a
     # running session is the likeliest one to have just been written about.
-    open_now = open_now_rows(sessions, all_rows, panes, running)
+    open_now = live_rows(sessions, panes, all_rows, running)
     for collection in (waiting, all_rows, open_now):
         for row in collection:
             # 0, never None: the renderer should be able to test a number, and
             # "no notes" is a fact worth stating rather than absent data.
             row["n_notes"] = note_counts.get(row.get("id"), 0)
+            row["notes"] = by_session.get(row.get("id"), [])
 
     pane_rows = live_pane_rows(conn, panes, sessions)
     # A pane row is a pane, not a session — but it names the session it most
@@ -702,7 +820,17 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "waiting_at_hand": at_hand,
         "waiting_closed": closed_waiting,
         "notes": notes,
+        # Unrendered since notes moved onto their rows (0.6.0), like
+        # `grouped_panes` above and for the same reason. Kept so `group_notes`
+        # is not dead code with a test harness attached; the backlog carries
+        # the removal of both.
         "grouped_notes": group_notes(notes),
+        "live_now": open_now,
+        # Unrendered since the two live sections became one (0.6.0): `live_rows`
+        # resolves a pane to its session by process tree and by launch record,
+        # which is what `live_pane_rows` and `group_panes` were for. Kept only
+        # so neither becomes dead code with a test harness attached; the backlog
+        # carries the removal, which cascades to `pane_occupants`.
         "grouped_panes": group_panes(pane_rows),
         "grouped_closed": group_by_project(closed_waiting),
         "live": live,
@@ -743,7 +871,7 @@ _PAGE = """<!doctype html>
  body {{ font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
         margin: 0; padding: 2.5rem 1.5rem 5rem; background: var(--bg); color: var(--ink); }}
  .wrap {{ max-width: 68rem; margin: 0 auto; }}
- header {{ margin-bottom: 2rem; }}
+ header {{ margin-bottom: var(--s5); }}
  h1 {{ font-size: 1.05rem; font-weight: 650; margin: 0; letter-spacing: -.01em; }}
  .sub {{ color: var(--dim); font-size: .82rem; margin-top: .3rem; }}
  h2 {{ font-size: .74rem; font-weight: 650; text-transform: uppercase; letter-spacing: .07em;
@@ -874,18 +1002,25 @@ _PAGE = """<!doctype html>
  .flabel {{ font-size: var(--label); letter-spacing: .09em; text-transform: uppercase;
             color: var(--faint); }}
  .facet input {{ width: 100%; margin: 0; }}
- .tabs, .agents {{ display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; }}
+ .warn {{ color: var(--warn, #b45309); }}
+.note-kind {{ font-size: .66rem; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim); margin-right: .35em; }}
+h3.bucket {{ font-weight: 600; font-size: .78rem; line-height: 1; letter-spacing: .04em;
+  text-transform: uppercase; color: var(--dim); margin: var(--s4) 0 var(--s2);
+  display: flex; align-items: baseline; gap: var(--s2); }}
+h3.bucket:first-child {{ margin-top: 0; }}
+.tabs, .agents {{ display: flex; flex-wrap: wrap; gap: var(--s1); margin: 0; }}
  /* Only shown once something is filtered: the seam to a server-run query. */
  .summary {{ margin-top: var(--s3); font-size: .74rem; color: var(--dim);
              display: flex; gap: var(--s2); align-items: baseline; }}
  .summary b {{ color: var(--ink); font-weight: 600; }}
  .clearf {{ font: inherit; font-size: .72rem; background: none; cursor: pointer;
             border: 1px solid var(--line); border-radius: 999px;
-            padding: 0 .5rem; color: var(--dim); }}
+            padding: 0 var(--s2); color: var(--dim); }}
  @media (max-width: 640px) {{
    .facet {{ grid-template-columns: 1fr; gap: var(--s1); }}
  }}
- .achip {{ font: inherit; font-size: .76rem; padding: .12rem .5rem; cursor: pointer;
+ .achip {{ font: inherit; font-size: .76rem; padding: .12rem var(--s2); cursor: pointer;
            border: 1px solid var(--line); border-radius: 999px;
            background: transparent; color: var(--dim); }}
  .achip.claude {{ color: var(--claude); }}
@@ -894,7 +1029,7 @@ _PAGE = """<!doctype html>
  .achip.on {{ background: var(--chip); border-color: currentColor; }}
  .q {{ box-shadow: inset 3px 0 0 var(--ask); }}
  .needs {{ color: var(--ask); font-size: .82rem; margin-top: .2rem; }}
- .ctx {{ margin-top: .25rem; font-size: .82rem; }}
+ .ctx {{ margin-top: var(--s1); font-size: .82rem; }}
  /* ONE rule for the closed summary. There were two, and the later one set
     white-space:nowrap, so the line-clamp above it never applied and the
     preview was a single clipped line inside a box sized for six. */
@@ -915,14 +1050,14 @@ _PAGE = """<!doctype html>
  .fold-tag {{ display: inline-block; min-width: 3.2rem; color: var(--faint);
               text-transform: uppercase; font-size: var(--label);
               letter-spacing: .08em; }}
- .snip {{ color: var(--dim); font-size: .82rem; margin-top: .25rem;
+ .snip {{ color: var(--dim); font-size: .82rem; margin-top: var(--s1);
           display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }}
  .empty {{ color: var(--faint); font-size: .85rem; padding: .9rem; background: var(--card);
            border: 1px dashed var(--line); border-radius: 10px; }}
- input {{ font: inherit; padding: .5rem .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
+ input {{ font: inherit; padding: var(--s2) .7rem; width: 100%; max-width: 24rem; margin-bottom: .8rem;
           border: 1px solid var(--line); border-radius: 7px; background: var(--card); color: var(--ink); }}
  input:focus {{ outline: 2px solid var(--claude); outline-offset: -1px; }}
- .tags {{ margin-top: .3rem; display: flex; flex-wrap: wrap; gap: .25rem; }}
+ .tags {{ margin-top: .3rem; display: flex; flex-wrap: wrap; gap: var(--s1); }}
  .tag {{ font-size: .7rem; padding: .08rem .35rem; border-radius: 4px;
          background: var(--chip); color: var(--dim); border: 1px solid var(--line); }}
  .clip {{ cursor: zoom-in; border-bottom: 1px dotted var(--faint); }}
@@ -957,8 +1092,9 @@ _PAGE = """<!doctype html>
       What the page CAN do honestly is say how old it is, and keep saying it. -->
  <div class="sub">generated {generated} · <b id="gen">just now</b> ·
    regenerate with <code onclick="copy(this)">scad view</code></div>
- <div class="sub">{n_open_now} open now · {n_panes} panes open ·
+ <div class="sub">{n_live_now} live ·
    {n_at_hand} waiting at hand · {n_closed} waiting closed · {n_all} sessions ·
+   {notes_line} ·
    click any command to copy</div>
 </header>
 
@@ -978,15 +1114,9 @@ _PAGE = """<!doctype html>
   <div class="summary" id="sum" hidden></div>
 </div>
 
-<section data-sec="open-now">
-<h2>Open now <span class="n" data-count>{n_open_now}</span></h2>
-<div class="body">{open_now}</div>
-<div class="empty scoped" hidden></div>
-</section>
-
-<section data-sec="panes">
-<h2>Agent panes <span class="n" data-count>{n_panes}</span></h2>
-<div class="body">{grouped_panes}</div>
+<section data-sec="live">
+<h2>Live <span class="n" data-count>{n_live_now}</span></h2>
+<div class="body">{live_now}</div>
 <div class="empty scoped" hidden></div>
 </section>
 
@@ -999,12 +1129,6 @@ _PAGE = """<!doctype html>
 <section data-sec="closed">
 <h2>Waiting — closed <span class="n" data-count>{n_closed}</span></h2>
 <div class="body">{grouped_closed}</div>
-<div class="empty scoped" hidden></div>
-</section>
-
-<section data-sec="notes">
-<h2>Notes <span class="n" data-count>{n_notes}</span></h2>
-<div class="body">{notes}</div>
 <div class="empty scoped" hidden></div>
 </section>
 
@@ -1030,13 +1154,38 @@ const label = r => r.name || r.id.slice(0, 12);
 
 // Mirror of _context_fold: the opener says what a session is, the last word
 // says where it stopped, and a native <details> keeps 200 rows scannable.
+// The row's notes, mirroring _notes_block on the server so the two lists look
+// the same. Notes are the one tier that cannot be re-derived; off the row they
+// were invisible unless you scrolled to a section of their own.
+function noteBlock(r) {{
+  const ns = r.notes || [];
+  if (!ns.length) return '';
+  const parts = ns.map(n => '<span class="note-kind">' + esc(n.kind || 'info') +
+    '</span>' + esc(n.title || n.topic || '(untitled)'));
+  const more = (r.n_notes || 0) - ns.length;
+  const tail = more > 0 ? ' <span class="m">+' + more + ' more</span>' : '';
+  return '<p class="fold-part"><span class="fold-tag">notes</span>' +
+         parts.join(' · ') + tail + '</p>';
+}}
+
 function ctxFold(r) {{
   const first = (r.first_text || "").trim(), last = (r.last_text || "").trim();
-  if (!first && !last) return '';
+  const notes = noteBlock(r);
+  if (!first && !last && !notes) return '';
   let blocks = '';
   if (first) blocks += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
   if (last && last !== first) blocks += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
-  return '<details class="ctx"><summary>' + blocks + '</summary></details>';
+  return '<details class="ctx"><summary>' + blocks + notes + '</summary></details>';
+}}
+
+// A second process on one session id, which a reattach leaves behind. Said on
+// the row because the stale holder keeps old context and typing into its pane
+// is what makes a transcript diverge — and until this, nothing reported it.
+function heldTwice(r) {{
+  var held = r.also_held_by || [];
+  if (!held.length) return '';
+  return ' · <span class="warn">also open: ' + held.map(h =>
+    esc(h.pane || ('pid ' + h.pid))).join(', ') + '</span>';
 }}
 
 function rows(list) {{
@@ -1049,7 +1198,8 @@ function rows(list) {{
     '<div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
-    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') + '</div>' +
+    (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
+    heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
     esc(r.reentry.command) + '" title="' + esc(r.reentry.command) +
     '" onclick="copy(this)">\u29c9 resume</button>' : '') + '</div></div>' +
@@ -1073,6 +1223,46 @@ function copy(el) {{
   setTimeout(() => el.textContent = was, 800);
 }}
 
+// Which slice of time a session ended in. The all-sessions list is a flat wall
+// of hundreds of rows, most of them months old, and the alternative on the
+// table was a finite `--days` default — a threshold nobody could pick without
+// guessing, which hides rows rather than ordering them. Grouping needs no
+// number: the old ones fall to the bottom under a heading and stay reachable.
+const BUCKETS = ["Today", "Yesterday", "This week", "This month", "Older"];
+function bucketOf(ms) {{
+  if (!ms) return "Older";
+  const now = new Date();
+  const start = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  const day = 86400000;
+  if (ms >= start) return "Today";
+  if (ms >= start - day) return "Yesterday";
+  // Seven days back from midnight, not "this calendar week": on a Monday a
+  // calendar week would put Friday's work under "This month".
+  if (ms >= start - 7 * day) return "This week";
+  if (ms >= start - 30 * day) return "This month";
+  return "Older";
+}}
+
+// One heading per non-empty bucket, in BUCKETS order. Built from the filtered
+// list rather than the whole corpus, so a heading never survives its rows.
+function bucketed(list) {{
+  if (!list.length) return rows(list);
+  const groups = new Map();
+  for (const r of list) {{
+    const b = bucketOf(r.ended);
+    if (!groups.has(b)) groups.set(b, []);
+    groups.get(b).push(r);
+  }}
+  let out = "";
+  for (const b of BUCKETS) {{
+    const rs = groups.get(b);
+    if (!rs) continue;
+    out += '<h3 class="bucket">' + esc(b) +
+           '<span class="n">' + rs.length + '</span></h3>' + rows(rs);
+  }}
+  return out;
+}}
+
 const f = document.getElementById("f");
 const draw = () => {{
   const q = f.value.toLowerCase();
@@ -1081,7 +1271,7 @@ const draw = () => {{
     (!AGENT || (r.agent || "") === AGENT) &&
     (!q || [r.name, r.project, r.cwd, r.title, r.id]
              .some(v => (v ?? "").toLowerCase().includes(q))));
-  document.getElementById("all").innerHTML = rows(list);
+  document.getElementById("all").innerHTML = bucketed(list);
   const n = document.querySelector('section[data-sec="all"] [data-count]');
   if (n) n.textContent = list.length;
   renderSummary(list.length, DATA.all.length);
@@ -1518,19 +1708,30 @@ def _note_badge(n: int) -> str:
     return f'<span class="nn" title="{n} note{"" if n == 1 else "s"}">{n}</span>' if n else ""
 
 
-def _open_now_html(rows: list[dict]) -> str:
-    """Sessions the registry proves are running, newest activity first.
+def _live_now_html(rows: list[dict]) -> str:
+    """Everything running now, once each: sessions first, then unnamed panes.
 
-    The status pill is the point of the section: `waiting` is the one asking
-    for you, `busy` is working without you, `idle` is open and quiet.
+    The status pill is the point of a session row — `waiting` is the one asking
+    for you, `busy` is working without you, `idle` is open and quiet. A pane row
+    has no pill, because nothing about it is proven except that an agent is in
+    it, and saying so plainly is better than a pill that implies otherwise.
     """
     if not rows:
-        return _empty("No Claude sessions are running — nothing is provably open. "
-                      "(codex and kimi publish no registry, so they never appear here.)")
+        return _empty("Nothing is running: no Claude session in the process "
+                      "registry, and no tmux pane holding an agent.")
     e = _html.escape
     out = []
     for r in rows:
         extra = ""
+        if r.get("is_pane"):
+            where = r.get("target") or "a pane"
+            extra = (f'<div class="m">{e(where)} is running {e(r.get("agent") or "an agent")}'
+                     f' — scad cannot tell which session is in it. '
+                     f'{"codex and kimi publish no process registry." if r.get("agent") in ("codex", "kimi") else ""}'
+                     f'</div>')
+            out.append(session_row({**r, "id": None, "name": r.get("window") or ""},
+                                   extra=extra))
+            continue
         if r.get("waiting_for"):
             extra = f'<div class="needs">waiting on {e(str(r["waiting_for"]))}</div>'
         if not r.get("indexed"):
@@ -1542,46 +1743,30 @@ def _open_now_html(rows: list[dict]) -> str:
     return f'<div class="card">{"".join(out)}</div>'
 
 
-def _grouped_panes_html(groups: list[dict]) -> str:
-    """tmux session -> window card -> one row per agent pane."""
-    if not groups:
-        return _empty("No agent panes open.")
+#: How many of a session's notes ride on its row. Four fits the fold without
+#: making a long-lived session's row taller than the rest of the page.
+_NOTES_ON_ROW = 4
+
+
+def _notes_block(r: dict) -> str:
+    """A session's notes, as the third block of its context fold.
+
+    They were in a section of their own, which meant matching session ids by
+    eye to find the note for the row you were looking at. A tier nobody can see
+    from the main view is a tier people stop writing to.
+    """
     e = _html.escape
     out = []
-    for g in groups:
-        for w in g["windows"]:
-            rows = []
-            for r in w["panes"]:
-                if r.get("likely_id"):
-                    title = _label({"name": r.get("likely_name"), "id": r["likely_id"]})
-                    # A proof (process tree or launch record) says nothing; a
-                    # cwd match says so, because it can be wrong and has been.
-                    hint = "" if r.get("occupant") == "proven" else "best guess by directory"
-                else:
-                    title = '<span class="m">no indexed session here</span>'
-                    hint = "unmatched"
-                # A pane is not a session, but the row a human reads is the
-                # same object: give it the session shape and let the one
-                # renderer decide what a row looks like.
-                rows.append(session_row({
-                    "id": r.get("likely_id"), "name": r.get("likely_name"),
-                    "title": r.get("likely_title"), "outcome": r.get("likely_outcome"),
-                    "cwd": r.get("cwd"), "agent": r.get("agent"), "kind": "main",
-                    "project": r.get("project"), "ended": r.get("last_activity"),
-                    "first_text": r.get("first_text"), "last_text": r.get("last_text"),
-                    "goto": r.get("goto"), "target": r.get("target"),
-                }, extra=f'<div class="m">{hint}</div>' if hint else ""))
-            cwds = ", ".join(sorted({r.get("cwd") for r in w["panes"] if r.get("cwd")}))
-            head = (f'<span class="clip" title="{e(cwds)}" data-full="{e(cwds)}" '
-                    f'onclick="expand(event, this)">{e(w["label"] or w["target"])}</span>'
-                    if cwds else e(w["label"] or w["target"]))
-            out.append(_card(
-                head,
-                f'{e(g["session"])} · {e(w["target"])} · {len(w["panes"])} agent'
-                f'{"s" if len(w["panes"]) != 1 else ""} · {_ago(w["last_activity"])}',
-                rows,
-            ))
-    return "".join(out)
+    for n in (r.get("notes") or []):
+        label = n.get("title") or n.get("topic") or "(untitled)"
+        kind = n.get("kind") or "info"
+        out.append(f'<span class="note-kind">{e(str(kind))}</span>{e(str(label))}')
+    if not out:
+        return ""
+    more = (r.get("n_notes") or 0) - len(out)
+    tail = f' <span class="m">+{more} more</span>' if more > 0 else ""
+    return ('<p class="fold-part"><span class="fold-tag">notes</span>'
+            + " · ".join(out) + tail + "</p>")
 
 
 def _context_fold(r: dict) -> str:
@@ -1599,7 +1784,8 @@ def _context_fold(r: dict) -> str:
     e = _html.escape
     first = " ".join(str(r.get("first_text") or "").split())
     last = " ".join(str(r.get("last_text") or "").split())
-    if not first and not last:
+    notes = _notes_block(r)
+    if not first and not last and not notes:
         return ""
     # The summary IS the opener, carried in full — `<details>` keeps it on
     # screen when open, so repeating it in the body printed the same paragraph
@@ -1616,7 +1802,7 @@ def _context_fold(r: dict) -> str:
         parts.append(("last", last))
     blocks = "".join(
         f'<p class="fold-part"><span class="fold-tag">{tag}</span>{e(text)}</p>'
-        for tag, text in parts)
+        for tag, text in parts) + notes
     # Both ends live in the summary so both are visible without opening
     # anything: "what did I start this for" and "where did it get to" are two
     # questions, and answering only the first until you click made the second
@@ -1655,36 +1841,6 @@ def _grouped_closed_html(groups: list[dict]) -> str:
     return "".join(out)
 
 
-def _notes_html(groups: list[dict]) -> str:
-    """One card per session, its notes in the order they were written."""
-    if not groups:
-        return _empty("No notes yet — write one with /remember or `scad session note`.")
-    e = _html.escape
-    out = []
-    for g in groups:
-        rows = []
-        for n in g["rows"]:
-            try:
-                tags = json.loads(n.get("tags") or "[]")
-            except (TypeError, ValueError):
-                tags = []
-            tag_html = "".join(f'<span class="tag">{e(str(t))}</span>' for t in tags[:12])
-            rel = n.get("relation") or ""
-            parent = f' ← {e(str(n["parent"]))}' if n.get("parent") else ""
-            out_extra = f'<div class="tags">{tag_html}</div>' if tag_html else ""
-            rows.append(_row(
-                _clip(n.get("title") or n.get("topic") or "(untitled)", 90),
-                f'<b>{e(str(n.get("topic") or ""))}</b> · {e(rel)}{parent} · {_ago(n.get("ts"))}',
-                [], extra=out_extra, project=n.get("project"),
-            ))
-        out.append(_card(
-            _clip(g["label"], 60),
-            f'{e(g.get("project") or "")} · {len(g["rows"])} note'
-            f'{"s" if len(g["rows"]) != 1 else ""} · {_ago(g["last_activity"])}',
-            rows))
-    return "".join(out)
-
-
 def render(data: dict) -> str:
     """One self-contained page. No network, no external assets.
 
@@ -1698,15 +1854,17 @@ def render(data: dict) -> str:
         tabs=_tabs_html(data.get("tabs") or [], len(data["all"]), len(data["waiting"])),
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
-        n_panes=len(data.get("panes") or []),
-        n_open_now=len(data.get("open_now") or []),
-        open_now=_open_now_html(data.get("open_now") or []),
+        n_live_now=len(data.get("live_now") or []),
+        # The page stopped having a Notes section when notes moved onto their
+        # rows, and that section was the only thing telling anyone the tier
+        # exists. An empty store now says so here, where the counts are.
+        notes_line=(f'{len(data.get("notes") or [])} notes'
+                    if data.get("notes") else
+                    'no notes yet — write one with <code>/remember</code>'),
+        live_now=_live_now_html(data.get("live_now") or []),
         n_at_hand=len(data.get("waiting_at_hand") or []),
         n_closed=len(data.get("waiting_closed") or []),
-        grouped_panes=_grouped_panes_html(data.get("grouped_panes") or []),
         grouped_closed=_grouped_closed_html(data.get("grouped_closed") or []),
-        n_notes=len(data.get("notes") or []),
-        notes=_notes_html(data.get("grouped_notes") or []),
         waiting=_waiting_rows_html(data.get("waiting_at_hand") or []),
         data=_embed(data),
     )

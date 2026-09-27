@@ -242,6 +242,96 @@ def tmux_session_name(agent: str, taken: set[str] | None = None, now=None) -> st
     return f"{base}-{n}"
 
 
+def _caller_tmux_session() -> str | None:
+    """The tmux session this process is running inside, or None."""
+    if not os.environ.get("TMUX"):
+        return None
+    result = _tmux(["display-message", "-p", "#{session_name}"])
+    name = result.stdout.strip() if result.returncode == 0 else ""
+    return name or None
+
+
+def window_name_for(window, cwd: Path) -> str | None:
+    """The window name a launch asked for: a string, or the cwd basename when
+    the flag was given with no value. None when it was not given at all."""
+    if window is None or window is False:
+        return None
+    return window if isinstance(window, str) and window else Path(cwd).name
+
+
+def caller_pane() -> str | None:
+    """The pane this process was run from, as a pane id, or None.
+
+    tmux exports `$TMUX_PANE` into every pane's environment, so a child knows
+    exactly where it was started with nothing to guess and nothing to match.
+    It is an id (`%38`), not an index path, so it stays true across
+    `join-pane`, `move-window`, renames and renumbering.
+    """
+    return os.environ.get("TMUX_PANE") or None
+
+
+def split_pane(caller: str, cwd: Path, command: str) -> str:
+    """Put a pane beside `caller` in the same window and return its pane id.
+
+    `--split` rather than taking the pane over: the process in the caller's
+    pane is the shell running scad, so replacing it (`respawn-pane -k`) would
+    have scad kill its own parent, and anything not already flushed to disk
+    would be lost for the session that is now running.
+    """
+    result = _tmux(["split-window", "-d", "-t", caller, "-c", str(cwd),
+                    "-P", "-F", "#{pane_id}", f"{command}; exec bash"])
+    if result.returncode != 0:
+        raise LaunchError(f"tmux refused to split the pane: "
+                          f"{result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout.strip()
+
+
+def pane_id_of(target: str) -> str | None:
+    """The pane id behind an index path, or None if it does not resolve."""
+    result = _tmux(["display-message", "-p", "-t", target, "#{pane_id}"])
+    pid = result.stdout.strip() if result.returncode == 0 else ""
+    return pid if pid.startswith("%") else None
+
+
+def pane_target(record: dict) -> str | None:
+    """Where a launched session's pane is *now*, from its record.
+
+    The record's `tmux` is an index path and an index path is a snapshot:
+    measured 2026-09-25, a pane joined into another window kept its id `%45`
+    and went from `main:11.0` to `main:0.1`. So `pane_id` is authoritative
+    where it exists and the path is what a human reads. Records written before
+    the id existed fall back to the path and behave exactly as they did.
+    """
+    pane = record.get("pane_id")
+    if pane:
+        return _tmux(["display-message", "-p", "-t", pane,
+                      "#{session_name}:#{window_index}.#{pane_index}"]).stdout.strip() or None
+    return record.get("tmux") or None
+
+
+def new_window(session: str, window: str, cwd: Path, command: str) -> str:
+    """Add a window to an existing tmux session and return its target.
+
+    The alternative, and what launches did until now, is a detached sibling
+    session (`new_session`). Same tmux server either way, so the difference is
+    only whether the agent lands where the caller is already looking — and when
+    it does not, the way back in was `/resume` in the caller's own session,
+    which starts a second process on one session id.
+
+    `-P -F` has tmux name the window it just made; deriving the target from a
+    window index guessed here would be wrong the moment the caller has windows
+    closed or renumbered.
+    """
+    result = _tmux(["new-window", "-d", "-t", f"{session}:", "-n", window,
+                    "-c", str(cwd), "-P", "-F",
+                    "#{session_name}:#{window_index}.#{pane_index}",
+                    f"{command}; exec bash"])
+    if result.returncode != 0:
+        raise LaunchError(f"tmux refused to add a window: "
+                          f"{result.stderr.strip() or result.stdout.strip()}")
+    return result.stdout.strip()
+
+
 def new_session(name: str, cwd: Path, command: str) -> str:
     """Start a detached tmux session running `command`, and return its target.
 
@@ -713,7 +803,8 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
 
 
 def launch(agent: str, cwd, *, prompt: str | None = None,
-           binary: str | None = None, say=None, add_dirs=()) -> dict:
+           binary: str | None = None, say=None, add_dirs=(),
+           name: str | None = None, window=None, split: bool = False) -> dict:
     """Start an interactive agent in tmux and record which session it became.
 
     Detached: the pane is left running and the caller keeps its terminal.
@@ -749,7 +840,8 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
             "usable here. scad will not fall back to a non-pty launch: that "
             "silently produces a session the agent's own resume picker hides.")
 
-    name = tmux_session_name(agent, taken=session_names())
+    # The fallback session name, when the launch is not landing in a window.
+    tmux_name = tmux_session_name(agent, taken=session_names())
     binary = binary or _BINARY[agent]
     session_id = str(uuid.uuid4()) if agent == "claude" else None
 
@@ -761,7 +853,32 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
     command = f"{binary} {_FLAGS[agent].format(id=session_id)}".strip()
     for d in add_dirs:
         command += f" --add-dir {shlex.quote(d)}"
-    target = new_session(name, cwd, command)
+    # Claude's own display name, shown in its prompt box, its /resume picker and
+    # the terminal title. codex and kimi have no equivalent: kimi's CLI has
+    # nothing and codex accepts a session name everywhere but sets one nowhere.
+    # The record carries it for all three regardless, so scad's own listings can
+    # name a session without claiming the agent knows it.
+    if name and agent == "claude":
+        command += f" -n {shlex.quote(name)}"
+    wanted = window_name_for(window, cwd)
+    here = caller_pane() if split else None
+    pane = None
+    if here:
+        pane = split_pane(here, cwd, command)
+        target = _tmux(["display-message", "-p", "-t", pane,
+                        "#{session_name}:#{window_index}.#{pane_index}"]).stdout.strip()
+        wanted = None
+    elif wanted and _caller_tmux_session():
+        target = new_window(_caller_tmux_session(), wanted, cwd, command)
+    else:
+        # No caller pane or session to land in, or none asked for. Refusing
+        # would be worse than the behaviour that has always worked.
+        target = new_session(tmux_name, cwd, command)
+        wanted = None
+    # The id, not only the path: every reader of this record wants the pane
+    # that is running the agent, and the path stops naming it the moment a
+    # window is moved or renumbered.
+    pane = pane or pane_id_of(target)
     say(f"launched {agent} in {target}")
 
     extra: dict = {}
@@ -792,7 +909,10 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
         "session_id": session_id,
         "cwd": str(cwd),
         "add_dirs": add_dirs,
+        "name": name,
+        "window": wanted,
         "tmux": target,
+        "pane_id": pane,
         "started": _now_iso(),
         "resume": resume_command({"id": session_id, "agent": agent,
                                   "cwd": str(cwd), "kind": "main"}),
@@ -830,7 +950,7 @@ def send_turn(session_id: str, text: str) -> dict:
             f"{session_id} has no launch record naming a pane; only sessions "
             f"scad launched can be sent to. Attach and type, or: "
             f"scad session resume {session_id}")
-    target = record["tmux"]
+    target = pane_target(record) or record["tmux"]
     if not pane_holds_program(target):
         raise LaunchError(
             f"{session_id} is not open in {target} any more. Go back in with: "
