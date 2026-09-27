@@ -782,10 +782,17 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     # Counted from the notes already loaded above rather than re-queried: same
     # numbers by construction, so the row and the section cannot disagree.
     note_counts: dict[str, int] = {}
+    by_session: dict[str, list[dict]] = {}
     for note in notes:
         sid = note.get("session_id")
         if sid:
             note_counts[sid] = note_counts.get(sid, 0) + 1
+            # Newest first and capped: the row shows what was written, and a
+            # session with thirty notes should not push every other row off the
+            # screen. `notes read` is the place for all of them.
+            if len(by_session.setdefault(sid, [])) < _NOTES_ON_ROW:
+                by_session[sid].append({"kind": note.get("kind"), "topic": note.get("topic"),
+                                        "title": note.get("title"), "ts": note.get("ts")})
     # Built here rather than inline in the return so it can be counted too — a
     # running session is the likeliest one to have just been written about.
     open_now = live_rows(sessions, panes, all_rows, running)
@@ -794,6 +801,7 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
             # 0, never None: the renderer should be able to test a number, and
             # "no notes" is a fact worth stating rather than absent data.
             row["n_notes"] = note_counts.get(row.get("id"), 0)
+            row["notes"] = by_session.get(row.get("id"), [])
 
     pane_rows = live_pane_rows(conn, panes, sessions)
     # A pane row is a pane, not a session — but it names the session it most
@@ -812,6 +820,10 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "waiting_at_hand": at_hand,
         "waiting_closed": closed_waiting,
         "notes": notes,
+        # Unrendered since notes moved onto their rows (0.6.0), like
+        # `grouped_panes` above and for the same reason. Kept so `group_notes`
+        # is not dead code with a test harness attached; the backlog carries
+        # the removal of both.
         "grouped_notes": group_notes(notes),
         "live_now": open_now,
         # Unrendered since the two live sections became one (0.6.0): `live_rows`
@@ -991,6 +1003,8 @@ _PAGE = """<!doctype html>
             color: var(--faint); }}
  .facet input {{ width: 100%; margin: 0; }}
  .warn {{ color: var(--warn, #b45309); }}
+.note-kind {{ font-size: .66rem; text-transform: uppercase; letter-spacing: .04em;
+  color: var(--dim); margin-right: .35em; }}
 h3.bucket {{ font-weight: 600; font-size: .78rem; line-height: 1; letter-spacing: .04em;
   text-transform: uppercase; color: var(--dim); margin: var(--s4) 0 var(--s2);
   display: flex; align-items: baseline; gap: var(--s2); }}
@@ -1080,6 +1094,7 @@ h3.bucket:first-child {{ margin-top: 0; }}
    regenerate with <code onclick="copy(this)">scad view</code></div>
  <div class="sub">{n_live_now} live ·
    {n_at_hand} waiting at hand · {n_closed} waiting closed · {n_all} sessions ·
+   {notes_line} ·
    click any command to copy</div>
 </header>
 
@@ -1117,12 +1132,6 @@ h3.bucket:first-child {{ margin-top: 0; }}
 <div class="empty scoped" hidden></div>
 </section>
 
-<section data-sec="notes">
-<h2>Notes <span class="n" data-count>{n_notes}</span></h2>
-<div class="body">{notes}</div>
-<div class="empty scoped" hidden></div>
-</section>
-
 <section data-sec="all">
 <h2>All sessions <span class="n" data-count>{n_all}</span></h2>
 <div id="all"></div>
@@ -1145,13 +1154,28 @@ const label = r => r.name || r.id.slice(0, 12);
 
 // Mirror of _context_fold: the opener says what a session is, the last word
 // says where it stopped, and a native <details> keeps 200 rows scannable.
+// The row's notes, mirroring _notes_block on the server so the two lists look
+// the same. Notes are the one tier that cannot be re-derived; off the row they
+// were invisible unless you scrolled to a section of their own.
+function noteBlock(r) {{
+  const ns = r.notes || [];
+  if (!ns.length) return '';
+  const parts = ns.map(n => '<span class="note-kind">' + esc(n.kind || 'info') +
+    '</span>' + esc(n.title || n.topic || '(untitled)'));
+  const more = (r.n_notes || 0) - ns.length;
+  const tail = more > 0 ? ' <span class="m">+' + more + ' more</span>' : '';
+  return '<p class="fold-part"><span class="fold-tag">notes</span>' +
+         parts.join(' · ') + tail + '</p>';
+}}
+
 function ctxFold(r) {{
   const first = (r.first_text || "").trim(), last = (r.last_text || "").trim();
-  if (!first && !last) return '';
+  const notes = noteBlock(r);
+  if (!first && !last && !notes) return '';
   let blocks = '';
   if (first) blocks += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
   if (last && last !== first) blocks += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
-  return '<details class="ctx"><summary>' + blocks + '</summary></details>';
+  return '<details class="ctx"><summary>' + blocks + notes + '</summary></details>';
 }}
 
 // A second process on one session id, which a reattach leaves behind. Said on
@@ -1719,6 +1743,32 @@ def _live_now_html(rows: list[dict]) -> str:
     return f'<div class="card">{"".join(out)}</div>'
 
 
+#: How many of a session's notes ride on its row. Four fits the fold without
+#: making a long-lived session's row taller than the rest of the page.
+_NOTES_ON_ROW = 4
+
+
+def _notes_block(r: dict) -> str:
+    """A session's notes, as the third block of its context fold.
+
+    They were in a section of their own, which meant matching session ids by
+    eye to find the note for the row you were looking at. A tier nobody can see
+    from the main view is a tier people stop writing to.
+    """
+    e = _html.escape
+    out = []
+    for n in (r.get("notes") or []):
+        label = n.get("title") or n.get("topic") or "(untitled)"
+        kind = n.get("kind") or "info"
+        out.append(f'<span class="note-kind">{e(str(kind))}</span>{e(str(label))}')
+    if not out:
+        return ""
+    more = (r.get("n_notes") or 0) - len(out)
+    tail = f' <span class="m">+{more} more</span>' if more > 0 else ""
+    return ('<p class="fold-part"><span class="fold-tag">notes</span>'
+            + " · ".join(out) + tail + "</p>")
+
+
 def _context_fold(r: dict) -> str:
     """Collapsed one-liner that opens into the opening ask and the last word.
 
@@ -1734,7 +1784,8 @@ def _context_fold(r: dict) -> str:
     e = _html.escape
     first = " ".join(str(r.get("first_text") or "").split())
     last = " ".join(str(r.get("last_text") or "").split())
-    if not first and not last:
+    notes = _notes_block(r)
+    if not first and not last and not notes:
         return ""
     # The summary IS the opener, carried in full — `<details>` keeps it on
     # screen when open, so repeating it in the body printed the same paragraph
@@ -1751,7 +1802,7 @@ def _context_fold(r: dict) -> str:
         parts.append(("last", last))
     blocks = "".join(
         f'<p class="fold-part"><span class="fold-tag">{tag}</span>{e(text)}</p>'
-        for tag, text in parts)
+        for tag, text in parts) + notes
     # Both ends live in the summary so both are visible without opening
     # anything: "what did I start this for" and "where did it get to" are two
     # questions, and answering only the first until you click made the second
@@ -1790,36 +1841,6 @@ def _grouped_closed_html(groups: list[dict]) -> str:
     return "".join(out)
 
 
-def _notes_html(groups: list[dict]) -> str:
-    """One card per session, its notes in the order they were written."""
-    if not groups:
-        return _empty("No notes yet — write one with /remember or `scad session note`.")
-    e = _html.escape
-    out = []
-    for g in groups:
-        rows = []
-        for n in g["rows"]:
-            try:
-                tags = json.loads(n.get("tags") or "[]")
-            except (TypeError, ValueError):
-                tags = []
-            tag_html = "".join(f'<span class="tag">{e(str(t))}</span>' for t in tags[:12])
-            rel = n.get("relation") or ""
-            parent = f' ← {e(str(n["parent"]))}' if n.get("parent") else ""
-            out_extra = f'<div class="tags">{tag_html}</div>' if tag_html else ""
-            rows.append(_row(
-                _clip(n.get("title") or n.get("topic") or "(untitled)", 90),
-                f'<b>{e(str(n.get("topic") or ""))}</b> · {e(rel)}{parent} · {_ago(n.get("ts"))}',
-                [], extra=out_extra, project=n.get("project"),
-            ))
-        out.append(_card(
-            _clip(g["label"], 60),
-            f'{e(g.get("project") or "")} · {len(g["rows"])} note'
-            f'{"s" if len(g["rows"]) != 1 else ""} · {_ago(g["last_activity"])}',
-            rows))
-    return "".join(out)
-
-
 def render(data: dict) -> str:
     """One self-contained page. No network, no external assets.
 
@@ -1834,12 +1855,16 @@ def render(data: dict) -> str:
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
         n_live_now=len(data.get("live_now") or []),
+        # The page stopped having a Notes section when notes moved onto their
+        # rows, and that section was the only thing telling anyone the tier
+        # exists. An empty store now says so here, where the counts are.
+        notes_line=(f'{len(data.get("notes") or [])} notes'
+                    if data.get("notes") else
+                    'no notes yet — write one with <code>/remember</code>'),
         live_now=_live_now_html(data.get("live_now") or []),
         n_at_hand=len(data.get("waiting_at_hand") or []),
         n_closed=len(data.get("waiting_closed") or []),
         grouped_closed=_grouped_closed_html(data.get("grouped_closed") or []),
-        n_notes=len(data.get("notes") or []),
-        notes=_notes_html(data.get("grouped_notes") or []),
         waiting=_waiting_rows_html(data.get("waiting_at_hand") or []),
         data=_embed(data),
     )

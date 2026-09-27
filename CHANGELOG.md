@@ -16,6 +16,14 @@
 
 ### Changed
 
+- `scad view` puts a session's notes on its row, as a third block of the context fold beside
+  what it opened with and what it last said, and the separate Notes section is gone. A note was
+  previously findable only by scrolling to that section and matching session ids by eye, which is
+  a poor fate for the one tier that cannot be re-derived. Up to four per row, newest first, with
+  `+N more` beyond that. **Tag chips went with the section** — twelve per note across four notes
+  would have dominated every row; tags stay searchable through `notes ls --about` and
+  `search --notes`. The `/remember` hint the section used to carry moved to the page header, so
+  removing the section did not make the tier harder to discover.
 - `scad view` groups the all-sessions list by recency: Today, Yesterday, This week, This month,
   Older, newest first, with a count per heading. This answers the standing question of whether
   `--days` should default to something finite — grouping needs no threshold and hides nothing,

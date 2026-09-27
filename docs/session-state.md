@@ -131,6 +131,11 @@ command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.
 
+A session's notes ride on its row, in the same fold as its opening ask and its
+last word, so the authored tier is visible where the session is rather than in a
+list of its own. Tags are not on the row; `scad notes ls --about NAME` and
+`scad search --notes` are how a tag is searched.
+
 All sessions are grouped by when they last ran — Today, Yesterday, This week,
 This month, Older — so the months-old rows fall to the bottom under a heading
 rather than being cut off by a day threshold. The grouping happens in the

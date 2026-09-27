@@ -872,10 +872,16 @@ class TestNotesSection:
         assert len(data["notes"]) == 1
         assert data["grouped_notes"][0]["session_id"] == "S1"
 
-    def test_tags_render_as_chips(self, tmp_path):
+    def test_a_notes_title_and_kind_reach_the_page(self, tmp_path):
+        """Notes moved onto their session's row (2026-09-27) and the row carries
+        what identifies a note — its kind and what it said. **Tag chips went
+        with the section**: up to twelve per note, four notes per row, would
+        have dominated every row. Tags stay searchable through
+        `scad notes ls --about` and `scad search --notes`."""
         html = render(gather(self._with_note(tmp_path), [], set()))
-        assert 'class="tag">append-only<' in html
-        assert 'class="tag">jsonl<' in html
+        assert 'class="fold-tag">notes<' in html
+        assert 'class="note-kind"' in html
+        assert 'class="tag">append-only<' not in html
 
     def test_topic_and_relation_are_shown(self, tmp_path):
         # relation is derived, not stored: a first note on a fresh topic with no
@@ -902,6 +908,9 @@ class TestNotesSection:
         assert "</html>" in render(gather(conn, [], set()))
 
     def test_an_empty_notes_store_says_how_to_write_one(self, tmp_path):
+        """The Notes section was the only place the page named the tier. With
+        the section gone the hint has to live somewhere, or removing it to make
+        notes visible would have made them harder to discover."""
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/repo")
         assert "/remember" in render(gather(conn, [], set()))
@@ -1156,8 +1165,10 @@ class TestTabsInThePage:
                      "VALUES ('S1', 0, 1, 'topic', 'a note', '/n.jsonl')")
         conn.commit()
         html = render(gather(conn, [], set()))
-        section = html[html.index("<h2>Notes"):html.index("<h2>All sessions")]
-        assert 'data-project="alpha"' in section
+        # Notes ride on their session's row now, so they inherit the row's
+        # project rather than declaring one of their own.
+        assert 'data-project="alpha"' in html
+        assert "a note" in html
 
     def test_an_empty_section_says_so_in_words(self, tmp_path):
         html = self._html(tmp_path)
@@ -1613,3 +1624,61 @@ class TestRecencyBuckets:
         html = self._html(tmp_path)
         assert "bucketed(" in html
         assert 'class="bucket"' in html
+
+
+class TestNotesOnTheRow:
+    """Notes are the authored tier — the one thing here that can never be
+    re-derived — and they sat in a section of their own, invisible unless you
+    scrolled to it and matched session ids by eye. On the row, the separate
+    section has nothing left to do."""
+
+    def _seed(self, tmp_path):
+        import json as _json
+        import time as _time
+        from scad.index import append_notes, connect
+        from scad.records import NoteRecord
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd="/repo", project="proj")
+        now = int(_time.time() * 1000)
+        append_notes(conn, "S1", [
+            NoteRecord(ts=now - 200, kind="handoff", topic="the-topic", title="first note"),
+            NoteRecord(ts=now - 100, kind="bug", topic="a-bug", title="second note"),
+        ], "/notes/S1.jsonl")
+        conn.commit()
+        return conn
+
+    def test_a_rows_notes_are_on_the_row(self, tmp_path):
+        from scad.view import gather
+        conn = self._seed(tmp_path)
+        row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S1")
+        assert row["n_notes"] == 2
+        # Newest first, and enough to read: what kind it was and what it said.
+        assert [n["title"] for n in row["notes"]] == ["second note", "first note"]
+        assert row["notes"][0]["kind"] == "bug"
+        assert row["notes"][0]["topic"] == "a-bug"
+
+    def test_a_session_with_no_notes_carries_an_empty_list(self, tmp_path):
+        from scad.index import connect
+        from scad.view import gather
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S2", "awaiting-user", cwd="/repo")
+        row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S2")
+        assert row["notes"] == [] and row["n_notes"] == 0
+
+    def test_the_server_rendered_row_shows_them(self, tmp_path):
+        from scad.view import session_row
+        html = session_row({"id": "S1", "agent": "claude", "kind": "main", "n_notes": 1,
+                            "notes": [{"kind": "handoff", "topic": "t", "title": "the note",
+                                       "ts": 1}]})
+        assert "the note" in html and "handoff" in html
+
+    def test_the_page_has_no_notes_section_of_its_own(self, tmp_path):
+        from scad.view import gather, render
+        html = render(gather(self._seed(tmp_path), [], set()))
+        assert 'data-sec="notes"' not in html
+        assert "second note" in html, "the note itself must still be on the page"
+
+    def test_the_client_side_list_renders_them_too(self, tmp_path):
+        from scad.view import gather, render
+        html = render(gather(self._seed(tmp_path), [], set()))
+        assert "function noteBlock" in html
