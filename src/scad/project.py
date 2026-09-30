@@ -9,8 +9,10 @@ with no scad vocabulary in it.
 redefining it means editing this file and running `scad reindex`, with no files moved.
 """
 
+from dataclasses import dataclass
 from pathlib import Path
 
+from scad.aliases import Rule, locate
 from scad.resolve import UNRESOLVED, ResolveConfig, Resolution, resolve
 
 UNFILED = "unfiled"
@@ -52,7 +54,18 @@ def _project_from_config(cfg) -> str:
     return cfg.name or UNFILED
 
 
-def project_resolution(cwd) -> tuple[str, Resolution]:
+@dataclass(frozen=True)
+class ProjectResolution(Resolution):
+    """The engine's answer, plus the alias rule that fired, if one did.
+
+    A subclass rather than a field on `Resolution`: the engine is shared with
+    consumers outside scad and must not know scad's vocabulary.
+    """
+
+    via_alias: Rule | None = None
+
+
+def project_resolution(cwd) -> tuple[str, ProjectResolution]:
     """A directory's project key, with the evidence that produced it.
 
     `project` is the retrieval join key, so a wrong one is worse than a missing
@@ -63,9 +76,15 @@ def project_resolution(cwd) -> tuple[str, Resolution]:
     `scad where` explains cannot drift from what the index recorded.
     """
     if cwd is None:
-        return UNFILED, Resolution(path=None, matched_by=UNRESOLVED)
-    res = resolve(SCAD_PROJECT, start=Path(cwd), interactive=False)
-    return (UNFILED if res.path is None else res.path.name), res
+        return UNFILED, ProjectResolution(path=None, matched_by=UNRESOLVED)
+    # A gone directory is translated through the alias file before the marker
+    # walk, which from a missing directory climbs into any marked ancestor and
+    # would answer with the ancestor's name. A directory that exists is never
+    # translated, so no rule can redirect a live session.
+    start, rule = locate(cwd)
+    res = resolve(SCAD_PROJECT, start=start, interactive=False)
+    return (UNFILED if res.path is None else res.path.name), ProjectResolution(
+        path=res.path, matched_by=res.matched_by, tried=res.tried, via_alias=rule)
 
 
 def resolve_project(cwd, scad_run_id: str | None = None) -> str:

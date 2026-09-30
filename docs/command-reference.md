@@ -98,7 +98,7 @@ No containers here. These start an agent in a **tmux pane on this machine** and 
 |---|---|---|
 | `session launch --agent claude\|codex\|kimi` | start the agent in tmux, resolve its session id, write a launch record | Handing a piece of work to an agent — possibly a different family from the one you are talking to. `--cwd` (default: here), `--prompt` for the first turn, `--window [NAME]` to land it in your own tmux session as a named window, `--name` for its display name, `--attach` to go in at the end. Detached otherwise. |
 | `session send <id> TEXT` / `--file PATH` | paste a later turn into the session's open pane and submit it | A follow-up to a session you launched. Refuses a closed session (use `resume`) and a pane at a dialog. |
-| `session resume <id>` | attach if the session is open, otherwise `exec` the agent with the cwd set | Getting back into any indexed session, launched by scad or not. `--print` emits the command instead — this is what the viewer copies. |
+| `session resume <id>` | attach if the session is open, otherwise `exec` the agent with the cwd set: the new place if the directory moved and a rule in `~/.scad/aliases` says where; the current directory, with a warning, if it is gone with no rule | Getting back into any indexed session, launched by scad or not. `--print` emits the command instead — this is what the viewer copies. |
 
 Notes that matter:
 
@@ -110,6 +110,19 @@ Notes that matter:
 - **`project` is checked before launching.** An `unfiled` target warns and names the `.scad-project` fix, and launches anyway.
 
 Verified by hand rather than in CI — see [`interactive-launch-verification.md`](interactive-launch-verification.md).
+
+---
+
+## `scad where` / `scad project`: attribution
+
+`project` is derived from a session's recorded cwd and is the key everything is retrieved by. See [session state](session-state.md#project-attribution).
+
+| Command | Does | When / conditions |
+|---|---|---|
+| `where [--start DIR]` | the project a directory resolves to, which marker matched, and what was tried | A session filed under `unfiled` or the wrong project. Shows `via alias:` when a rule in `~/.scad/aliases` answered for a directory that moved. |
+| `project ls` | projects with session counts | |
+| `project show <name>` | a project's sessions | `--limit N` |
+| `project aliases` | the rules in `~/.scad/aliases`, each `ok`, `stale` (old path still exists) or `broken` (new path missing) | After writing a rule for a directory that moved, and before any `reindex --rebuild` |
 
 ---
 

@@ -1550,3 +1550,83 @@ class TestAnEditedNoteLineReachesTheIndex:
         index_note_file(conn, p, "claude")
         titles = [r[0] for r in conn.execute("SELECT title FROM notes ORDER BY idx")]
         assert titles == ["edited", "second"]
+
+
+class TestAMovedDirectory:
+    """The failure the alias file exists for: after a directory moves, a
+    rebuild re-derives `project` from the recorded cwd, finds nothing there,
+    and files the session (and its notes with it) under `unfiled`.
+
+    Measured in the audit on an isolated SCAD_HOME / SCAD_ARCHIVE; this is that
+    lab, kept."""
+
+    def _seed(self, root):
+        import subprocess as sp
+
+        from scad.index import reindex, session_row
+
+        old = root / "old" / "myproj"
+        old.mkdir(parents=True)
+        sp.run(["git", "init", "-q", str(old)], check=True, capture_output=True)
+        record = dict(MAIN[0], cwd=str(old))
+        transcript = arc_write(root / "arc", "claude/projects/-old-myproj/S1.jsonl", [record])
+        # No `project` on either note: one that names its project survives any
+        # rebuild, and this would pass without testing anything.
+        note = {"topic": "move", "title": "t", "text": "b", "cwd_at_write": str(old)}
+        append_note(note, session_id="S1")
+        append_note(note, session_id="N1")        # a session with no transcript
+        conn = connect(root / ".scad" / "index.sqlite")
+        reindex(conn)
+        assert [session_row(conn, s)["project"] for s in ("S1", "N1")] == ["myproj"] * 2
+
+        new = root / "new" / "myproj"
+        new.parent.mkdir()
+        old.rename(new)
+        return conn, old, new, transcript
+
+    def _projects(self, conn):
+        from scad.index import NOTE_PROJECT_SQL
+
+        sessions = [r["project"] for r in conn.execute(
+            "SELECT project FROM sessions WHERE id IN ('S1', 'N1') ORDER BY id")]
+        notes = [r["project"] for r in conn.execute(
+            f"SELECT {NOTE_PROJECT_SQL} FROM notes n "
+            f"LEFT JOIN sessions s ON s.id = n.session_id ORDER BY n.session_id")]
+        return sessions, notes
+
+    def _notes_ls(self):
+        import json
+
+        from click.testing import CliRunner
+
+        from scad.cli import main
+
+        result = CliRunner().invoke(main, ["notes", "ls", "--project", "myproj", "--json"])
+        assert result.exit_code == 0, result.output
+        return json.loads(result.stdout)
+
+    def test_a_rule_keeps_attribution_through_a_rebuild(self, noted):
+        from scad import aliases
+        from scad.index import reindex
+
+        conn, old, new, transcript = self._seed(noted)
+        before = transcript.read_bytes()
+        (noted / ".scad" / "aliases").write_text(f"{old} -> {new}\n")
+        aliases.reset()
+
+        reindex(conn, rebuild=True)
+
+        assert self._projects(conn) == (["myproj"] * 2, ["myproj"] * 2)
+        cwds = [r["cwd"] for r in conn.execute(
+            "SELECT cwd FROM sessions WHERE id IN ('S1', 'N1')")]
+        assert cwds == [str(old)] * 2                 # nothing recorded is rewritten
+        assert transcript.read_bytes() == before
+        assert len(self._notes_ls()) == 2
+
+    def test_without_a_rule_the_rebuild_still_loses_it(self, noted):
+        from scad.index import reindex
+
+        conn, _old, _new, _transcript = self._seed(noted)
+        reindex(conn, rebuild=True)
+        assert self._projects(conn) == (["unfiled"] * 2, ["unfiled"] * 2)
+        assert self._notes_ls() == []

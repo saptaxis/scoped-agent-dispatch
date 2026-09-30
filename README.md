@@ -116,7 +116,7 @@ scad reindex                                        # archive, then index
 scad search <query> [--notes]
 scad view                                           # render the index and open it
 scad notes ls [--kind handoff] [--about <name>]
-scad project ls|show <name>
+scad project ls|show <name>|aliases
 scad where                                          # how this directory resolves
 ```
 
@@ -131,6 +131,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 | `~/.scad/index.sqlite` | derived from the archive, rebuildable |
 | `~/.scad/runs/` | per-run workspace, clones and job metadata |
 | `~/.scad/configs/` | project configs |
+| `~/.scad/aliases` | `old path -> new path` rules for directories that moved, hand-written |
 
 ## Documentation
 
@@ -146,7 +147,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 
 ```bash
 pip install -e ".[dev]"
-pytest                 # 1486 tests
+pytest                 # 1579 tests
 ```
 
 The interactive launch routes are verified by hand, since every run costs a model

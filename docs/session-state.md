@@ -70,13 +70,18 @@ unlabelled.
 ### Reading the index from another program
 
 `scad session ls --json` is the contract. Reading `~/.scad/index.sqlite` directly
-ties a consumer to a schema nothing checks. The export carries, per row: `id`, `kind`, `parent_session_id`, `agent`, `cwd`, `project`,
+ties a consumer to a schema nothing checks. The export carries, per row: `id`, `kind`, `parent_session_id`, `agent`, `cwd`, `cwd_recorded`, `project`,
 `name`, `title`, `started`, `ended`, `n_turns`, `outcome`, `needs`, `grade`,
 `harness_state`; `last_turn` as `{ts, role, text}` with the text clipped to 240
 characters and empty turns skipped; and `live` as `{pid, name, status,
 waiting_for}` from Claude's process registry, or `null`. `live` is Claude-only,
 since the registry is Claude's; `name` there is fresher than the index's, which
 learns it on reindex.
+
+`cwd` is where the session's directory is now: resolved through symlinks, and
+through the alias file when the recorded directory has moved (see below).
+`cwd_recorded` is exactly what the transcript said. The two are equal unless
+the path went through a symlink or a move.
 
 ```bash
 scad session ls --json --kind main --limit 1000     # every main session, one call
@@ -109,6 +114,38 @@ A marker files future sessions. `project` is a computed column and the
 incremental pass is mtime-based, so re-filing what is already indexed needs
 `scad reindex --rebuild`. Redefining what a project means is an edit to
 `project.py` plus a reindex; no files move.
+
+#### A directory that moved
+
+`project` is derived from the recorded cwd, and a transcript records its cwd
+forever. After a directory moves, the recorded path points at nothing, and
+`scad reindex --rebuild` re-derives every row against the filesystem as it is
+now, so those sessions go to `unfiled` (or to the name of a marked ancestor).
+An ordinary reindex never recomputes `project`, so nothing is lost until a
+rebuild. **Write the rule before any rebuild.**
+
+The rules live in `~/.scad/aliases` (under `SCAD_HOME`), one per line:
+
+```
+# a directory that moved, and when
+/Users/me/Dropbox/old/place/proj -> /Users/me/code/proj   # 2026-10
+```
+
+- The separator is ` -> `, with the spaces. `#` after whitespace starts a
+  comment. Both sides must be absolute; `~` is expanded.
+- A rule is used only when the recorded directory no longer exists, so it can
+  never redirect a session whose directory is still there.
+- The longest matching old path wins. Rules do not chain: write `a -> c`, not
+  `a -> b` and `b -> c`.
+- Both sides, and the recorded path, are resolved through symlinks before they
+  are compared, so either spelling of a symlinked path matches the other.
+- A bad line is skipped with a warning on stderr; the rest still load.
+
+`scad project aliases` lists the rules: `ok` (the old path is gone and the new
+one exists), `stale` (the old path still exists, so the rule does nothing), or
+`broken` (the new path is missing too). `scad where --start <old path>` shows a
+`via alias:` line when a rule answered. Nothing recorded is rewritten: not the
+transcripts, not the archive, not the index's `cwd`.
 
 ## `scad view`
 
@@ -218,6 +255,14 @@ session is a second process on one transcript: it
 appends its own entries, the chain forks, and until the original process exits every
 later resume follows the fork and hides the original's turns. Go through `session
 resume`, or attach to the pane, while a session is open.
+
+When a session's directory has moved and a rule in `~/.scad/aliases` says
+where, `session resume` resumes there and says so. When it is gone with no rule,
+it still resumes, since `claude --resume` does not need the directory, but
+warns on stderr that the agent will start in the current directory and names the rule
+that would fix it; `--print` drops the `cd`, which would fail, and `scad view`
+marks the row `directory gone`. A rule whose new path does not exist is refused;
+`scad project aliases` marks it `broken`.
 
 Gates shown in the pane are answered by matching the option label, never by
 pressing Enter, whose default on codex's update gate runs `curl ... | sh`. Gates

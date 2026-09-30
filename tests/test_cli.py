@@ -2929,9 +2929,17 @@ class TestSessionResume:
     ones scad launched. A launch record only sharpens it.
     """
 
+    @pytest.fixture(autouse=True)
+    def _repo(self, tmp_path):
+        # A directory that exists: a resume refuses one that does not.
+        self.repo = tmp_path / "repo"
+        self.repo.mkdir(exist_ok=True)
+
     def _seed(self, tmp_path, monkeypatch, session_id="S1", agent="claude",
-              cwd="/repo", kind=None):
+              cwd=None, kind=None):
         import time as _time
+
+        cwd = cwd or str(self.repo)
         from scad.index import connect
         from scad.records import KIND_MAIN, SessionRecord
 
@@ -2960,27 +2968,26 @@ class TestSessionResume:
         calls = self._exec_spy(monkeypatch)
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
         assert result.exit_code == 0, result.output
-        assert result.output.strip() == "cd /repo && claude --resume S1"
+        assert result.output.strip() == f"cd {self.repo} && claude --resume S1"
         assert calls == []
 
     def test_a_codex_session_prints_codex_resume(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch, session_id="C1", agent="codex")
         self._exec_spy(monkeypatch)
         result = runner.invoke(main, ["session", "resume", "C1", "--print"])
-        assert result.output.strip() == "cd /repo && codex resume C1"
+        assert result.output.strip() == f"cd {self.repo} && codex resume C1"
 
     def test_a_kimi_session_gets_its_prefix_back(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch, session_id="abc-123", agent="kimi")
         self._exec_spy(monkeypatch)
         result = runner.invoke(main, ["session", "resume", "abc-123", "--print"])
-        assert result.output.strip() == "cd /repo && kimi --session session_abc-123"
+        assert result.output.strip() == f"cd {self.repo} && kimi --session session_abc-123"
 
     def test_a_closed_session_execs_the_agent_with_the_cwd_set(
             self, runner, tmp_path, monkeypatch):
         """`os.execvp`, not a shell: the caller lands in the session with no
         wrapper process left behind holding a pipe open."""
-        repo = tmp_path / "repo"
-        repo.mkdir()
+        repo = self.repo
         self._seed(tmp_path, monkeypatch, cwd=str(repo))
         calls = self._exec_spy(monkeypatch)
         chdirs = []
@@ -2991,17 +2998,6 @@ class TestSessionResume:
         assert result.exit_code == 0, result.output
         assert calls == [["claude", "--resume", "S1"]]
         assert chdirs == [str(repo)]
-
-    def test_a_cwd_that_is_gone_still_resumes(self, runner, tmp_path, monkeypatch):
-        """Recorded cwds outlive their directories; the conversation does not
-        stop existing because the folder was moved."""
-        self._seed(tmp_path, monkeypatch, cwd="/gone/away")
-        calls = self._exec_spy(monkeypatch)
-        monkeypatch.setattr("scad.cli.os.chdir", lambda p: None)
-        result = runner.invoke(main, ["session", "resume", "S1"])
-        assert result.exit_code == 0, result.output
-        assert calls == [["claude", "--resume", "S1"]]
-        assert "gone/away" in result.output
 
     def test_an_unknown_session_says_so(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
@@ -3023,15 +3019,21 @@ class TestSessionResume:
 class TestResumeIsLiveFirst:
     """Attach to a session that is open; never start a second process on it."""
 
+    @pytest.fixture(autouse=True)
+    def _repo(self, tmp_path):
+        # A directory that exists: a resume refuses one that does not.
+        self.repo = tmp_path / "repo"
+        self.repo.mkdir(exist_ok=True)
+
     def _record(self, tmp_path, monkeypatch, target="main:3.1", **kw):
         from scad.launch import write_record
 
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
         monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
-        record = {"agent": "claude", "session_id": "S1", "cwd": "/repo",
+        record = {"agent": "claude", "session_id": "S1", "cwd": str(self.repo),
                   "tmux": target, "started": "2026-07-30T14:30:00Z",
-                  "resume": "cd /repo && claude --resume S1",
+                  "resume": f"cd {self.repo} && claude --resume S1",
                   "provenance": "minted"}
         record.update(kw)
         write_record(record)
@@ -3049,7 +3051,7 @@ class TestResumeIsLiveFirst:
 
         self._record(tmp_path, monkeypatch, target="main:11.0", pane_id="%45")
         # The pane was joined into another window: same id, new path.
-        self._panes(monkeypatch, TmuxPane("main:0.1", "/repo", "2.1.270", pid=1))
+        self._panes(monkeypatch, TmuxPane("main:0.1", str(self.repo), "2.1.270", pid=1))
         monkeypatch.setattr("scad.cli.pane_target", lambda rec: "main:0.1")
         calls = []
         monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
@@ -3063,7 +3065,7 @@ class TestResumeIsLiveFirst:
         from scad.live import TmuxPane
 
         self._record(tmp_path, monkeypatch)
-        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        self._panes(monkeypatch, TmuxPane("main:3.1", str(self.repo), "2.1.219"))
         calls = []
         monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
 
@@ -3073,6 +3075,22 @@ class TestResumeIsLiveFirst:
         assert calls and calls[0][0] == "tmux"
         assert "main:3.1" in calls[0]
         assert "main:3.1" in result.output
+
+    def test_an_open_pane_is_attached_to_even_when_its_directory_is_gone(
+            self, runner, tmp_path, monkeypatch):
+        """Attaching needs no directory. Only a resume is refused for a
+        missing one, so the check must not run before the pane is found."""
+        from scad.live import TmuxPane
+
+        self._record(tmp_path, monkeypatch, cwd=str(tmp_path / "gone"))
+        self._panes(monkeypatch, TmuxPane("main:3.1", str(tmp_path / "gone"), "2.1.219"))
+        calls = []
+        monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
+
+        result = runner.invoke(main, ["session", "resume", "S1"])
+
+        assert result.exit_code == 0, result.output
+        assert calls and calls[0][0] == "tmux"
 
     def test_a_recorded_pane_that_is_gone_falls_back_to_resuming(
             self, runner, tmp_path, monkeypatch):
@@ -3092,7 +3110,7 @@ class TestResumeIsLiveFirst:
         from scad.live import TmuxPane
 
         self._record(tmp_path, monkeypatch)
-        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "zsh"))
+        self._panes(monkeypatch, TmuxPane("main:3.1", str(self.repo), "zsh"))
         calls = []
         monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
         monkeypatch.setattr("scad.cli.os.chdir", lambda p: None)
@@ -3108,9 +3126,9 @@ class TestResumeIsLiveFirst:
         from scad.live import TmuxPane
 
         self._record(tmp_path, monkeypatch)
-        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        self._panes(monkeypatch, TmuxPane("main:3.1", str(self.repo), "2.1.219"))
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
-        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert result.stdout.strip() == f"cd {self.repo} && claude --resume S1"
 
     def test_print_warns_on_stderr_when_the_recorded_pane_is_live(
             self, runner, tmp_path, monkeypatch):
@@ -3121,9 +3139,9 @@ class TestResumeIsLiveFirst:
         from scad.live import TmuxPane
 
         self._record(tmp_path, monkeypatch)
-        self._panes(monkeypatch, TmuxPane("main:3.1", "/repo", "2.1.219"))
+        self._panes(monkeypatch, TmuxPane("main:3.1", str(self.repo), "2.1.219"))
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
-        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert result.stdout.strip() == f"cd {self.repo} && claude --resume S1"
         assert "main:3.1" in result.stderr
         assert "open" in result.stderr
 
@@ -3134,9 +3152,9 @@ class TestResumeIsLiveFirst:
         self._record(tmp_path, monkeypatch)
         self._panes(monkeypatch)
         monkeypatch.setattr("scad.cli.claude_live_sessions",
-                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd="/repo")])
+                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd=str(self.repo))])
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
-        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert result.stdout.strip() == f"cd {self.repo} && claude --resume S1"
         assert "4242" in result.stderr
         assert "open" in result.stderr
 
@@ -3145,7 +3163,7 @@ class TestResumeIsLiveFirst:
         self._record(tmp_path, monkeypatch)
         self._panes(monkeypatch)
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
-        assert result.stdout.strip() == "cd /repo && claude --resume S1"
+        assert result.stdout.strip() == f"cd {self.repo} && claude --resume S1"
         assert result.stderr == ""
 
     def test_a_session_the_registry_proves_is_running_is_not_started_twice(
@@ -3158,7 +3176,7 @@ class TestResumeIsLiveFirst:
         self._record(tmp_path, monkeypatch)
         self._panes(monkeypatch)
         monkeypatch.setattr("scad.cli.claude_live_sessions",
-                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd="/repo")])
+                            lambda *a, **k: [ClaudeSession("S1", 4242, cwd=str(self.repo))])
         calls = []
         monkeypatch.setattr("scad.cli._exec", lambda argv: calls.append(argv))
 
@@ -3172,11 +3190,11 @@ class TestResumeIsLiveFirst:
             self, runner, tmp_path, monkeypatch):
         """Read-back is eventually consistent behind an index pass; getting
         back into the session you just launched must not be."""
-        self._record(tmp_path, monkeypatch, agent="codex", cwd="/repo")
+        self._record(tmp_path, monkeypatch, agent="codex", cwd=str(self.repo))
         self._panes(monkeypatch)
         result = runner.invoke(main, ["session", "resume", "S1", "--print"])
         assert result.exit_code == 0, result.output
-        assert result.output.strip() == "cd /repo && codex resume S1"
+        assert result.output.strip() == f"cd {self.repo} && codex resume S1"
 
 
 class TestWhereDiagnostics:
@@ -3966,3 +3984,278 @@ class TestLaunchName:
         self._fake(monkeypatch)
         runner.invoke(main, ["session", "launch", "--agent", "claude", "--cwd", str(tmp_path)])
         assert session_row(connect(), "S1")["name"] is None
+
+
+def _alias_home(tmp_path, monkeypatch, text=""):
+    """A SCAD_HOME of the test's own with this alias file in it."""
+    from scad import aliases
+
+    home = tmp_path / ".scad"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("SCAD_HOME", str(home))
+    monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+    (home / "aliases").write_text(text)
+    aliases.reset()
+    return home
+
+
+def _git(path):
+    import subprocess as sp
+
+    path.mkdir(parents=True, exist_ok=True)
+    sp.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    return path
+
+
+class TestWhereNamesTheAlias:
+    def test_a_moved_directory_names_the_rule(self, runner, tmp_path, monkeypatch):
+        new = _git(tmp_path / "new" / "myproj")
+        old = tmp_path / "old" / "myproj"
+        _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        result = runner.invoke(main, ["where", "--start", str(old)])
+        assert result.exit_code == 0, result.output
+        first, second = result.output.splitlines()[:2]
+        assert first == f"[scad] project: myproj  ({new})"
+        assert second == "[scad] via alias: …/old/myproj -> …/new/myproj"
+
+    def test_a_stale_rule_says_nothing(self, runner, tmp_path, monkeypatch):
+        here = _git(tmp_path / "here")
+        _alias_home(tmp_path, monkeypatch, f"{here} -> {_git(tmp_path / 'there')}\n")
+        result = runner.invoke(main, ["where", "--start", str(here)])
+        assert "via alias" not in result.output
+        assert "project: here" in result.output
+
+    def test_a_gone_directory_with_no_rule_points_at_the_alias_file(
+            self, runner, tmp_path, monkeypatch):
+        home = _alias_home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["where", "--start", str(tmp_path / "gone")])
+        assert result.exit_code == 0, result.output
+        assert "touch" not in result.output
+        assert str(home / "aliases") in result.output
+        assert "scad project aliases" in result.output
+
+
+class TestProjectAliases:
+    def test_no_file(self, runner, tmp_path, monkeypatch):
+        home = _alias_home(tmp_path, monkeypatch)
+        (home / "aliases").unlink()
+        result = runner.invoke(main, ["project", "aliases"])
+        assert result.exit_code == 0, result.output
+        assert str(home / "aliases") in result.output
+        assert "no alias file" in result.output
+
+    def test_each_rule_with_its_status(self, runner, tmp_path, monkeypatch):
+        _git(tmp_path / "new")
+        _git(tmp_path / "here")
+        _alias_home(tmp_path, monkeypatch,
+                    f"{tmp_path}/gone -> {tmp_path}/new\n"
+                    f"{tmp_path}/here -> {tmp_path}/new2\n"
+                    f"{tmp_path}/gone2 -> {tmp_path}/missing\n"
+                    f"this line is not a rule\n")
+        result = runner.invoke(main, ["project", "aliases"])
+        assert result.exit_code == 0, result.output
+        lines = result.stdout.splitlines()
+        assert lines[0].endswith("3 rules")
+        assert lines[1].split()[0] == "ok"
+        assert lines[2].split()[0] == "stale" and lines[2].endswith("(old path still exists)")
+        assert lines[3].split()[0] == "broken" and lines[3].endswith("(new path does not exist)")
+        assert len(lines) == 4
+        assert ":4: skipped:" in result.stderr
+
+
+def _seed_cwds(monkeypatch, cwds: dict):
+    """One main session per id, each with the recorded cwd given."""
+    import time as _time
+    from scad.index import connect, upsert_session
+    from scad.records import KIND_MAIN, SessionRecord
+
+    monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: [])
+    now = int(_time.time() * 1000)
+    conn = connect()
+    for i, (sid, cwd) in enumerate(cwds.items()):
+        rec = SessionRecord(id=sid, kind=KIND_MAIN, agent="claude", source="claude-transcript",
+                            cwd=cwd, started=now - 1000 * (i + 2), ended=now - 1000 * (i + 1),
+                            outcome="awaiting-user")
+        upsert_session(conn, rec, machine="mac", project="proj",
+                       archive_path=f"/arc/{sid}.jsonl", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+    conn.commit()
+    return conn
+
+
+class TestTheExportServesWhereTheDirectoryIsNow:
+    """`cwd` is where the directory is now; `cwd_recorded` is what the
+    transcript said. orglens attributes by containment against homes as they
+    resolve today, so a recorded path that moved would lose its sessions."""
+
+    def _moved(self, tmp_path, monkeypatch):
+        new = _git(tmp_path / "new" / "my proj")
+        old = tmp_path / "old" / "my proj"
+        home = _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        return home, old, new
+
+    def _rows(self, runner):
+        result = runner.invoke(main, ["session", "ls", "--json"])
+        assert result.exit_code == 0, result.output
+        return {r["id"]: r for r in json.loads(result.stdout)}, result
+
+    def test_a_moved_session_serves_the_new_path(self, runner, tmp_path, monkeypatch):
+        _home, old, new = self._moved(tmp_path, monkeypatch)
+        conn = _seed_cwds(monkeypatch, {"S1": str(old)})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(new)
+        assert rows["S1"]["cwd_recorded"] == str(old)
+        # Nothing recorded is rewritten.
+        assert conn.execute("SELECT cwd FROM sessions WHERE id = 'S1'").fetchone()[0] == str(old)
+
+    def test_an_unmoved_session_serves_the_same_path_twice(self, runner, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        here = _git(tmp_path / "here")
+        _seed_cwds(monkeypatch, {"S1": str(here), "S2": None, "S3": "/workspace/x"})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == rows["S1"]["cwd_recorded"] == str(here)
+        assert rows["S2"]["cwd"] is None and rows["S2"]["cwd_recorded"] is None
+        assert rows["S3"]["cwd"] == "/workspace/x"
+
+    def test_a_bridge_symlink_serves_the_resolved_path(self, runner, tmp_path, monkeypatch):
+        _home, old, new = self._moved(tmp_path, monkeypatch)
+        old.parent.mkdir()
+        old.symlink_to(new)
+        _seed_cwds(monkeypatch, {"S1": str(old)})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(new)
+        assert rows["S1"]["cwd_recorded"] == str(old)
+
+    def test_the_symlink_spelling_serves_the_real_one(self, runner, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        real = _git(tmp_path / "real")
+        (tmp_path / "link").symlink_to(real)
+        _seed_cwds(monkeypatch, {"S1": str(tmp_path / "link")})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(real)
+
+    def test_a_bad_alias_line_never_reaches_stdout(self, runner, tmp_path, monkeypatch):
+        home, old, new = self._moved(tmp_path, monkeypatch)
+        (home / "aliases").write_text(f"not a rule\n{old} -> {new}\n")
+        _seed_cwds(monkeypatch, {"S1": str(old)})
+        rows, result = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(new)
+        assert ":1: skipped:" in result.stderr
+
+    def test_session_show_prints_both_when_they_differ(self, runner, tmp_path, monkeypatch):
+        _home, old, new = self._moved(tmp_path, monkeypatch)
+        here = _git(tmp_path / "here")
+        _seed_cwds(monkeypatch, {"S1": str(old), "S2": str(here)})
+        out = runner.invoke(main, ["session", "show", "S1"]).output
+        assert f"cwd                {new}\n" in out
+        assert f"cwd_recorded       {old}\n" in out
+        out = runner.invoke(main, ["session", "show", "S2"]).output
+        assert f"cwd                {here}\n" in out
+        assert "cwd_recorded" not in out
+
+
+class TestResumeAfterAMove:
+    """A resume never runs anywhere but the session's directory. When that is
+    gone, scad resumes where a rule says it moved to, or refuses and says how
+    to write the rule."""
+
+    def _moved(self, tmp_path, monkeypatch, rule=True):
+        new = _git(tmp_path / "new" / "my proj")
+        old = tmp_path / "old" / "my proj"
+        home = _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n" if rule else "")
+        _seed_cwds(monkeypatch, {"S1": str(old)})
+        return home, old, new
+
+    def _spies(self, monkeypatch):
+        calls, chdirs = [], []
+        monkeypatch.setattr("scad.cli._exec", calls.append)
+        monkeypatch.setattr("scad.cli.os.chdir", chdirs.append)
+        return calls, chdirs
+
+    def test_print_cds_into_the_new_path(self, runner, tmp_path, monkeypatch):
+        import shlex as _shlex
+
+        _home, _old, new = self._moved(tmp_path, monkeypatch)
+        self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == f"cd {_shlex.quote(str(new))} && claude --resume S1\n"
+        assert "has moved" in result.stderr and "line 1" in result.stderr
+
+    def test_exec_resumes_in_the_new_path(self, runner, tmp_path, monkeypatch):
+        _home, _old, new = self._moved(tmp_path, monkeypatch)
+        calls, chdirs = self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1"])
+        assert result.exit_code == 0, result.output
+        assert chdirs == [str(new)]
+        assert calls == [["claude", "--resume", "S1"]]
+        assert "has moved" in result.output
+
+    def test_gone_with_no_rule_warns_and_prints_a_command_without_the_cd(
+            self, runner, tmp_path, monkeypatch):
+        """A deleted directory has no rule to write, and `claude --resume` does
+        not need the directory. The `cd` would fail and stop the `&&`, so it
+        is dropped, and stderr says so plainly."""
+        home, old, _new = self._moved(tmp_path, monkeypatch, rule=False)
+        self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "claude --resume S1\n"
+        assert str(old) in result.stderr and "no longer exists" in result.stderr
+        assert str(home / "aliases") in result.stderr
+
+    def test_gone_with_no_rule_warns_and_resumes_from_here(self, runner, tmp_path, monkeypatch):
+        home, old, _new = self._moved(tmp_path, monkeypatch, rule=False)
+        calls, chdirs = self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1"])
+        assert result.exit_code == 0, result.output
+        assert calls == [["claude", "--resume", "S1"]]
+        assert chdirs == []
+        assert "current directory" in result.stderr
+        assert str(home / "aliases") in result.stderr
+
+    def test_a_rule_whose_subdirectory_is_gone_warns_and_names_the_new_root(
+            self, runner, tmp_path, monkeypatch):
+        """The rule is right; the worktree the session ran in was deleted."""
+        new = _git(tmp_path / "new")
+        old = tmp_path / "old"
+        _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        _seed_cwds(monkeypatch, {"S1": str(old / "wt")})
+        self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == "claude --resume S1\n"
+        assert str(new) in result.stderr
+
+    def test_gone_with_a_broken_rule_names_the_rule(self, runner, tmp_path, monkeypatch):
+        home, old, _new = self._moved(tmp_path, monkeypatch, rule=False)
+        (home / "aliases").write_text(f"{old} -> {tmp_path}/missing\n")
+        self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "S1", "--print"])
+        assert result.exit_code == 1
+        assert "line 1" in result.stderr and f"{tmp_path}/missing" in result.stderr
+
+    def test_a_launch_record_alone_is_translated(self, runner, tmp_path, monkeypatch):
+        new = _git(tmp_path / "new")
+        old = tmp_path / "old"
+        _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        _seed_cwds(monkeypatch, {})
+        monkeypatch.setattr("scad.cli.read_record",
+                            lambda sid: {"session_id": sid, "agent": "claude", "cwd": str(old)})
+        self._spies(monkeypatch)
+        result = runner.invoke(main, ["session", "resume", "L1", "--print"])
+        assert result.exit_code == 0, result.output
+        assert result.stdout == f"cd {new} && claude --resume L1\n"
+
+    def test_what_never_had_a_host_directory_resumes_as_before(
+            self, runner, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        conn = _seed_cwds(monkeypatch, {"N1": None, "X1": str(tmp_path / ".codex" / "p"),
+                                        "R1": "/workspace/x"})
+        conn.execute("UPDATE sessions SET scad_run_id = 'run-1' WHERE id = 'R1'")
+        conn.commit()
+        self._spies(monkeypatch)
+        for sid in ("N1", "X1", "R1"):
+            result = runner.invoke(main, ["session", "resume", sid, "--print"])
+            assert result.exit_code == 0, (sid, result.output)

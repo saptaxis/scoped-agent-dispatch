@@ -2,6 +2,51 @@
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-09-30
+
+**The release where a directory can move without taking its sessions with it.** `project` is
+derived from each session's recorded cwd, resolved against the filesystem as it is now, and a
+transcript records its cwd forever. So after a directory moves, `reindex --rebuild` re-derives
+every row, finds nothing at the old path, and files the sessions under `unfiled`, or under the
+name of any marked directory above it. Measured on a copy before the fix: the rebuild is the
+only step that loses attribution, and ordinary reindexes never recompute it. The move that
+forced this one affected 775 of the 1,921 sessions indexed on the machine it was measured on.
+
+### Added
+
+- Path aliases: `~/.scad/aliases` holds hand-written `old path -> new path` rules. A rule is
+  used only when a session's recorded directory no longer exists, so it can never redirect one
+  that is still there. The longest matching rule wins, and rules do not chain. Nothing recorded is
+  rewritten: not the transcripts, not the archive, not the index's `cwd`.
+- Both sides of a rule, and every recorded path, are resolved through symlinks before they are
+  compared. Of the 775 sessions above, 774 recorded the `~/Library/CloudStorage/Dropbox`
+  spelling and one recorded `~/Dropbox`; a rule in either spelling matches both.
+- `scad project aliases` lists the rules as `ok`, `stale` (the old path still exists) or
+  `broken` (the new path is missing). `scad where` shows a `via alias:` line when a rule
+  answered, and for a directory that no longer exists it points at the alias file rather than
+  suggesting a marker.
+
+### Changed
+
+- `session ls --json` serves `cwd` as where the directory is now, through symlinks and the
+  alias file, and adds `cwd_recorded`, the path exactly as the transcript recorded it. This
+  changes an existing field's meaning: a row whose recorded path went through a symlink now
+  serves the resolved path even when nothing moved (`/tmp/x` becomes `/private/tmp/x` on
+  macOS). `session show` and the viewer show the same.
+- `session resume` resumes where a rule says a moved directory went, and says so. For a
+  directory that is gone with no rule it still resumes, since `claude --resume` does not need
+  the directory, and warns that the agent will start in the current directory; `--print` and the viewer
+  drop the `cd`, which used to fail and stop the command. A rule whose new path does not exist
+  is refused.
+
+### Not done
+
+- Nothing warns before a rebuild. A directory that moved without a rule still goes to
+  `unfiled`, silently, exactly as before; the rule has to be written first.
+- Rules are per machine and edited by hand. There is no command that writes one.
+- A named `.scad-project` marker, which would stop a rename from orphaning future sessions,
+  is still open.
+
 ## [0.6.0] — 2026-09-27
 
 **The release where a launched session lands where you are looking.** A launch opened its own

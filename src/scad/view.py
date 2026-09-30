@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from scad.aliases import current_cwd
 from scad.index import NOTE_KIND_SQL, NOTE_PROJECT_SQL, NOTE_RELATION_SQL
 from scad.live import (
     ClaudeSession,
@@ -262,6 +263,18 @@ def _is_agent_state_dir(cwd: str) -> bool:
     return any(part in _AGENT_STATE for part in parts)
 
 
+def _cwd_gone(row: dict) -> bool:
+    """The session's directory is not there, even after the alias file.
+
+    Not for rows that never had a host directory to `cd` into: no cwd, an
+    agent's own state directory, or a container's `/workspace` path.
+    """
+    cwd = row.get("cwd")
+    if not cwd or _is_agent_state_dir(cwd) or row.get("scad_run_id"):
+        return False
+    return not Path(cwd).is_dir()
+
+
 def resume_argv(row: dict) -> list[str]:
     """The resume command as argv, for `os.execvp`. `[]` when there is none.
 
@@ -407,11 +420,25 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
     live_ids = live_ids or set()
     cwds = cwds if cwds is not None else set()
     out = []
+    now: dict[str | None, str | None] = {}
     for r in cursor_rows:
         row = dict(r)
+        # Where the directory is now, as the export serves it, and set before
+        # the resume command and the pane match are built from it.
+        row["cwd_recorded"] = row.get("cwd")
+        if row["cwd_recorded"] not in now:
+            now[row["cwd_recorded"]] = current_cwd(row["cwd_recorded"])
+        row["cwd"] = now[row["cwd_recorded"]]
+        row["cwd_gone"] = _cwd_gone(row)
         re_ = reentry_for(row, panes, running)
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
                           "target": re_.target, "goto": re_.goto}
+        if row["cwd_gone"] and row["reentry"]["command"]:
+            # Same rule as `scad session resume`: a `cd` into a gone directory
+            # fails and stops the `&&`, while the resume itself does not need
+            # the directory. So the command drops the `cd`, and the row says
+            # the agent will start somewhere else.
+            row["reentry"]["command"] = resume_command({**row, "cwd": None})
         row["status"] = status_for(row, live_ids, cwds, running)
         out.append(row)
     return out
@@ -541,7 +568,7 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
             "waiting_for": session.waiting_for or "",
             "started_at": session.started_at,
             # From the index: where it lives and how far it got.
-            "cwd": base.get("cwd") or session.cwd or "",
+            "cwd": base.get("cwd") or current_cwd(session.cwd) or "",
             "project": base.get("project"),
             "n_turns": base.get("n_turns") or 0,
             "ended": base.get("ended"),
@@ -618,7 +645,8 @@ def live_rows(sessions: list[ClaudeSession], panes: list[TmuxPane],
             "kind": "main", "name": base.get("name") or "",
             "first_text": base.get("first_text") or "", "last_text": base.get("last_text") or "",
             "status": "", "waiting_for": "", "started_at": 0,
-            "cwd": base.get("cwd") or rec.get("cwd") or "", "project": base.get("project"),
+            "cwd": base.get("cwd") or current_cwd(rec.get("cwd")) or "",
+            "project": base.get("project"),
             "n_turns": base.get("n_turns") or 0, "ended": base.get("ended"),
             "title": base.get("title"), "outcome": base.get("outcome"),
             "scad_run_id": base.get("scad_run_id"), "indexed": sid in by_id,
@@ -773,6 +801,8 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
         f"ORDER BY n.ts DESC"
     ).fetchall()]
+    for note in notes:
+        note["cwd"] = current_cwd(note["cwd"])
 
     # Notes belong ON the row, not only in their own section. A session with
     # three notes rendered identically to one with none, so the only way to find
@@ -1202,7 +1232,9 @@ function rows(list) {{
     heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
     esc(r.reentry.command) + '" title="' + esc(r.reentry.command) +
-    '" onclick="copy(this)">\u29c9 resume</button>' : '') + '</div></div>' +
+    '" onclick="copy(this)">\u29c9 resume</button>' : '') + (r.cwd_gone ?
+    ' <span class="dimmer" title="' + esc(r.cwd_recorded ?? "") + '">directory gone</span>' :
+    '') + '</div></div>' +
     '<div class="ctx-col">' + ctxFold(r) + '</div></div>').join('') + '</div>';
 }}
 
@@ -1662,6 +1694,9 @@ def _actions(row: dict) -> list[str]:
         return [_chip(f"scad run attach {run_id}", label="attach")]
     command = reentry.get("command") or resume_command(row)
     actions = [_chip(command, label="resume")] if command else []
+    if row.get("cwd_gone"):
+        where = _html.escape(str(row.get("cwd_recorded") or row.get("cwd") or ""))
+        actions.append(f'<span class="dimmer" title="{where}">directory gone</span>')
     goto = reentry.get("goto") or row.get("goto")
     if goto:
         actions.append(_chip(goto, ghost=True, label="pane"))

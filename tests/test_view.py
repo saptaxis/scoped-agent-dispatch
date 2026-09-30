@@ -249,7 +249,7 @@ class TestGather:
 
     def test_every_row_carries_a_reentry(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "W1", "awaiting-user")
+        _store(conn, "W1", "awaiting-user", cwd=str(tmp_path))
         r = gather(conn, [], set())["waiting"][0]
         assert r["reentry"]["kind"] == "resume"
         assert "claude --resume W1" in r["reentry"]["command"]
@@ -479,8 +479,8 @@ class TestStatus:
     def test_the_page_shows_the_resume_command_even_when_a_pane_matches(self, tmp_path):
         """A tmux target is ambiguous; the resume command never is."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
-        panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
+        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path))
+        panes = [TmuxPane("main:1.0", str(tmp_path), "2.1.219")]
         html = render(gather(conn, panes, set()))
         assert "claude --resume S1" in html
         assert "maybe-open" in html
@@ -671,14 +671,18 @@ class TestResumeCwd:
 
     def test_an_ordinary_repo_still_gets_its_cd(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "C3", "awaiting-user", cwd="/Users/vsr/code/scad")
+        repo = tmp_path / "code" / "scad"
+        repo.mkdir(parents=True)
+        _store(conn, "C3", "awaiting-user", cwd=str(repo))
         cmd = gather(conn, [], set())["waiting"][0]["reentry"]["command"]
-        assert cmd == "cd /Users/vsr/code/scad && claude --resume C3"
+        assert cmd == f"cd {repo} && claude --resume C3"
 
     def test_a_dotdir_that_is_not_agent_state_is_untouched(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "C4", "awaiting-user", cwd="/Users/vsr/.config/nvim")
-        assert "cd /Users/vsr/.config/nvim" in gather(conn, [], set())["waiting"][0]["reentry"]["command"]
+        nvim = tmp_path / ".config" / "nvim"
+        nvim.mkdir(parents=True)
+        _store(conn, "C4", "awaiting-user", cwd=str(nvim))
+        assert f"cd {nvim}" in gather(conn, [], set())["waiting"][0]["reentry"]["command"]
 
 
 class TestHumanName:
@@ -773,8 +777,9 @@ class TestPresentation:
 class TestHoverTitles:
     def test_a_command_chip_carries_its_full_text(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        long_cwd = "/Users/vsr/Library/CloudStorage/Dropbox/code/a-very-long-project-name-here"
-        _store(conn, "S1", "awaiting-user", cwd=long_cwd)
+        long_cwd = tmp_path / "Library" / "CloudStorage" / "a-very-long-project-name-here"
+        long_cwd.mkdir(parents=True)
+        _store(conn, "S1", "awaiting-user", cwd=str(long_cwd))
         html = render(gather(conn, [], set()))
         assert f'title="cd {long_cwd} &amp;&amp; claude --resume S1"' in html
 
@@ -1682,3 +1687,76 @@ class TestNotesOnTheRow:
         from scad.view import gather, render
         html = render(gather(self._seed(tmp_path), [], set()))
         assert "function noteBlock" in html
+
+
+def _alias_home(tmp_path, monkeypatch, text=""):
+    from scad import aliases
+
+    home = tmp_path / ".scad"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("SCAD_HOME", str(home))
+    (home / "aliases").write_text(text)
+    aliases.reset()
+    return home
+
+
+class TestRowsServeWhereTheDirectoryIsNow:
+    """The row's `cwd` is the one the export serves, set before the resume
+    command and the pane match are built from it."""
+
+    def _moved(self, tmp_path, monkeypatch):
+        new = tmp_path / "new" / "myproj"
+        new.mkdir(parents=True)
+        old = tmp_path / "old" / "myproj"
+        _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        return old, new
+
+    def test_a_moved_row_carries_both_paths(self, tmp_path, monkeypatch):
+        old, new = self._moved(tmp_path, monkeypatch)
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd=str(old))
+        row = gather(conn, [], set())["waiting"][0]
+        assert row["cwd"] == str(new)
+        assert row["cwd_recorded"] == str(old)
+
+    def test_a_gone_row_with_no_rule_keeps_its_recorded_path(self, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "gone"))
+        row = gather(conn, [], set())["waiting"][0]
+        assert row["cwd"] == row["cwd_recorded"] == str(tmp_path / "gone")
+
+
+class TestAGoneDirectory:
+    """The page follows `session resume`: a moved directory resumes in its new
+    place, and a gone one still resumes, without a `cd` that would fail."""
+
+    def test_a_moved_row_resumes_in_the_new_path(self, tmp_path, monkeypatch):
+        new = tmp_path / "new"
+        new.mkdir()
+        _alias_home(tmp_path, monkeypatch, f"{tmp_path}/old -> {new}\n")
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "old"))
+        row = gather(conn, [], set())["waiting"][0]
+        assert row["reentry"]["command"] == f"cd {new} && claude --resume S1"
+        assert not row["cwd_gone"]
+
+    def test_a_gone_row_resumes_without_the_cd_and_says_why(self, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "gone"))
+        data = gather(conn, [], set())
+        row = data["waiting"][0]
+        assert row["cwd_gone"]
+        assert row["reentry"]["command"] == "claude --resume S1"
+        html = render(data)
+        assert 'data-cmd="claude --resume S1"' in html
+        assert "directory gone" in html
+
+    def test_rows_that_never_had_a_host_directory_keep_theirs(self, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "C1", "awaiting-user", agent="codex", cwd=str(tmp_path / ".codex" / "p"))
+        row = gather(conn, [], set())["waiting"][0]
+        assert not row["cwd_gone"]
+        assert row["reentry"]["command"] == "codex resume C1"

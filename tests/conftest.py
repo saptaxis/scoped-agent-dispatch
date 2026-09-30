@@ -86,6 +86,20 @@ def _no_inherited_session_ids(monkeypatch):
         monkeypatch.delenv(var, raising=False)
 
 
+@pytest.fixture(autouse=True)
+def _fresh_aliases():
+    """The alias rules are read once per process and cached on the file's path.
+
+    Without a reset, a rule set loaded under one test's SCAD_HOME, or loaded
+    before a test moved a directory, would still be answering in the next.
+    """
+    from scad import aliases
+
+    aliases.reset()
+    yield
+    aliases.reset()
+
+
 def pytest_unconfigure(config):
     global _git_config_dir
 
