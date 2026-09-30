@@ -2,13 +2,24 @@
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-01
+
+**The release where a directory can move twice.** 0.7.0's aliases carried the docs repository
+from `~/Dropbox/traitful-code/traitful-docs` to `~/Dropbox/inwit`. The next step is a
+restructure inside it: about 30 unit folders move from `inwit/docs/projects/X` to
+`inwit/{personal,traitful}/projects/X`. The 777 sessions recorded before the first move are
+translated by its rule into `inwit/docs/projects/X`, which the restructure removes, and in
+0.7.0 nothing took them further: every rule would have had to be written twice, once per earlier
+spelling. scad's own label is unaffected (every such session resolves to `inwit`); orglens's
+attribution by path is affected: 7 of the 48 inwit sessions it sees on 2026-10-01.
+
 ### Changed
 
 - Path aliases chain. A rule that leads to a path which is itself gone hands it to the next
   matching rule, until the path exists, so each move needs only its own rules: a repository
   that moved and then had folders moved inside it is one rule per move, written in the
-  current spelling, rather than one per earlier spelling. No rule is used twice in a chain;
-  one that runs into a missing directory keeps its last hop whose new side exists, so a
+  current spelling, rather than one per earlier spelling. No rule is used twice in a chain. A
+  chain that runs into a missing directory keeps its last hop whose new side exists, so a
   wrong later rule no longer costs the earlier translation. `scad where` shows every hop,
   and `scad project aliases` counts a rule whose new side moved on as `ok` when its chain
   arrives.
@@ -19,6 +30,13 @@
   that way, e.g. `inwit/docs/projects/orglens`) failed at clone time: `git clone --local`
   refuses a subfolder. The repository containing the folder is now cloned, and `code sync` and
   `harvest` read from it too. A `worktree: false` repo is still mounted as the folder itself.
+
+### Not done
+
+- A chain still needs its first rule to reach somewhere. A rule written in an old spelling whose
+  new side is mistyped translates nothing, and a rebuild then walks up from the old path,
+  which may find no marker and file the session `unfiled`. Writing each rule in the current
+  spelling avoids it.
 
 ## [0.7.0] - 2026-09-30
 
