@@ -403,10 +403,10 @@ def where(start):
     target = _Path(start) if start else _Path.cwd()
     project, res = project_resolution(target)
 
-    rule = res.via_alias
-    shown = aliases.locate(target)[0] if rule else target
+    hops = res.via_aliases
+    shown = aliases.locate(target)[0] if hops else target
     click.echo(f"[scad] project: {project}  ({shown})")
-    if rule:
+    for rule in hops:
         click.echo(f"[scad] via alias: {_short(rule.old_written)} -> {_short(rule.new_written)}")
     if res.tried:
         click.echo(f"[scad] tried: {', '.join(res.tried)}")
@@ -2493,12 +2493,14 @@ def _resume_cwd(session_id: str, recorded, scad_run_id, quiet: bool):
     """
     if not recorded or _is_agent_state_dir(recorded) or scad_run_id:
         return recorded
-    here, rule = aliases.locate(recorded)
+    here, hops = aliases.locate(recorded)
+    rule = hops[-1] if hops else None
     if here.is_dir():
         if rule is not None:
             # On stderr under --print: the payload stays one clean command.
             click.echo(f"[scad] {recorded} has moved; resuming in {here}  "
-                       f"(alias, line {rule.line})", err=quiet)
+                       f"(alias, line{'s' if len(hops) > 1 else ''} "
+                       f"{', '.join(str(r.line) for r in hops)})", err=quiet)
         return str(here)
     if rule is None:
         broken = aliases.rule_for(aliases.normalise(recorded))

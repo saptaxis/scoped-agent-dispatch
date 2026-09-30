@@ -4259,3 +4259,33 @@ class TestResumeAfterAMove:
         for sid in ("N1", "X1", "R1"):
             result = runner.invoke(main, ["session", "resume", sid, "--print"])
             assert result.exit_code == 0, (sid, result.output)
+
+
+class TestWhereShowsEveryHop:
+    def test_a_two_hop_chain_prints_both_rules(self, runner, tmp_path, monkeypatch):
+        c = _git(tmp_path / "c")
+        _alias_home(tmp_path, monkeypatch, f"{tmp_path}/a -> {tmp_path}/b\n{tmp_path}/b -> {c}\n")
+        result = runner.invoke(main, ["where", "--start", str(tmp_path / "a")])
+        assert result.exit_code == 0, result.output
+        lines = [l for l in result.output.splitlines() if "via alias:" in l]
+        assert len(lines) == 2
+        assert f"({c})" in result.output.splitlines()[0]
+
+
+class TestTheExportFollowsAChain:
+    def test_a_session_from_before_the_repo_moved_lands_in_the_folder_it_moved_to(
+            self, runner, tmp_path, monkeypatch):
+        """What orglens reads: its containment check needs the unit's
+        current folder, not the repo's old layout."""
+        repo = _git(tmp_path / "inwit")
+        dest = repo / "personal" / "projects" / "x"
+        dest.mkdir(parents=True)
+        old = tmp_path / "traitful-docs" / "docs" / "projects" / "x"
+        _alias_home(tmp_path, monkeypatch,
+                    f"{tmp_path}/traitful-docs -> {repo}\n"
+                    f"{repo}/docs/projects/x -> {dest}\n")
+        _seed_cwds(monkeypatch, {"S1": str(old / "sub")})
+        result = runner.invoke(main, ["session", "ls", "--json"])
+        row = {r["id"]: r for r in json.loads(result.stdout)}["S1"]
+        assert row["cwd"] == str(dest / "sub")
+        assert row["cwd_recorded"] == str(old / "sub")

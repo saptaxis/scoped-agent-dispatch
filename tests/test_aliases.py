@@ -206,11 +206,42 @@ class TestAliasFor:
         self._rules(home, f"{tmp_path}/old -> {tmp_path}/new\n")
         assert alias_for(tmp_path / "old" / "wt") == tmp_path / "new" / "wt"
 
-    def test_rules_do_not_chain(self, home, tmp_path):
+    def test_a_rule_to_a_directory_that_moved_again_chains(self, home, tmp_path):
+        """a moved to b, then b moved to c: one rule per move, and a path
+        recorded under a still arrives."""
         (tmp_path / "c").mkdir()
         self._rules(home, f"{tmp_path}/a -> {tmp_path}/b\n"
                           f"{tmp_path}/b -> {tmp_path}/c\n")
+        assert alias_for(tmp_path / "a" / "x") == tmp_path / "c" / "x"
+
+    def test_a_chain_through_a_moved_subfolder(self, home, tmp_path):
+        """The inwit restructure: the old repo rule lands in a folder that has
+        since moved within the repo, and that folder's own rule takes it on."""
+        (tmp_path / "inwit" / "personal" / "projects" / "x").mkdir(parents=True)
+        self._rules(home, f"{tmp_path}/old-docs -> {tmp_path}/inwit\n"
+                          f"{tmp_path}/inwit/docs/projects/x -> {tmp_path}/inwit/personal/projects/x\n")
+        got = alias_for(tmp_path / "old-docs" / "docs" / "projects" / "x" / "sub")
+        assert got == tmp_path / "inwit" / "personal" / "projects" / "x" / "sub"
+
+    def test_a_chain_that_goes_nowhere_keeps_its_last_good_hop(self, home, tmp_path):
+        """The second hop's new side is missing: the first hop's translation
+        stands, inside the repo, rather than none at all."""
+        (tmp_path / "inwit").mkdir()
+        self._rules(home, f"{tmp_path}/old-docs -> {tmp_path}/inwit\n"
+                          f"{tmp_path}/inwit/docs -> {tmp_path}/inwit/missing\n")
+        assert alias_for(tmp_path / "old-docs" / "docs" / "x") == tmp_path / "inwit" / "docs" / "x"
+
+    def test_a_cycle_ends(self, home, tmp_path):
+        self._rules(home, f"{tmp_path}/a -> {tmp_path}/b\n"
+                          f"{tmp_path}/b -> {tmp_path}/a\n")
         assert alias_for(tmp_path / "a" / "x") is None
+
+    def test_no_rule_is_used_twice(self, home, tmp_path):
+        """A rule whose new side is under its old side would match its own
+        output forever; it is applied once."""
+        (tmp_path / "a" / "b").mkdir(parents=True)
+        self._rules(home, f"{tmp_path}/a/gone -> {tmp_path}/a/gone/deeper\n")
+        assert alias_for(tmp_path / "a" / "gone" / "x") is None
 
     @pytest.mark.parametrize("rule_in, recorded_in", [("real", "link"), ("link", "real")])
     def test_either_spelling_matches_the_other(self, home, tmp_path, rule_in, recorded_in):
@@ -231,20 +262,27 @@ class TestLocate:
         def boom(path):
             raise AssertionError("read the alias file for a live path")
         monkeypatch.setattr(aliases, "_load", boom)
-        assert locate(tmp_path) == (tmp_path, None)
+        assert locate(tmp_path) == (tmp_path, ())
 
     def test_a_gone_path_with_a_rule_is_translated(self, home, tmp_path):
         (tmp_path / "new").mkdir()
         write_rules(home, f"{tmp_path}/old -> {tmp_path}/new\n")
-        where, rule = locate(str(tmp_path / "old" / "x"))
+        where, hops = locate(str(tmp_path / "old" / "x"))
         assert where == tmp_path / "new" / "x"
-        assert rule.line == 1
+        assert [r.line for r in hops] == [1]
+
+    def test_every_hop_is_reported(self, home, tmp_path):
+        (tmp_path / "c").mkdir()
+        write_rules(home, f"{tmp_path}/a -> {tmp_path}/b\n{tmp_path}/b -> {tmp_path}/c\n")
+        where, hops = locate(tmp_path / "a" / "x")
+        assert where == tmp_path / "c" / "x"
+        assert [r.line for r in hops] == [1, 2]
 
     def test_a_gone_path_with_no_rule_comes_back_normalised(self, home, tmp_path):
         real = tmp_path / "real"
         real.mkdir()
         (tmp_path / "link").symlink_to(real)
-        assert locate(tmp_path / "link" / "gone") == (real / "gone", None)
+        assert locate(tmp_path / "link" / "gone") == (real / "gone", ())
 
     def test_none_and_empty_pass_through_current_cwd(self, home):
         assert current_cwd(None) is None
@@ -262,6 +300,11 @@ class TestStatus:
                           f"{tmp_path}/here -> {tmp_path}/new2\n"
                           f"{tmp_path}/gone2 -> {tmp_path}/missing\n")
         assert [status(r) for r in rules()] == ["ok", "stale", "broken"]
+
+    def test_a_rule_whose_new_side_moved_on_is_ok_through_the_chain(self, home, tmp_path):
+        (tmp_path / "c").mkdir()
+        write_rules(home, f"{tmp_path}/a -> {tmp_path}/b\n{tmp_path}/b -> {tmp_path}/c\n")
+        assert [status(r) for r in rules()] == ["ok", "ok"]
 
     def test_stale_wins_over_broken(self, home, tmp_path):
         (tmp_path / "here").mkdir()
