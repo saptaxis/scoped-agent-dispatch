@@ -44,8 +44,10 @@ session history, and `scad gc` cleans orphaned containers, run dirs and images.
 1. **Build.** Renders a Dockerfile from the config (Python venv, deps, Claude
    Code, non-root user) and builds the image. Cached after the first build.
 2. **Clone.** `git clone --local` of each repo at
-   `~/.scad/runs/<run-id>/workspace/`. Non-worktree repos and data mounts are
-   symlinked.
+   `~/.scad/runs/<run-id>/workspace/`. A repo whose `path` is a folder inside a
+   repository clones that repository. Non-worktree repos and data mounts are
+   symlinked; for a folder inside a repository, the folder itself is symlinked,
+   not the repository.
 3. **Branch.** Generates `scad-{config}-{tag}-MonDD-HHMM` and checks it out in
    each clone.
 4. **Configure.** `claude_config.py` writes `settings.json` (permissions,

@@ -249,3 +249,26 @@ class TestAliases:
             raise AssertionError("read the alias file for a live path")
         monkeypatch.setattr("scad.aliases._load", boom)
         assert resolve_project(git_repo(tmp_path / "here")) == "here"
+
+
+class TestAliasChains:
+    """A directory moved twice, with one rule per move: the inwit case, where
+    the repo moved and then folders inside it moved."""
+
+    def test_a_session_from_before_both_moves_resolves(self, tmp_path, monkeypatch):
+        from scad import aliases
+        from scad.project import project_resolution
+
+        repo = git_repo(tmp_path / "inwit")
+        (repo / "personal" / "projects" / "x").mkdir(parents=True)
+        home = tmp_path / ".scad"
+        home.mkdir()
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        (home / "aliases").write_text(
+            f"{tmp_path}/traitful-docs -> {repo}\n"
+            f"{repo}/docs/projects/x -> {repo}/personal/projects/x\n")
+        aliases.reset()
+        name, res = project_resolution(tmp_path / "traitful-docs" / "docs" / "projects" / "x")
+        assert name == "inwit"
+        assert [r.line for r in res.via_aliases] == [1, 2]
+        assert res.via_alias.line == 1

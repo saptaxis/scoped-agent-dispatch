@@ -135,16 +135,23 @@ The rules live in `~/.scad/aliases` (under `SCAD_HOME`), one per line:
   comment. Both sides must be absolute; `~` is expanded.
 - A rule is used only when the recorded directory no longer exists, so it can
   never redirect a session whose directory is still there.
-- The longest matching old path wins. Rules do not chain: write `a -> c`, not
-  `a -> b` and `b -> c`.
+- The longest matching old path wins, with no fallback to a shorter rule.
+- Rules chain, so each move needs only its own rules. If a rule leads to a
+  path that is itself gone, the next matching rule is applied, until the path
+  exists; `a -> b` then `b -> c` takes a path recorded under `a` to `c`, and
+  a later move of a folder inside a moved repository is one rule written in
+  the repository's new spelling. No rule is used twice in one chain. A chain
+  that runs into a missing directory keeps its last hop whose new side
+  exists.
 - Both sides, and the recorded path, are resolved through symlinks before they
   are compared, so either spelling of a symlinked path matches the other.
 - A bad line is skipped with a warning on stderr; the rest still load.
 
 `scad project aliases` lists the rules: `ok` (the old path is gone and the new
 one exists), `stale` (the old path still exists, so the rule does nothing), or
-`broken` (the new path is missing too). `scad where --start <old path>` shows a
-`via alias:` line when a rule answered. Nothing recorded is rewritten: not the
+`broken` (the new path is missing, and no later rule takes it anywhere that
+exists). `scad where --start <old path>` shows a `via alias:` line for each
+rule that answered, in order. Nothing recorded is rewritten: not the
 transcripts, not the archive, not the index's `cwd`.
 
 ## `scad view`

@@ -62,7 +62,12 @@ class ProjectResolution(Resolution):
     consumers outside scad and must not know scad's vocabulary.
     """
 
-    via_alias: Rule | None = None
+    via_aliases: tuple[Rule, ...] = ()   # the rules that applied, in order
+
+    @property
+    def via_alias(self) -> Rule | None:
+        """The first rule that applied, or None."""
+        return self.via_aliases[0] if self.via_aliases else None
 
 
 def project_resolution(cwd) -> tuple[str, ProjectResolution]:
@@ -81,10 +86,10 @@ def project_resolution(cwd) -> tuple[str, ProjectResolution]:
     # walk, which from a missing directory climbs into any marked ancestor and
     # would answer with the ancestor's name. A directory that exists is never
     # translated, so no rule can redirect a live session.
-    start, rule = locate(cwd)
+    start, hops = locate(cwd)
     res = resolve(SCAD_PROJECT, start=start, interactive=False)
     return (UNFILED if res.path is None else res.path.name), ProjectResolution(
-        path=res.path, matched_by=res.matched_by, tried=res.tried, via_alias=rule)
+        path=res.path, matched_by=res.matched_by, tried=res.tried, via_aliases=hops)
 
 
 def resolve_project(cwd, scad_run_id: str | None = None) -> str:

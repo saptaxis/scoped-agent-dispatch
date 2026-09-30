@@ -114,39 +114,60 @@ def reset() -> None:
     _load.cache_clear()
 
 
-def rule_for(path: Path) -> Rule | None:
-    """The rule with the longest old side that `path` is at or under.
-    Component-wise: a rule for /a/foo never matches /a/foobar."""
-    hits = [r for r in rules() if path == r.old or path.is_relative_to(r.old)]
+def rule_for(path: Path, skip: tuple[Rule, ...] = ()) -> Rule | None:
+    """The rule with the longest old side that `path` is at or under, among
+    those not in `skip`. Component-wise: a rule for /a/foo never matches
+    /a/foobar."""
+    hits = [r for r in rules()
+            if r not in skip and (path == r.old or path.is_relative_to(r.old))]
     return max(hits, key=lambda r: len(r.old.parts), default=None)
 
 
-def _apply(path: Path) -> tuple[Path, Rule] | None:
-    # The rule's new side has to exist, not the whole translated path: a
-    # session in a since-deleted worktree still walks up to the new root. And
-    # no fallback to a shorter rule; a nested rule speaks for its subtree.
-    rule = rule_for(path)
-    if rule is None or not rule.new.exists():
-        return None
-    return rule.new / path.relative_to(rule.old), rule
+def _chain(path: Path) -> tuple[Path, tuple[Rule, ...]]:
+    """Follow the rules from `path` for as long as the result is gone.
+
+    One rule per move: a directory that moved and then moved again (or was
+    moved into, and a folder inside it moved later) is reached through each
+    move's own rule, rather than a rule per earlier spelling. Each hop takes
+    the longest matching rule, with no fallback to a shorter one: a nested
+    rule speaks for its subtree. No rule is used twice, so a cycle ends.
+
+    The translation kept is the one after the last hop whose rule's new side
+    exists. That side has to exist, not the whole translated path: a session
+    in a since-deleted worktree still walks up to the new root. A chain that
+    runs into a missing directory falls back to its last good hop, and one
+    with no good hop is no translation at all.
+    """
+    hops: list[tuple[Path, Rule]] = []
+    here = path
+    while not hops or not here.exists():
+        rule = rule_for(here, tuple(r for _, r in hops))
+        if rule is None:
+            break
+        here = rule.new / here.relative_to(rule.old)
+        hops.append((here, rule))
+    for i in range(len(hops) - 1, -1, -1):
+        if hops[i][1].new.exists():
+            return hops[i][0], tuple(r for _, r in hops[: i + 1])
+    return path, ()
 
 
 def alias_for(path: Path) -> Path | None:
-    hit = _apply(path)
-    return hit[0] if hit else None
+    where, hops = _chain(path)
+    return where if hops else None
 
 
-def locate(cwd) -> tuple[Path, Rule | None]:
-    """Where a recorded directory is now, and the rule that said so.
+def locate(cwd) -> tuple[Path, tuple[Rule, ...]]:
+    """Where a recorded directory is now, and the rules that said so, in the
+    order they applied.
 
     A path that exists is answered by the filesystem before any rule is read,
     so no rule can redirect a live session.
     """
     here = normalise(cwd)
     if here.exists():
-        return here, None
-    hit = _apply(here)
-    return hit if hit else (here, None)
+        return here, ()
+    return _chain(here)
 
 
 def current_cwd(cwd: str | None) -> str | None:
@@ -158,9 +179,10 @@ def current_cwd(cwd: str | None) -> str | None:
 
 def status(rule: Rule) -> str:
     """ok: the case the rule is for. stale: the old side still exists, so the
-    rule is inert. broken: the new side is missing, so it cannot help."""
+    rule is inert. broken: the new side is missing and no later rule takes it
+    anywhere that exists, so it cannot help."""
     if rule.old.exists():
         return "stale"
-    if not rule.new.exists():
+    if not rule.new.exists() and not _chain(rule.new)[0].exists():
         return "broken"
     return "ok"

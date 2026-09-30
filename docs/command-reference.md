@@ -119,10 +119,10 @@ Verified by hand rather than in CI — see [`interactive-launch-verification.md`
 
 | Command | Does | When / conditions |
 |---|---|---|
-| `where [--start DIR]` | the project a directory resolves to, which marker matched, and what was tried | A session filed under `unfiled` or the wrong project. Shows `via alias:` when a rule in `~/.scad/aliases` answered for a directory that moved. |
+| `where [--start DIR]` | the project a directory resolves to, which marker matched, and what was tried | A session filed under `unfiled` or the wrong project. Shows a `via alias:` line for each rule in `~/.scad/aliases` that answered for a directory that moved. |
 | `project ls` | projects with session counts | |
 | `project show <name>` | a project's sessions | `--limit N` |
-| `project aliases` | the rules in `~/.scad/aliases`, each `ok`, `stale` (old path still exists) or `broken` (new path missing) | After writing a rule for a directory that moved, and before any `reindex --rebuild` |
+| `project aliases` | the rules in `~/.scad/aliases`, each `ok`, `stale` (old path still exists) or `broken` (new path missing, and no later rule reaches a path that exists) | After writing a rule for a directory that moved, and before any `reindex --rebuild` |
 
 ---
 

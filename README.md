@@ -147,7 +147,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 
 ```bash
 pip install -e ".[dev]"
-pytest                 # 1579 tests
+pytest                 # 1591 tests
 ```
 
 The interactive launch routes are verified by hand, since every run costs a model
