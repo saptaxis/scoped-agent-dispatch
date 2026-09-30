@@ -38,7 +38,9 @@ the launch record.
 `resume` attaches if the session is open and execs the agent if it is closed —
 never a second process against one live session id. It works for **every**
 indexed session, not only launched ones: the index already holds the agent, the
-cwd and the id, which is all a resume command needs.
+cwd and the id, which is all a resume command needs. Moved and covered by a
+rule in `~/.scad/aliases`, it resumes in the new place; gone with no rule, it
+resumes anyway and warns that the agent starts somewhere else.
 
 ## Why tmux is required
 

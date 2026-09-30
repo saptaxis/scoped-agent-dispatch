@@ -38,6 +38,9 @@ up from the directory. Read the resolved path in the `matched by` line, not
 just the name: that is the directory scad considers the root, and a name that
 looks right can come from a root that is not.
 
+A `via alias:` line means the directory asked about no longer exists and a rule
+in `~/.scad/aliases` said where it moved; the answer came from the new place.
+
 ## 2. Say how it resolved
 
 Report it in one or two lines. What matters to the human is the tier and the
@@ -56,6 +59,11 @@ want, the fix is one empty file at the directory that *should* be the root:
 ```
 touch <root>/.scad-project
 ```
+
+If the directory no longer exists, a marker cannot go in it: `scad where` says
+so. When it moved, the fix is a rule in `~/.scad/aliases`,
+`<old path> -> <new path>`; check it with `scad project aliases`. Offer the line;
+do not write it unasked.
 
 `scad.yml` marks a root too, and takes precedence — use it when the directory
 already has one, and `.scad-project` otherwise. An empty `.scad-project` is

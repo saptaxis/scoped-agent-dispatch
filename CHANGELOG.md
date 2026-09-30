@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Path aliases: `~/.scad/aliases` holds `old path -> new path` rules, used when a session's
+  recorded directory no longer exists. A directory that moved keeps its sessions' `project`
+  through `reindex --rebuild`, which before this filed them as `unfiled`. Nothing recorded is
+  rewritten.
+- `scad project aliases` lists the rules as `ok`, `stale` or `broken`; `scad where` shows a
+  `via alias:` line when a rule answered.
+
+### Changed
+
+- `session ls --json` serves `cwd` as where the directory is now (through symlinks and the
+  alias file) and adds `cwd_recorded`, the path as the transcript recorded it. `session show`
+  and the viewer show the same.
+- `session resume` resumes where a rule says a moved directory went. For a directory that is
+  gone with no rule it still resumes, and now warns that the agent starts somewhere else;
+  `--print` and the viewer drop the `cd`, which used to fail and stop the command, and the
+  viewer marks the row `directory gone`. A rule whose new path does not exist is refused.
+
 ## [0.6.0] — 2026-09-27
 
 **The release where a launched session lands where you are looking.** A launch opened its own

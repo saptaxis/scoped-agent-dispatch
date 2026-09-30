@@ -51,3 +51,5 @@ Path on stdout, announce on stderr, exit `0` resolved / `1` unresolved / `2` usa
 - Guess. There is no `.` or `~` fallback — unresolved is returned, never assumed.
 - Raise. `resolve()` is total, so it can be mapped over thousands of recorded paths.
 - Derive a name. It returns a directory; turning that into a key is the consumer's job.
+- Follow a moved directory. Path aliases (`~/.scad/aliases`) are scad's project
+  layer: `scad.aliases` translates a gone path before the engine is called.

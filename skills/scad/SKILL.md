@@ -89,6 +89,8 @@ scad where                                      # what project resolves here
 - **`scad run clean` is destructive** and has no undo. Fetch first, or use
   `scad finish`, which fetches for you.
 - **`reindex --rebuild` is for derivation-rule changes, never for new data.**
-  The incremental pass handles new sessions and growth.
+  The incremental pass handles new sessions and growth. After a directory
+  moves, write its rule in `~/.scad/aliases` first, or the rebuild files its
+  sessions as `unfiled`.
 - **Measure, never cite.** Trace and skill locations have contradicted their
   own documentation repeatedly. Check the machine before trusting a path.

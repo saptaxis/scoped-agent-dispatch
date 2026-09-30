@@ -57,6 +57,9 @@ scad reindex                         # archive, then index what is new
 scad reindex --rebuild               # drop and re-derive every row
 ```
 
+**Write the alias rule before any rebuild after a directory moves**, or its
+sessions go to `unfiled`.
+
 **`--rebuild` is for derivation-rule changes, not for new data.** The
 incremental pass handles new sessions and growth. Reach for `--rebuild` when a
 computed column's *rule* changed — `project` is computed from `cwd`, so
@@ -77,6 +80,15 @@ scad resolve                         # the path, for scripting
 `scad.yml` / `.scad-project`, else the git root. A directory with none of those
 is `unfiled` — fix it by dropping a marker, and see the `attribution` skill,
 which walks it.
+
+**A directory that moved** is the other cause. The recorded cwd points at
+nothing, so a rebuild files those sessions as `unfiled`. The fix is a rule in
+`~/.scad/aliases`, `old path -> new path`, used only when the old path is gone.
+`scad project aliases` checks the rules (`ok`, `stale`, `broken`), and
+`scad where --start <old path>` shows `via alias:` when one answered.
+`session ls --json` then serves the new path as `cwd` and the old one as
+`cwd_recorded`, and `session resume` resumes in the new place. With no rule, a
+gone directory still resumes, with a warning that the agent starts elsewhere.
 
 ## Notes
 
