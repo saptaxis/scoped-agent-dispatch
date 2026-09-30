@@ -259,10 +259,10 @@ resume`, or attach to the pane, while a session is open.
 When a session's directory has moved and a rule in `~/.scad/aliases` says
 where, `session resume` resumes there and says so. When it is gone with no rule,
 it still resumes, since `claude --resume` does not need the directory, but
-warns on stderr that the agent will start somewhere else and names the rule
+warns on stderr that the agent will start in the current directory and names the rule
 that would fix it; `--print` drops the `cd`, which would fail, and `scad view`
-marks the row `directory gone`. A rule whose new path does not exist is refused:
-fix the rule.
+marks the row `directory gone`. A rule whose new path does not exist is refused;
+`scad project aliases` marks it `broken`.
 
 Gates shown in the pane are answered by matching the option label, never by
 pressing Enter, whose default on codex's update gate runs `curl ... | sh`. Gates

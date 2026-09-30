@@ -88,7 +88,8 @@ nothing, so a rebuild files those sessions as `unfiled`. The fix is a rule in
 `scad where --start <old path>` shows `via alias:` when one answered.
 `session ls --json` then serves the new path as `cwd` and the old one as
 `cwd_recorded`, and `session resume` resumes in the new place. With no rule, a
-gone directory still resumes, with a warning that the agent starts elsewhere.
+gone directory still resumes, with a warning that the agent will start in the
+current directory.
 
 ## Notes
 

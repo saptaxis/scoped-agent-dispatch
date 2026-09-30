@@ -87,7 +87,9 @@ scad reindex --rebuild
 ```
 
 That is a real cost on a large index and it is the human's call, so name it and
-let them choose. Say it every time you drop a marker — otherwise they check the
+let them choose. A rebuild re-derives every row, so a directory that has moved
+since its sessions ran goes to `unfiled` unless it has a rule in
+`~/.scad/aliases`; `scad project aliases` shows what is covered. Say it every time you drop a marker — otherwise they check the
 viewer, see the old grouping, and conclude the marker did not work.
 
 ## What this skill does NOT do
