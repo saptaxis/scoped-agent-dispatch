@@ -1124,6 +1124,32 @@ class TestSyncFromHost:
         assert "new-feature" in branches.stdout
         assert len(results) == 1
 
+    def test_a_config_path_inside_a_repo_syncs_from_the_repo(self, tmp_path, monkeypatch):
+        """`git fetch <path>` refuses a subfolder, as `git clone` does."""
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
+        source = tmp_path / "source"
+        (source / "docs" / "x").mkdir(parents=True)
+        subprocess.run(["git", "init", str(source)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "init"], check=True, capture_output=True)
+        clone = tmp_path / "runs" / "test-run" / "workspace" / "docs"
+        clone.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "clone", "--local", str(source), str(clone)], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "checkout", "-b", "new-feature"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "commit", "--allow-empty", "-m", "new work"], check=True, capture_output=True)
+        subprocess.run(["git", "-C", str(source), "checkout", "-"], check=True, capture_output=True)
+
+        config = ScadConfig(
+            name="test",
+            repos={"docs": RepoConfig(path=str(source / "docs" / "x"), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(dangerously_skip_permissions=True),
+        )
+        sync_from_host("test-run", config)
+
+        branches = subprocess.run(["git", "-C", str(clone), "branch", "-r"],
+                                  capture_output=True, text=True)
+        assert "new-feature" in branches.stdout
+
     def test_sync_logs_events(self, tmp_path, monkeypatch):
         """sync_from_host logs sync events to events.log."""
         monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path / "runs")
@@ -1906,6 +1932,43 @@ class TestConsolidatedPaths:
         clone_path = runs_dir / "demo-test-Mar01-1400" / "workspace" / "code"
         assert clone_path.exists()
         assert paths["code"] == clone_path
+
+    def test_a_path_inside_a_repo_clones_the_repo(self, tmp_path, monkeypatch):
+        """A config can name a folder inside a repository: orglens renders a
+        unit's home that way (`inwit/docs/projects/orglens`). `git clone
+        --local` refuses a subfolder, so the run failed at clone time; the
+        repository that contains it is cloned instead."""
+        runs_dir = tmp_path / "runs"
+        monkeypatch.setattr("scad.container.RUNS_DIR", runs_dir)
+        source = tmp_path / "docs-repo"
+        (source / "docs" / "projects" / "x").mkdir(parents=True)
+        (source / "docs" / "projects" / "x" / "notes.org").write_text("x\n")
+        (source / "top.org").write_text("t\n")
+        subprocess.run(["git", "init", "-q", str(source)], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(source), "add", "-A"], capture_output=True, check=True)
+        subprocess.run(["git", "-C", str(source), "commit", "-qm", "init"], capture_output=True, check=True)
+
+        config = ScadConfig(
+            name="demo",
+            repos={"docs": RepoConfig(path=str(source / "docs" / "projects" / "x"), workdir=True)},
+            python=PythonConfig(),
+            claude=ClaudeConfig(),
+        )
+        paths = create_clones(config, "test-branch", "demo-test-Oct01-0100")
+
+        clone = paths["docs"]
+        assert (clone / "top.org").exists()
+        assert (clone / "docs" / "projects" / "x" / "notes.org").exists()
+        head = subprocess.run(["git", "-C", str(clone), "rev-parse", "--abbrev-ref", "HEAD"],
+                              capture_output=True, text=True).stdout.strip()
+        assert head == "test-branch"
+
+    def test_repo_root_of_a_path_outside_any_repo_is_the_path(self, tmp_path):
+        from scad.container import _repo_root
+
+        loose = tmp_path / "loose" / "dir"
+        loose.mkdir(parents=True)
+        assert _repo_root(loose) == loose
 
     def test_cleanup_clones_removes_workspace_subdir(self, tmp_path, monkeypatch):
         """cleanup_clones() removes the workspace subdir under run dir."""

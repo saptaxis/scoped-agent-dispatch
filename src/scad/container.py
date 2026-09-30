@@ -411,6 +411,18 @@ def _git_identity(repo_path: Path) -> dict[str, str]:
     return identity
 
 
+def _repo_root(path: Path) -> Path:
+    """The repository that contains `path`: the nearest folder, `path` itself
+    or above, holding a `.git`. A config may name a folder inside a repository
+    (orglens renders a unit's home that way), and `git clone --local` refuses
+    a subfolder. Pure Python, no subprocess; a path in no repository is
+    returned as it is, and cloning it fails as it always did."""
+    for d in (path, *path.parents):
+        if (d / ".git").exists():
+            return d
+    return path
+
+
 def create_clones(
     config: ScadConfig, branch: str, run_id: str
 ) -> dict[str, Path]:
@@ -450,9 +462,10 @@ def create_clones(
     for key, repo in config.repos.items():
         if repo.worktree:
             clone_path = workspace / key
+            source = _repo_root(repo.resolved_path)
             subprocess.run(
                 ["git", "clone", "--local",
-                 str(repo.resolved_path), str(clone_path)],
+                 str(source), str(clone_path)],
                 check=True,
             )
             subprocess.run(
@@ -492,7 +505,7 @@ def create_clones(
                     sub_path = sub_path.strip()
                     if not sub_path:
                         continue
-                    host_sub = repo.resolved_path / sub_path
+                    host_sub = source / sub_path
                     container_sub = clone_path / sub_path
                     if host_sub.exists() and (host_sub / ".git").exists():
                         subprocess.run(
@@ -949,7 +962,7 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
         if not clone_path.exists() or clone_path.is_symlink() or not (clone_path / ".git").exists():
             continue
 
-        source_path = repo_cfg.resolved_path
+        source_path = _repo_root(repo_cfg.resolved_path)
 
         # Get current branch
         current = subprocess.run(
@@ -1000,7 +1013,7 @@ def fetch_to_host(run_id: str, config: ScadConfig) -> list[dict]:
         if not clone_path.exists() or clone_path.is_symlink() or not (clone_path / ".git").exists():
             continue
 
-        source_path = repo_cfg.resolved_path
+        source_path = _repo_root(repo_cfg.resolved_path)
 
         sub_result = subprocess.run(
             ["git", "-C", str(clone_path), "submodule", "foreach", "--quiet", "--recursive",
@@ -1122,7 +1135,7 @@ def sync_from_host(
         if not clone_path.exists() or clone_path.is_symlink():
             continue
 
-        source_path = repo_cfg.resolved_path
+        source_path = _repo_root(repo_cfg.resolved_path)
 
         # 1. Fetch all refs
         subprocess.run(

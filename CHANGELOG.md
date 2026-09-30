@@ -13,6 +13,13 @@
   and `scad project aliases` counts a rule whose new side moved on as `ok` when its chain
   arrives.
 
+### Fixed
+
+- A config repo whose `path` is a folder inside a repository (orglens renders a unit's home
+  that way, e.g. `inwit/docs/projects/orglens`) failed at clone time: `git clone --local`
+  refuses a subfolder. The repository containing the folder is now cloned, and `code sync` and
+  `harvest` read from it too. A `worktree: false` repo is still mounted as the folder itself.
+
 ## [0.7.0] - 2026-09-30
 
 **The release where a directory can move without taking its sessions with it.** `project` is
