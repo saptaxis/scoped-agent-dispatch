@@ -79,6 +79,7 @@ from scad.container import (
 )
 from scad.resolve import ResolveConfig, announce, require, resolve as resolve_target
 from scad.archive import archive_all, archive_root, archive_run, summarize
+from scad import aliases
 from scad.project import UNFILED, project_resolution, resolve_project
 from scad.index import (
     NOTE_KIND_SQL,
@@ -400,7 +401,11 @@ def where(start):
     target = _Path(start) if start else _Path.cwd()
     project, res = project_resolution(target)
 
-    click.echo(f"[scad] project: {project}  ({target})")
+    rule = res.via_alias
+    shown = aliases.locate(target)[0] if rule else target
+    click.echo(f"[scad] project: {project}  ({shown})")
+    if rule:
+        click.echo(f"[scad] via alias: {_short(rule.old_written)} -> {_short(rule.new_written)}")
     if res.tried:
         click.echo(f"[scad] tried: {', '.join(res.tried)}")
 
@@ -413,13 +418,25 @@ def where(start):
     click.echo(f'[scad] nothing here marks a project — sessions in this directory '
                f'are filed under "{UNFILED}", together with everything else that '
                f'resolved to nothing.')
-    click.echo(f"[scad] fix: touch {shlex.quote(str(_Path(target) / '.scad-project'))}")
+    if not target.exists():
+        # A marker cannot go in a directory that is not there. If it moved, the
+        # alias file is what says where to.
+        click.echo(f"[scad] {target} does not exist. If it moved, add a rule to "
+                   f"{aliases.alias_path()}, then check it with: scad project aliases")
+    else:
+        click.echo(f"[scad] fix: touch {shlex.quote(str(_Path(target) / '.scad-project'))}")
     # The trap worth stating: `project` is a computed column and the incremental
     # pass is mtime-based, so it never recomputes for a session whose trace has
     # not changed. Regrouping 83 interior-visualization sessions needed the full
     # rebuild.
     click.echo("[scad] a marker files future sessions; for ones already indexed: "
                "scad reindex --rebuild")
+
+
+def _short(path: str) -> str:
+    """The last two components, which is what tells one rule from another."""
+    parts = Path(path).parts
+    return path if len(parts) <= 3 else "…/" + "/".join(parts[-2:])
 
 
 @main.group()
@@ -2841,6 +2858,27 @@ def project_ls():
         when = datetime.fromtimestamp(r["last"] / 1000).strftime("%Y-%m-%d") if r["last"] else "?"
         click.echo(f"{(r['project'] or '?'):<28} {r['n']:>5} sessions  "
                    f"{(r['t'] or 0):>7} turns  last {when}")
+
+
+@project.command("aliases")
+def project_aliases():
+    """List the path alias rules and whether each can fire.
+
+    ok: the old path is gone and the new one exists, the case a rule is for.
+    stale: the old path still exists, so the rule is inert. broken: the new
+    path is missing too, so the rule cannot help.
+    """
+    path = aliases.alias_path()
+    if not path.exists():
+        click.echo(f"[scad] no alias file at {path}")
+        return
+    found = aliases.rules()
+    click.echo(f"[scad] {path}: {len(found)} rule{'' if len(found) == 1 else 's'}")
+    suffix = {"stale": "   (old path still exists)", "broken": "   (new path does not exist)"}
+    for r in found:
+        state = aliases.status(r)
+        click.echo(f"  {state:<8} {_short(r.old_written)} -> {_short(r.new_written)}"
+                   f"{suffix.get(state, '')}")
 
 
 @project.command("show")

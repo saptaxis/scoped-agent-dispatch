@@ -3966,3 +3966,80 @@ class TestLaunchName:
         self._fake(monkeypatch)
         runner.invoke(main, ["session", "launch", "--agent", "claude", "--cwd", str(tmp_path)])
         assert session_row(connect(), "S1")["name"] is None
+
+
+def _alias_home(tmp_path, monkeypatch, text=""):
+    """A SCAD_HOME of the test's own with this alias file in it."""
+    from scad import aliases
+
+    home = tmp_path / ".scad"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("SCAD_HOME", str(home))
+    monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+    (home / "aliases").write_text(text)
+    aliases.reset()
+    return home
+
+
+def _git(path):
+    import subprocess as sp
+
+    path.mkdir(parents=True, exist_ok=True)
+    sp.run(["git", "init", "-q", str(path)], check=True, capture_output=True)
+    return path
+
+
+class TestWhereNamesTheAlias:
+    def test_a_moved_directory_names_the_rule(self, runner, tmp_path, monkeypatch):
+        new = _git(tmp_path / "new" / "myproj")
+        old = tmp_path / "old" / "myproj"
+        _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        result = runner.invoke(main, ["where", "--start", str(old)])
+        assert result.exit_code == 0, result.output
+        first, second = result.output.splitlines()[:2]
+        assert first == f"[scad] project: myproj  ({new})"
+        assert second == "[scad] via alias: …/old/myproj -> …/new/myproj"
+
+    def test_a_stale_rule_says_nothing(self, runner, tmp_path, monkeypatch):
+        here = _git(tmp_path / "here")
+        _alias_home(tmp_path, monkeypatch, f"{here} -> {_git(tmp_path / 'there')}\n")
+        result = runner.invoke(main, ["where", "--start", str(here)])
+        assert "via alias" not in result.output
+        assert "project: here" in result.output
+
+    def test_a_gone_directory_with_no_rule_points_at_the_alias_file(
+            self, runner, tmp_path, monkeypatch):
+        home = _alias_home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["where", "--start", str(tmp_path / "gone")])
+        assert result.exit_code == 0, result.output
+        assert "touch" not in result.output
+        assert str(home / "aliases") in result.output
+        assert "scad project aliases" in result.output
+
+
+class TestProjectAliases:
+    def test_no_file(self, runner, tmp_path, monkeypatch):
+        home = _alias_home(tmp_path, monkeypatch)
+        (home / "aliases").unlink()
+        result = runner.invoke(main, ["project", "aliases"])
+        assert result.exit_code == 0, result.output
+        assert str(home / "aliases") in result.output
+        assert "no alias file" in result.output
+
+    def test_each_rule_with_its_status(self, runner, tmp_path, monkeypatch):
+        _git(tmp_path / "new")
+        _git(tmp_path / "here")
+        _alias_home(tmp_path, monkeypatch,
+                    f"{tmp_path}/gone -> {tmp_path}/new\n"
+                    f"{tmp_path}/here -> {tmp_path}/new2\n"
+                    f"{tmp_path}/gone2 -> {tmp_path}/missing\n"
+                    f"this line is not a rule\n")
+        result = runner.invoke(main, ["project", "aliases"])
+        assert result.exit_code == 0, result.output
+        lines = result.stdout.splitlines()
+        assert lines[0].endswith("3 rules")
+        assert lines[1].split()[0] == "ok"
+        assert lines[2].split()[0] == "stale" and lines[2].endswith("(old path still exists)")
+        assert lines[3].split()[0] == "broken" and lines[3].endswith("(new path does not exist)")
+        assert len(lines) == 4
+        assert ":4: skipped:" in result.stderr
