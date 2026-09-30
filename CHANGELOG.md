@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Path aliases chain. A rule that leads to a path which is itself gone hands it to the next
+  matching rule, until the path exists, so each move needs only its own rules: a repository
+  that moved and then had folders moved inside it is one rule per move, written in the
+  current spelling, rather than one per earlier spelling. No rule is used twice in a chain;
+  one that runs into a missing directory keeps its last hop whose new side exists, so a
+  wrong later rule no longer costs the earlier translation. `scad where` shows every hop,
+  and `scad project aliases` counts a rule whose new side moved on as `ok` when its chain
+  arrives.
+
 ## [0.7.0] - 2026-09-30
 
 **The release where a directory can move without taking its sessions with it.** `project` is
