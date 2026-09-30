@@ -13,3 +13,6 @@ scad-scad.yml
 # Local tool/editor config — machine-specific paths, never shared
 .kimi-code/
 uv.lock
+
+# git filter-branch scratch state
+.git-rewrite/
