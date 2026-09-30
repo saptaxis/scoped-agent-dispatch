@@ -127,7 +127,9 @@ from scad.notes import (
     notes_root,
     read_note_file,
 )
-from scad.view import gather, render, resume_argv, resume_command, write_view
+from scad.view import (
+    _is_agent_state_dir, gather, render, resume_argv, resume_command, write_view,
+)
 
 
 def _relative_time(iso_str: str) -> str:
@@ -2425,10 +2427,12 @@ def session_resume(session_id, print_only):
             f"{session_id} is a {kind} — it has no independent session to resume. "
             f"Resume the session that spawned it.")
 
-    target = {"id": session_id, "kind": "main",
-              "agent": field("agent"), "cwd": field("cwd")}
-    argv = resume_argv(target)
-    command = resume_command(target)
+    def target() -> dict:
+        # Only where a resume will actually run: attaching to an open pane
+        # needs no directory, and must not be refused for a missing one.
+        cwd = _resume_cwd(session_id, field("cwd"),
+                          row["scad_run_id"] if row is not None else None, print_only)
+        return {"id": session_id, "kind": "main", "agent": field("agent"), "cwd": cwd}
 
     if print_only:
         # The payload is the viewer's clipboard: a resume command, never a
@@ -2436,7 +2440,7 @@ def session_resume(session_id, print_only):
         # not. But a person running this at a terminal while the session is
         # open gets told, on stderr, so the payload stays clean: running it
         # now forks the transcript.
-        click.echo(command)
+        click.echo(resume_command(target()))
         open_in = _open_in(session_id, record)
         if open_in:
             click.echo(f"[scad] {session_id} is open right now ({open_in}); "
@@ -2466,14 +2470,56 @@ def session_resume(session_id, print_only):
             f"against a live session. Go to the window, or get the command with: "
             f"scad session resume {session_id} --print")
 
-    cwd = target["cwd"]
-    if cwd and Path(cwd).is_dir():
-        os.chdir(cwd)
-    elif cwd:
-        # A recorded cwd outlives its directory. The conversation is still there.
-        click.echo(f"[scad] {cwd} is gone — resuming from here instead.")
-    click.echo(f"[scad] {command}")
-    _exec(argv)
+    resume = target()
+    if resume["cwd"] and Path(resume["cwd"]).is_dir():
+        os.chdir(resume["cwd"])
+    click.echo(f"[scad] {resume_command(resume)}")
+    _exec(resume_argv(resume))
+
+
+def _resume_cwd(session_id: str, recorded, scad_run_id, quiet: bool):
+    """The directory a resume runs in: None when there is none to `cd` into.
+
+    After a move, it is where the alias file says the directory went. When the
+    directory is gone with no rule, the resume still runs, because
+    `claude --resume` does not need it and a deleted directory has no rule to
+    write; but it says so loudly, since the agent will then work somewhere
+    else. Only a broken rule is refused: its fix is real, and resuming would
+    mean acting on an instruction that is wrong.
+
+    Left as recorded: no cwd, an agent's own state directory (no `cd` is ever
+    emitted for those), and a container session, whose `/workspace` path was
+    never on this host.
+    """
+    if not recorded or _is_agent_state_dir(recorded) or scad_run_id:
+        return recorded
+    here, rule = aliases.locate(recorded)
+    if here.is_dir():
+        if rule is not None:
+            # On stderr under --print: the payload stays one clean command.
+            click.echo(f"[scad] {recorded} has moved; resuming in {here}  "
+                       f"(alias, line {rule.line})", err=quiet)
+        return str(here)
+    if rule is None:
+        broken = aliases.rule_for(aliases.normalise(recorded))
+        if broken is not None:
+            raise click.ClickException(
+                f"{recorded} no longer exists, and the rule on line {broken.line} maps "
+                f"it to {broken.new}, which does not exist either. Fix the rule, then "
+                f"check it with: scad project aliases")
+    start = ("wherever this command is run" if quiet
+             else f"in the current directory, {Path.cwd()}")
+    if rule is not None:
+        # The rule is right; the subdirectory the session ran in is not there.
+        click.echo(f"[scad] warning: {recorded} moved to {here} (alias, line "
+                   f"{rule.line}), which no longer exists; the moved directory is "
+                   f"{rule.new}. {session_id} will start {start}.", err=True)
+    else:
+        click.echo(f"[scad] warning: {recorded} no longer exists, so {session_id} "
+                   f"will start {start}, not where it ran. If the directory "
+                   f"moved, add \"{recorded} -> <new path>\" to "
+                   f"{aliases.alias_path()} and it resumes there.", err=True)
+    return None
 
 
 @session.command("note")

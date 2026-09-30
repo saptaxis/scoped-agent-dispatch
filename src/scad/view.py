@@ -263,6 +263,18 @@ def _is_agent_state_dir(cwd: str) -> bool:
     return any(part in _AGENT_STATE for part in parts)
 
 
+def _cwd_gone(row: dict) -> bool:
+    """The session's directory is not there, even after the alias file.
+
+    Not for rows that never had a host directory to `cd` into: no cwd, an
+    agent's own state directory, or a container's `/workspace` path.
+    """
+    cwd = row.get("cwd")
+    if not cwd or _is_agent_state_dir(cwd) or row.get("scad_run_id"):
+        return False
+    return not Path(cwd).is_dir()
+
+
 def resume_argv(row: dict) -> list[str]:
     """The resume command as argv, for `os.execvp`. `[]` when there is none.
 
@@ -417,9 +429,16 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
         if row["cwd_recorded"] not in now:
             now[row["cwd_recorded"]] = current_cwd(row["cwd_recorded"])
         row["cwd"] = now[row["cwd_recorded"]]
+        row["cwd_gone"] = _cwd_gone(row)
         re_ = reentry_for(row, panes, running)
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
                           "target": re_.target, "goto": re_.goto}
+        if row["cwd_gone"] and row["reentry"]["command"]:
+            # Same rule as `scad session resume`: a `cd` into a gone directory
+            # fails and stops the `&&`, while the resume itself does not need
+            # the directory. So the command drops the `cd`, and the row says
+            # the agent will start somewhere else.
+            row["reentry"]["command"] = resume_command({**row, "cwd": None})
         row["status"] = status_for(row, live_ids, cwds, running)
         out.append(row)
     return out
@@ -1213,7 +1232,9 @@ function rows(list) {{
     heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
     esc(r.reentry.command) + '" title="' + esc(r.reentry.command) +
-    '" onclick="copy(this)">\u29c9 resume</button>' : '') + '</div></div>' +
+    '" onclick="copy(this)">\u29c9 resume</button>' : '') + (r.cwd_gone ?
+    ' <span class="dimmer" title="' + esc(r.cwd_recorded ?? "") + '">directory gone</span>' :
+    '') + '</div></div>' +
     '<div class="ctx-col">' + ctxFold(r) + '</div></div>').join('') + '</div>';
 }}
 
@@ -1673,6 +1694,9 @@ def _actions(row: dict) -> list[str]:
         return [_chip(f"scad run attach {run_id}", label="attach")]
     command = reentry.get("command") or resume_command(row)
     actions = [_chip(command, label="resume")] if command else []
+    if row.get("cwd_gone"):
+        where = _html.escape(str(row.get("cwd_recorded") or row.get("cwd") or ""))
+        actions.append(f'<span class="dimmer" title="{where}">directory gone</span>')
     goto = reentry.get("goto") or row.get("goto")
     if goto:
         actions.append(_chip(goto, ghost=True, label="pane"))
