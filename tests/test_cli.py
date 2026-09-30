@@ -4043,3 +4043,95 @@ class TestProjectAliases:
         assert lines[3].split()[0] == "broken" and lines[3].endswith("(new path does not exist)")
         assert len(lines) == 4
         assert ":4: skipped:" in result.stderr
+
+
+def _seed_cwds(monkeypatch, cwds: dict):
+    """One main session per id, each with the recorded cwd given."""
+    import time as _time
+    from scad.index import connect, upsert_session
+    from scad.records import KIND_MAIN, SessionRecord
+
+    monkeypatch.setattr("scad.cli.claude_live_sessions", lambda *a, **k: [])
+    monkeypatch.setattr("scad.cli.tmux_panes", lambda *a, **k: [])
+    now = int(_time.time() * 1000)
+    conn = connect()
+    for i, (sid, cwd) in enumerate(cwds.items()):
+        rec = SessionRecord(id=sid, kind=KIND_MAIN, agent="claude", source="claude-transcript",
+                            cwd=cwd, started=now - 1000 * (i + 2), ended=now - 1000 * (i + 1),
+                            outcome="awaiting-user")
+        upsert_session(conn, rec, machine="mac", project="proj",
+                       archive_path=f"/arc/{sid}.jsonl", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+    conn.commit()
+    return conn
+
+
+class TestTheExportServesWhereTheDirectoryIsNow:
+    """`cwd` is where the directory is now; `cwd_recorded` is what the
+    transcript said. orglens attributes by containment against homes as they
+    resolve today, so a recorded path that moved would lose its sessions."""
+
+    def _moved(self, tmp_path, monkeypatch):
+        new = _git(tmp_path / "new" / "my proj")
+        old = tmp_path / "old" / "my proj"
+        home = _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        return home, old, new
+
+    def _rows(self, runner):
+        result = runner.invoke(main, ["session", "ls", "--json"])
+        assert result.exit_code == 0, result.output
+        return {r["id"]: r for r in json.loads(result.stdout)}, result
+
+    def test_a_moved_session_serves_the_new_path(self, runner, tmp_path, monkeypatch):
+        _home, old, new = self._moved(tmp_path, monkeypatch)
+        conn = _seed_cwds(monkeypatch, {"S1": str(old)})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(new)
+        assert rows["S1"]["cwd_recorded"] == str(old)
+        # Nothing recorded is rewritten.
+        assert conn.execute("SELECT cwd FROM sessions WHERE id = 'S1'").fetchone()[0] == str(old)
+
+    def test_an_unmoved_session_serves_the_same_path_twice(self, runner, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        here = _git(tmp_path / "here")
+        _seed_cwds(monkeypatch, {"S1": str(here), "S2": None, "S3": "/workspace/x"})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == rows["S1"]["cwd_recorded"] == str(here)
+        assert rows["S2"]["cwd"] is None and rows["S2"]["cwd_recorded"] is None
+        assert rows["S3"]["cwd"] == "/workspace/x"
+
+    def test_a_bridge_symlink_serves_the_resolved_path(self, runner, tmp_path, monkeypatch):
+        _home, old, new = self._moved(tmp_path, monkeypatch)
+        old.parent.mkdir()
+        old.symlink_to(new)
+        _seed_cwds(monkeypatch, {"S1": str(old)})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(new)
+        assert rows["S1"]["cwd_recorded"] == str(old)
+
+    def test_the_symlink_spelling_serves_the_real_one(self, runner, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        real = _git(tmp_path / "real")
+        (tmp_path / "link").symlink_to(real)
+        _seed_cwds(monkeypatch, {"S1": str(tmp_path / "link")})
+        rows, _ = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(real)
+
+    def test_a_bad_alias_line_never_reaches_stdout(self, runner, tmp_path, monkeypatch):
+        home, old, new = self._moved(tmp_path, monkeypatch)
+        (home / "aliases").write_text(f"not a rule\n{old} -> {new}\n")
+        _seed_cwds(monkeypatch, {"S1": str(old)})
+        rows, result = self._rows(runner)
+        assert rows["S1"]["cwd"] == str(new)
+        assert ":1: skipped:" in result.stderr
+
+    def test_session_show_prints_both_when_they_differ(self, runner, tmp_path, monkeypatch):
+        _home, old, new = self._moved(tmp_path, monkeypatch)
+        here = _git(tmp_path / "here")
+        _seed_cwds(monkeypatch, {"S1": str(old), "S2": str(here)})
+        out = runner.invoke(main, ["session", "show", "S1"]).output
+        assert f"cwd                {new}\n" in out
+        assert f"cwd_recorded       {old}\n" in out
+        out = runner.invoke(main, ["session", "show", "S2"]).output
+        assert f"cwd                {here}\n" in out
+        assert "cwd_recorded" not in out

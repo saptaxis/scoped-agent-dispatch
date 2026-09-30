@@ -2071,7 +2071,8 @@ def reindex(rebuild, force, no_archive):
 @click.option("--limit", default=40, help="Rows to show.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit rows as JSON. The export a consumer reads instead of the index "
-                   "file: adds cwd, ended, needs, parent_session_id, last_turn and live.")
+                   "file: adds cwd (where the directory is now), cwd_recorded, ended, "
+                   "needs, parent_session_id, last_turn and live.")
 def session_ls(project, agent, kind, machine, grade, outcome, since, until, parent_id,
                limit, as_json):
     """List indexed sessions, newest first."""
@@ -2135,8 +2136,17 @@ def _session_export(conn, rows) -> list[dict]:
     # the same session, with context as old as the reattach.
     others = other_holders(all_live)
     panes = pid_panes(tmux_panes(), [s.pid for held in others.values() for s in held])
+    # `cwd` is where the directory is now: through symlinks, and through the
+    # alias file when the recorded one is gone. A consumer matches it against
+    # paths as they resolve today, which the recorded value stops being after
+    # a move. Memoised because a hundred directories hold two thousand rows.
+    now: dict[str | None, str | None] = {}
     for r in rows:
         row = dict(r)
+        row["cwd_recorded"] = row["cwd"]
+        if row["cwd"] not in now:
+            now[row["cwd"]] = aliases.current_cwd(row["cwd"])
+        row["cwd"] = now[row["cwd"]]
         last = conn.execute(
             "SELECT ts, role, substr(text, 1, 240) AS text FROM turns "
             "WHERE session_id = ? AND text != '' ORDER BY ts DESC LIMIT 1",
@@ -2162,10 +2172,17 @@ def session_show(session_id):
     row = session_row(conn, session_id)
     if row is None:
         raise click.ClickException(f"No session {session_id} in the index.")
+    cwd_now = aliases.current_cwd(row["cwd"])
     for field in ("id", "name", "kind", "agent", "machine", "project", "cwd", "title",
                   "git_branch", "grade", "source", "harness_state", "scad_run_id",
                   "parent_session_id", "workflow_id", "archive_path"):
-        if row[field] is not None:
+        if field == "cwd":
+            if cwd_now is not None:
+                click.echo(f"{field:<18} {cwd_now}")
+            # Only when it says something the line above does not.
+            if cwd_now != row["cwd"]:
+                click.echo(f"{'cwd_recorded':<18} {row['cwd']}")
+        elif row[field] is not None:
             click.echo(f"{field:<18} {row[field]}")
     # When it ran. Kept next to the rest of the metadata rather than derived by
     # the reader from a raw epoch, which is what the columns hold.

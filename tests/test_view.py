@@ -1682,3 +1682,41 @@ class TestNotesOnTheRow:
         from scad.view import gather, render
         html = render(gather(self._seed(tmp_path), [], set()))
         assert "function noteBlock" in html
+
+
+def _alias_home(tmp_path, monkeypatch, text=""):
+    from scad import aliases
+
+    home = tmp_path / ".scad"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("SCAD_HOME", str(home))
+    (home / "aliases").write_text(text)
+    aliases.reset()
+    return home
+
+
+class TestRowsServeWhereTheDirectoryIsNow:
+    """The row's `cwd` is the one the export serves, set before the resume
+    command and the pane match are built from it."""
+
+    def _moved(self, tmp_path, monkeypatch):
+        new = tmp_path / "new" / "myproj"
+        new.mkdir(parents=True)
+        old = tmp_path / "old" / "myproj"
+        _alias_home(tmp_path, monkeypatch, f"{old} -> {new}\n")
+        return old, new
+
+    def test_a_moved_row_carries_both_paths(self, tmp_path, monkeypatch):
+        old, new = self._moved(tmp_path, monkeypatch)
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd=str(old))
+        row = gather(conn, [], set())["waiting"][0]
+        assert row["cwd"] == str(new)
+        assert row["cwd_recorded"] == str(old)
+
+    def test_a_gone_row_with_no_rule_keeps_its_recorded_path(self, tmp_path, monkeypatch):
+        _alias_home(tmp_path, monkeypatch)
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "gone"))
+        row = gather(conn, [], set())["waiting"][0]
+        assert row["cwd"] == row["cwd_recorded"] == str(tmp_path / "gone")

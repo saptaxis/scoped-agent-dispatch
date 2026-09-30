@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from scad.aliases import current_cwd
 from scad.index import NOTE_KIND_SQL, NOTE_PROJECT_SQL, NOTE_RELATION_SQL
 from scad.live import (
     ClaudeSession,
@@ -407,8 +408,15 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
     live_ids = live_ids or set()
     cwds = cwds if cwds is not None else set()
     out = []
+    now: dict[str | None, str | None] = {}
     for r in cursor_rows:
         row = dict(r)
+        # Where the directory is now, as the export serves it, and set before
+        # the resume command and the pane match are built from it.
+        row["cwd_recorded"] = row.get("cwd")
+        if row["cwd_recorded"] not in now:
+            now[row["cwd_recorded"]] = current_cwd(row["cwd_recorded"])
+        row["cwd"] = now[row["cwd_recorded"]]
         re_ = reentry_for(row, panes, running)
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
                           "target": re_.target, "goto": re_.goto}
@@ -541,7 +549,7 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
             "waiting_for": session.waiting_for or "",
             "started_at": session.started_at,
             # From the index: where it lives and how far it got.
-            "cwd": base.get("cwd") or session.cwd or "",
+            "cwd": base.get("cwd") or current_cwd(session.cwd) or "",
             "project": base.get("project"),
             "n_turns": base.get("n_turns") or 0,
             "ended": base.get("ended"),
@@ -618,7 +626,8 @@ def live_rows(sessions: list[ClaudeSession], panes: list[TmuxPane],
             "kind": "main", "name": base.get("name") or "",
             "first_text": base.get("first_text") or "", "last_text": base.get("last_text") or "",
             "status": "", "waiting_for": "", "started_at": 0,
-            "cwd": base.get("cwd") or rec.get("cwd") or "", "project": base.get("project"),
+            "cwd": base.get("cwd") or current_cwd(rec.get("cwd")) or "",
+            "project": base.get("project"),
             "n_turns": base.get("n_turns") or 0, "ended": base.get("ended"),
             "title": base.get("title"), "outcome": base.get("outcome"),
             "scad_run_id": base.get("scad_run_id"), "indexed": sid in by_id,
@@ -773,6 +782,8 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
         f"ORDER BY n.ts DESC"
     ).fetchall()]
+    for note in notes:
+        note["cwd"] = current_cwd(note["cwd"])
 
     # Notes belong ON the row, not only in their own section. A session with
     # three notes rendered identically to one with none, so the only way to find
