@@ -29,7 +29,7 @@ from scad.records import (
     SessionRecord,
     TurnRecord,
 )
-from scad.notes import DEFAULT_KIND
+from scad.memos import DEFAULT_KIND
 
 # Claude line types that carry no conversation. ~45% of a real transcript.
 _CLAUDE_SKIP_TYPES = {

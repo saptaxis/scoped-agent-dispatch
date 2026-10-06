@@ -1,23 +1,24 @@
-"""Tests for the notes store — the one tier that is never rederivable."""
+"""Tests for the memo store — the one tier that is never rederivable."""
 
 import json
 from pathlib import Path
 
 import pytest
 
-from scad.notes import (
+from scad.memos import (
     DEFAULT_KIND,
     KINDS,
     PROJECT_DIR_CAP,
-    NOTE_FIELDS,
+    MEMO_FIELDS,
     RELATIONS,
-    append_note,
+    append_memo,
     derived_relation,
     encode_cwd,
-    hydrate_notes,
-    note_path,
-    notes_root,
-    read_note_file,
+    hydrate_memos,
+    memo_path,
+    memos_root,
+    read_memo_file,
+    StoreNotMoved,
 )
 
 
@@ -82,45 +83,74 @@ class TestEncodeCwd:
 
 
 class TestStoreLayout:
-    def test_notes_live_under_scad_home(self, home):
-        assert notes_root() == home / "notes"
+    def test_memos_live_under_scad_home(self, home):
+        assert memos_root() == home / "memos"
 
     def test_path_is_session_keyed_and_agent_sharded(self, home):
-        assert note_path("abc-123", "claude") == home / "notes" / "claude" / "abc-123.jsonl"
+        assert memo_path("abc-123", "claude") == home / "memos" / "claude" / "abc-123.jsonl"
 
     def test_no_project_appears_anywhere_in_the_path(self, home):
         # A project is computed, so a project in a durable path orphans the file
         # the moment the definition changes. This is the guard for that.
-        p = note_path("abc-123", "claude")
+        p = memo_path("abc-123", "claude")
         assert "unfiled" not in str(p) and "scoped-agent-dispatch" not in str(p)
+
+
+class TestStoreNotMoved:
+    """The store moved from ~/.scad/notes to ~/.scad/memos in 0.9.0, by hand.
+
+    A machine that skipped the move would see every memo vanish from the
+    listings, and its next memo would start a second store beside the old one.
+    So the old directory without the new one stops every reader and writer."""
+
+    def test_the_old_store_alone_is_refused_with_the_command_that_moves_it(self, home):
+        (home / "notes" / "claude").mkdir(parents=True)
+        with pytest.raises(StoreNotMoved) as exc:
+            memos_root()
+        message = str(exc.value)
+        assert f"mv {home / 'notes'} {home / 'memos'}" in message
+
+    def test_writing_is_refused_too(self, home):
+        (home / "notes").mkdir(parents=True)
+        with pytest.raises(StoreNotMoved):
+            append_memo({"title": "t"}, session_id="S1")
+        assert not (home / "memos").exists()
+
+    def test_neither_directory_is_a_fresh_machine(self, home):
+        assert memos_root() == home / "memos"
+
+    def test_both_directories_read_the_new_one(self, home):
+        (home / "notes").mkdir(parents=True)
+        (home / "memos").mkdir()
+        assert memos_root() == home / "memos"
 
 
 class TestAppendNote:
     def test_writes_one_json_line_and_returns_the_path(self, home):
-        p = append_note({"title": "t", "text": "body"}, session_id="S1")
-        assert p == home / "notes" / "claude" / "S1.jsonl"
+        p = append_memo({"title": "t", "text": "body"}, session_id="S1")
+        assert p == home / "memos" / "claude" / "S1.jsonl"
         lines = p.read_text().splitlines()
         assert len(lines) == 1
         assert json.loads(lines[0])["title"] == "t"
 
     def test_every_capture_format_field_is_present(self, home):
-        p = append_note({"title": "t"}, session_id="S1")
+        p = append_memo({"title": "t"}, session_id="S1")
         rec = json.loads(p.read_text())
-        assert set(NOTE_FIELDS) <= set(rec)
+        assert set(MEMO_FIELDS) <= set(rec)
 
     def test_cwd_at_write_is_recorded(self, home):
         # The project must stay rederivable from the note alone once every
         # trace has been pruned. Nothing else in the record carries a location.
-        p = append_note({"title": "t"}, session_id="S1", cwd="/Users/vsr/code/orglens")
+        p = append_memo({"title": "t"}, session_id="S1", cwd="/Users/vsr/code/orglens")
         assert json.loads(p.read_text())["cwd_at_write"] == "/Users/vsr/code/orglens"
 
     def test_defaults_fill_ts_and_kind(self, home):
-        rec = json.loads(append_note({"title": "t"}, session_id="S1").read_text())
+        rec = json.loads(append_memo({"title": "t"}, session_id="S1").read_text())
         assert rec["kind"] == "info"
         assert rec["ts"] and rec["ts"][:2] == "20"
 
     def test_caller_supplied_ts_and_kind_win(self, home):
-        rec = json.loads(append_note(
+        rec = json.loads(append_memo(
             {"title": "t", "ts": "2026-01-01T00:00:00", "kind": "handoff"},
             session_id="S1").read_text())
         assert rec["ts"] == "2026-01-01T00:00:00"
@@ -130,67 +160,67 @@ class TestAppendNote:
         # span was written on every record and read by nothing; relation is now
         # derived from parent and the thread. Neither is asked for any more, so
         # neither may be invented by the store.
-        rec = json.loads(append_note({"title": "t"}, session_id="S1").read_text())
+        rec = json.loads(append_memo({"title": "t"}, session_id="S1").read_text())
         assert "span" not in rec and "relation" not in rec
 
     def test_project_is_absent_unless_the_caller_files_one(self, home):
         # Omitted means "this session's project", which only the index can
         # resolve — so the store must not guess a value here.
-        rec = json.loads(append_note({"title": "t"}, session_id="S1").read_text())
+        rec = json.loads(append_memo({"title": "t"}, session_id="S1").read_text())
         assert rec["project"] is None
-        filed = json.loads(append_note(
+        filed = json.loads(append_memo(
             {"title": "t", "project": "orglens"}, session_id="S2").read_text())
         assert filed["project"] == "orglens"
 
     def test_appending_never_disturbs_the_earlier_bytes(self, home):
-        p = append_note({"title": "first"}, session_id="S1")
+        p = append_memo({"title": "first"}, session_id="S1")
         first = p.read_bytes()
-        append_note({"title": "second"}, session_id="S1")
+        append_memo({"title": "second"}, session_id="S1")
         after = p.read_bytes()
         assert after.startswith(first)
         assert [json.loads(l)["title"] for l in after.splitlines()] == ["first", "second"]
 
     def test_embedded_newlines_stay_on_one_physical_line(self, home):
-        p = append_note({"title": "t", "text": "a\nb\nc"}, session_id="S1")
+        p = append_memo({"title": "t", "text": "a\nb\nc"}, session_id="S1")
         assert len(p.read_text().splitlines()) == 1
         assert json.loads(p.read_text())["text"] == "a\nb\nc"
 
     def test_unknown_fields_are_carried_through(self, home):
         # The record shape belongs to capture-format.md, not to this store; a
         # field added there must not need a code change here to survive.
-        rec = json.loads(append_note(
+        rec = json.loads(append_memo(
             {"title": "t", "confidence": "low"}, session_id="S1").read_text())
         assert rec["confidence"] == "low"
 
     def test_a_record_that_is_not_an_object_is_refused(self, home):
         with pytest.raises(ValueError):
-            append_note([1, 2, 3], session_id="S1")
+            append_memo([1, 2, 3], session_id="S1")
 
     def test_an_empty_session_id_is_refused(self, home):
         with pytest.raises(ValueError):
-            append_note({"title": "t"}, session_id="")
+            append_memo({"title": "t"}, session_id="")
 
     def test_a_session_id_that_is_a_path_is_refused(self, home):
         # The id names a file. A traversal here would write outside the store.
         with pytest.raises(ValueError):
-            append_note({"title": "t"}, session_id="../../etc/passwd")
+            append_memo({"title": "t"}, session_id="../../etc/passwd")
 
 
 class TestReadNoteFile:
     def test_reads_back_in_append_order(self, home):
-        append_note({"title": "first"}, session_id="S1")
-        append_note({"title": "second"}, session_id="S1")
-        assert [r["title"] for r in read_note_file(note_path("S1"))] == ["first", "second"]
+        append_memo({"title": "first"}, session_id="S1")
+        append_memo({"title": "second"}, session_id="S1")
+        assert [r["title"] for r in read_memo_file(memo_path("S1"))] == ["first", "second"]
 
     def test_missing_file_reads_as_empty(self, home):
-        assert read_note_file(note_path("nope")) == []
+        assert read_memo_file(memo_path("nope")) == []
 
     def test_a_malformed_line_is_skipped_not_fatal(self, home):
-        p = append_note({"title": "good"}, session_id="S1")
+        p = append_memo({"title": "good"}, session_id="S1")
         with p.open("a") as fh:
             fh.write("{not json\n")
-        append_note({"title": "also good"}, session_id="S1")
-        assert [r["title"] for r in read_note_file(p)] == ["good", "also good"]
+        append_memo({"title": "also good"}, session_id="S1")
+        assert [r["title"] for r in read_memo_file(p)] == ["good", "also good"]
 
 
 class TestDerivedRelation:
@@ -230,23 +260,23 @@ class TestHydrateNotes:
     def test_each_record_is_placed_against_the_ones_before_it(self):
         records = [{"topic": "a"}, {"topic": "a"}, {"topic": "b", "parent": "a"},
                    {"topic": "c"}]
-        assert [r["relation"] for r in hydrate_notes(records)] == [
+        assert [r["relation"] for r in hydrate_memos(records)] == [
             "shift", "continue", "branch", "shift"]
 
     def test_a_record_written_before_kind_existed_reads_as_info(self):
-        assert hydrate_notes([{"topic": "a"}])[0]["kind"] == "info"
+        assert hydrate_memos([{"topic": "a"}])[0]["kind"] == "info"
 
     def test_an_authored_kind_is_kept(self):
-        assert hydrate_notes([{"topic": "a", "kind": "handoff"}])[0]["kind"] == "handoff"
+        assert hydrate_memos([{"topic": "a", "kind": "handoff"}])[0]["kind"] == "handoff"
 
     def test_the_records_it_was_given_are_not_mutated(self):
         # The caller is holding what it just read off disk, and the file is truth.
         records = [{"topic": "a"}]
-        hydrate_notes(records)
+        hydrate_memos(records)
         assert records == [{"topic": "a"}]
 
     def test_an_empty_file_hydrates_to_nothing(self):
-        assert hydrate_notes([]) == []
+        assert hydrate_memos([]) == []
 
 
 class TestKindEnum:
@@ -264,19 +294,19 @@ class TestKindEnum:
 
 import os as _os  # noqa: E402
 
-from scad.notes import (  # noqa: E402
+from scad.memos import (  # noqa: E402
     LIVE_WINDOW_S,
     SESSION_ID_ENV,
     AmbiguousSession,
     NoSessionFound,
-    NoteTargetError,
+    MemoTargetError,
     current_session_id,
 )
 
 
 def _transcript(projects: Path, cwd: str, session_id: str, *, age_s: float = 0.0,
                 encoded: str | None = None) -> Path:
-    from scad.notes import encode_cwd
+    from scad.memos import encode_cwd
     d = projects / (encoded or encode_cwd(cwd))
     d.mkdir(parents=True, exist_ok=True)
     p = d / f"{session_id}.jsonl"
@@ -378,13 +408,13 @@ class TestCurrentSessionFromEnv:
             self, tmp_path, monkeypatch):
         # Not just "the same answer" — the scan must not run at all, or a
         # project with two live transcripts would still be ambiguous.
-        import scad.notes as notes_mod
+        import scad.memos as memos_mod
         projects = tmp_path / "projects"
         _transcript(projects, "/w/proj", "on-disk-a", age_s=1)
         _transcript(projects, "/w/proj", "on-disk-b", age_s=2)
-        monkeypatch.setattr(notes_mod, "_transcripts_in",
+        monkeypatch.setattr(memos_mod, "_transcripts_in",
                             lambda d: pytest.fail("scanned the filesystem"))
-        monkeypatch.setattr(notes_mod, "_scan_for_cwd",
+        monkeypatch.setattr(memos_mod, "_scan_for_cwd",
                             lambda r, c: pytest.fail("scanned the filesystem"))
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "env-claude-id")
         assert current_session_id("/w/proj", projects_root=projects) == "env-claude-id"
@@ -445,7 +475,7 @@ class TestCurrentSessionFromEnv:
         # The value becomes a filename under ~/.scad/notes. A traversal in the
         # environment must not become a write outside the store.
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", bogus)
-        with pytest.raises(NoteTargetError) as exc:
+        with pytest.raises(MemoTargetError) as exc:
             current_session_id("/w/proj", projects_root=tmp_path / "projects")
         assert "CLAUDE_CODE_SESSION_ID" in str(exc.value)
 

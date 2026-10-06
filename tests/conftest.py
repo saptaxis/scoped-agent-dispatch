@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from scad.notes import SESSION_ID_ENV
+from scad.memos import SESSION_ID_ENV
 
 # Written into the throwaway global config. `.invalid` is reserved by RFC 2606
 # and can never resolve, so a leaked commit is traceable to the test suite.

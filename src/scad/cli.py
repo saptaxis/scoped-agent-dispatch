@@ -116,16 +116,17 @@ from scad.live import (
     running_run_ids,
     tmux_panes,
 )
-from scad.notes import (
+from scad.memos import (
     DEFAULT_KIND,
     KINDS,
-    NoteTargetError,
-    append_note,
+    MemoTargetError,
+    append_memo,
     current_session_id,
-    hydrate_notes,
-    note_path,
-    notes_root,
-    read_note_file,
+    hydrate_memos,
+    memo_path,
+    memos_root,
+    read_memo_file,
+    StoreNotMoved,
 )
 from scad.view import (
     _is_agent_state_dir, gather, render, resume_argv, resume_command, write_view,
@@ -332,7 +333,22 @@ def _tail_stream(stream_path: Path, stop_event: threading.Event):
                 click.echo(msg)
 
 
-@click.group()
+class _ScadGroup(click.Group):
+    """Turns a machine whose memo store has not moved into one plain error.
+
+    `memos_root` raises wherever a command first touches the store, which is
+    deep in the index pass for `reindex` and `view`; catching it once here
+    gives every one of them the same message and exit code, not a traceback.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except StoreNotMoved as exc:
+            raise click.ClickException(str(exc)) from None
+
+
+@click.group(cls=_ScadGroup)
 def main():
     """scad — dispatch Claude Code agents in isolated Docker containers."""
     pass
@@ -2544,7 +2560,7 @@ def session_note(session_id, current, agent):
     if current:
         try:
             session_id = current_session_id(agent=agent)
-        except NoteTargetError as exc:
+        except MemoTargetError as exc:
             raise click.ClickException(str(exc)) from exc
 
     raw = sys.stdin.read()
@@ -2561,7 +2577,7 @@ def session_note(session_id, current, agent):
             f"kind {record['kind']!r} is not one of: {', '.join(KINDS)}.")
 
     try:
-        path = append_note(record, session_id=session_id, agent=agent)
+        path = append_memo(record, session_id=session_id, agent=agent)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -2633,10 +2649,10 @@ def _resolve_note_path(session_id: str, agent: str):
     practice, so searching the other shards costs one directory scan and
     removes a wrong answer. The named agent still wins when it has the file.
     """
-    path = note_path(session_id, agent)
+    path = memo_path(session_id, agent)
     if path.exists():
         return path
-    root = notes_root()
+    root = memos_root()
     if root.is_dir():
         for shard in sorted(p for p in root.iterdir() if p.is_dir()):
             if shard.name == agent:
@@ -2692,13 +2708,13 @@ def session_notes_cmd(session_id, current, agent, as_json):
     if current:
         try:
             session_id = current_session_id(agent=agent)
-        except NoteTargetError as exc:
+        except MemoTargetError as exc:
             raise click.ClickException(str(exc)) from exc
     path = _resolve_note_path(session_id, agent)
     # Hydrated, not raw: `relation` is computed from the records around it and
     # `kind` has a default, so a consumer reading --json gets the same shape
     # whatever version wrote the file.
-    records = hydrate_notes(read_note_file(path))
+    records = hydrate_memos(read_memo_file(path))
 
     if as_json:
         click.echo(json.dumps(records, ensure_ascii=False, default=str))
@@ -2865,7 +2881,7 @@ def notes_read(ctx, session_id, last, idx, agent, as_json):
     # Hydrated over the WHOLE file even when one note is wanted: `relation` is a
     # statement about the notes before it, so a single record cannot answer it.
     resolved = _resolve_note_path(session_id, agent)
-    records = hydrate_notes(read_note_file(resolved))
+    records = hydrate_memos(read_memo_file(resolved))
     if not records:
         click.echo(f"[scad] No notes for {session_id}.")
         return

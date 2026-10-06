@@ -18,7 +18,7 @@ import click
 
 from scad.archive import STATE_HISTORY_NAME, archive_all, archive_root
 from scad.config import get_scad_home
-from scad.notes import DEFAULT_KIND, notes_root
+from scad.memos import DEFAULT_KIND, memos_root
 from scad.project import resolve_project
 from scad.readers import (
     read_claude_any,
@@ -534,7 +534,7 @@ def ensure_launched_session(
 
 
 def index_notes(conn) -> collections.Counter:
-    """Scan `~/.scad/notes/<agent>/*.jsonl` into the `notes` table.
+    """Scan `~/.scad/memos/<agent>/*.jsonl` into the `notes` table.
 
     `notes_offset` is `parsed_offset` on a different file, and works identically:
     a note file whose size already equals the offset is skipped without being
@@ -548,7 +548,7 @@ def index_notes(conn) -> collections.Counter:
     files to keep honest instead of one.
     """
     stats = collections.Counter()
-    root = notes_root()
+    root = memos_root()
     if not root.is_dir():
         return stats
 

@@ -828,7 +828,7 @@ class TestReindexReadsRenames:
 from scad.index import (  # noqa: E402
     SOURCE_NOTE, append_notes, index_notes, search_notes, session_notes,
 )
-from scad.notes import append_note  # noqa: E402
+from scad.memos import append_memo  # noqa: E402
 from scad.readers import read_notes  # noqa: E402
 
 
@@ -849,7 +849,7 @@ class TestAppendNotes:
     def test_rows_land_with_the_note_path(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
+        p = append_memo(NOTE, session_id="S1")
         n = append_notes(conn, "S1", read_notes(p)[0], str(p))
         assert n == 1
         row = conn.execute("SELECT * FROM notes").fetchone()
@@ -860,7 +860,7 @@ class TestAppendNotes:
     def test_tags_and_entities_are_stored_as_json_arrays(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
+        p = append_memo(NOTE, session_id="S1")
         append_notes(conn, "S1", read_notes(p)[0], str(p))
         row = conn.execute("SELECT tags, entities FROM notes").fetchone()
         assert json.loads(row["tags"]) == ["notes", "jsonl"]
@@ -869,10 +869,10 @@ class TestAppendNotes:
     def test_idx_continues_and_existing_rows_are_untouched(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
+        p = append_memo(NOTE, session_id="S1")
         append_notes(conn, "S1", read_notes(p)[0], str(p))
         end = p.stat().st_size
-        append_note({**NOTE, "title": "second"}, session_id="S1")
+        append_memo({**NOTE, "title": "second"}, session_id="S1")
         append_notes(conn, "S1", read_notes(p, end)[0], str(p))
         rows = conn.execute("SELECT idx, title FROM notes ORDER BY idx").fetchall()
         assert [(r["idx"], r["title"]) for r in rows] == [(0, "first"), (1, "second")]
@@ -882,7 +882,7 @@ class TestIndexNotes:
     def test_a_note_becomes_a_row_and_advances_notes_offset(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
+        p = append_memo(NOTE, session_id="S1")
         stats = index_notes(conn)
         assert stats["notes"] == 1
         assert session_row(conn, "S1")["notes_offset"] == p.stat().st_size
@@ -890,7 +890,7 @@ class TestIndexNotes:
     def test_a_second_pass_with_no_new_note_writes_nothing(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         index_notes(conn)
         assert index_notes(conn)["notes"] == 0
         assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
@@ -898,15 +898,15 @@ class TestIndexNotes:
     def test_a_note_appended_between_two_passes_produces_exactly_one_new_row(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         index_notes(conn)
-        append_note({**NOTE, "title": "second"}, session_id="S1")
+        append_memo({**NOTE, "title": "second"}, session_id="S1")
         assert index_notes(conn)["notes"] == 1
         assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 2
 
     def test_the_agent_shard_names_the_agent_column(self, noted):
         conn = connect(noted / "i.sqlite")
-        append_note(NOTE, session_id="X1", agent="codex")
+        append_memo(NOTE, session_id="X1", agent="codex")
         index_notes(conn)
         assert session_row(conn, "X1")["agent"] == "codex"
 
@@ -917,7 +917,7 @@ class TestIndexNotes:
         # unfindable. Same standing history.jsonl and job state already have.
         conn = connect(noted / "i.sqlite")
         with patch("scad.index.resolve_project", return_value="repo"):
-            append_note(NOTE, session_id="GHOST")
+            append_memo(NOTE, session_id="GHOST")
             assert index_notes(conn)["notes"] == 1
         row = session_row(conn, "GHOST")
         assert row["grade"] == "skeleton"
@@ -928,7 +928,7 @@ class TestIndexNotes:
         # The whole reason cwd_at_write exists: nothing else here knows where
         # this happened once the trace is gone.
         conn = connect(noted / "i.sqlite")
-        append_note(NOTE, session_id="GHOST")
+        append_memo(NOTE, session_id="GHOST")
         with patch("scad.index.resolve_project", return_value="from-the-note") as rp:
             index_notes(conn)
         assert rp.call_args[0][0] == "/repo"
@@ -937,7 +937,7 @@ class TestIndexNotes:
     def test_an_existing_full_row_is_never_downgraded_by_its_note(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1", title="real session"))
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         index_notes(conn)
         row = session_row(conn, "S1")
         assert row["grade"] == GRADE_FULL
@@ -949,7 +949,7 @@ class TestIndexNotes:
         store(conn, rec(id="S1"))
         conn.execute("UPDATE sessions SET raw_present = 0 WHERE id = 'S1'")
         conn.commit()
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         assert index_notes(conn)["notes"] == 1
         assert session_row(conn, "S1")["raw_present"] == 0
 
@@ -960,7 +960,7 @@ class TestIndexNotes:
     def test_reindex_runs_the_notes_pass(self, noted):
         conn = connect(noted / "i.sqlite")
         arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         stats = reindex(conn)
         assert stats["notes"] == 1
         assert conn.execute(
@@ -972,7 +972,7 @@ class TestIndexNotes:
         # index is always safe — unlike turns, which is what --rebuild guards.
         conn = connect(noted / "i.sqlite")
         arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         reindex(conn)
         reindex(conn, rebuild=True)
         assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
@@ -980,8 +980,8 @@ class TestIndexNotes:
     def test_session_notes_reads_back_in_order(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        append_note(NOTE, session_id="S1")
-        append_note({**NOTE, "title": "second"}, session_id="S1")
+        append_memo(NOTE, session_id="S1")
+        append_memo({**NOTE, "title": "second"}, session_id="S1")
         index_notes(conn)
         assert [r["title"] for r in session_notes(conn, "S1")] == ["first", "second"]
 
@@ -1029,7 +1029,7 @@ class TestNotesSchemaMoved:
     def test_kind_and_project_are_stored_from_the_record(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note({**NOTE, "kind": "bug", "project": "orglens"}, session_id="S1")
+        p = append_memo({**NOTE, "kind": "bug", "project": "orglens"}, session_id="S1")
         append_notes(conn, "S1", read_notes(p)[0], str(p))
         row = conn.execute("SELECT kind, project FROM notes").fetchone()
         assert (row["kind"], row["project"]) == ("bug", "orglens")
@@ -1048,7 +1048,7 @@ class TestBackfillingTheNewColumns:
         """An index whose note row is there but predates kind/project."""
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note({**NOTE, "kind": "handoff", "project": "orglens"},
+        p = append_memo({**NOTE, "kind": "handoff", "project": "orglens"},
                         session_id="S1")
         index_notes(conn)
         conn.execute("UPDATE notes SET kind = NULL, project = NULL")
@@ -1140,12 +1140,12 @@ class TestRelationIsDerived:
     def test_the_derivation_is_the_same_one_the_file_reader_uses(self, tmp_path):
         # Two implementations of one rule (SQL over rows, Python over records)
         # must not drift. Same thread, same answers.
-        from scad.notes import hydrate_notes
+        from scad.memos import hydrate_memos
         records = [{"topic": "t"}, {"topic": "t"}, {"topic": "u", "parent": "t"},
                    {"topic": "v"}]
         conn = self._thread(tmp_path, records)
         assert [r["relation"] for r in session_notes(conn, "S1")] == \
-               [r["relation"] for r in hydrate_notes(records)]
+               [r["relation"] for r in hydrate_memos(records)]
 
 
 class TestNoteProjectOverridesTheSessions:
@@ -1518,7 +1518,7 @@ class TestAnEditedNoteLineReachesTheIndex:
         from scad.index import index_note_file, reindex
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(dict(NOTE, project="scad"), session_id="S1")
+        p = append_memo(dict(NOTE, project="scad"), session_id="S1")
         index_note_file(conn, p, "claude")
         assert conn.execute("SELECT project FROM notes").fetchone()[0] == "scad"
 
@@ -1532,7 +1532,7 @@ class TestAnEditedNoteLineReachesTheIndex:
         from scad.index import index_note_file
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
+        p = append_memo(NOTE, session_id="S1")
         index_note_file(conn, p, "claude")
         with patch("scad.index.read_notes") as rn:
             stats = index_note_file(conn, p, "claude")
@@ -1543,10 +1543,10 @@ class TestAnEditedNoteLineReachesTheIndex:
         from scad.index import index_note_file
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
+        p = append_memo(NOTE, session_id="S1")
         index_note_file(conn, p, "claude")
         self._rewrite(p, 0, title="edited")
-        append_note(dict(NOTE, title="second"), session_id="S1")
+        append_memo(dict(NOTE, title="second"), session_id="S1")
         index_note_file(conn, p, "claude")
         titles = [r[0] for r in conn.execute("SELECT title FROM notes ORDER BY idx")]
         assert titles == ["edited", "second"]
@@ -1573,8 +1573,8 @@ class TestAMovedDirectory:
         # No `project` on either note: one that names its project survives any
         # rebuild, and this would pass without testing anything.
         note = {"topic": "move", "title": "t", "text": "b", "cwd_at_write": str(old)}
-        append_note(note, session_id="S1")
-        append_note(note, session_id="N1")        # a session with no transcript
+        append_memo(note, session_id="S1")
+        append_memo(note, session_id="N1")        # a session with no transcript
         conn = connect(root / ".scad" / "index.sqlite")
         reindex(conn)
         assert [session_row(conn, s)["project"] for s in ("S1", "N1")] == ["myproj"] * 2

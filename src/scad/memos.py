@@ -1,12 +1,14 @@
-"""The notes store — `/remember` capture, on disk.
+"""The memo store — `/memo-write` capture, on disk.
 
 The one tier that is never rederivable. Turns can be re-extracted while raw
-survives and sessions can be recomputed from turns, but a note is self-report:
+survives and sessions can be recomputed from turns, but a memo is self-report:
 if the file is lost, nothing anywhere can reconstruct it. So the file is truth
-and the `notes` table is only an index over it, appending is the only write,
+and the `memos` table is only an index over it, appending is the only write,
 and nothing in here ever deletes, truncates or rewrites.
 
-Path: `~/.scad/notes/<agent>/<session-uuid>.jsonl`
+Path: `~/.scad/memos/<agent>/<session-uuid>.jsonl`. Until 0.9.0 these were
+notes, under `~/.scad/notes`; the move is by hand, and `StoreNotMoved` stops
+anything from reading or writing a machine that has not made it.
 
 Session-keyed and project-free on purpose. A project is a *computed* property
 of a cwd — redefining what counts as a project root is a config edit, and any
@@ -28,7 +30,7 @@ from scad.config import get_scad_home
 # the location has to live in the record or the project stops being rederivable
 # once the trace is pruned. Order is the on-disk key order: these files are read
 # by humans as often as by code.
-NOTE_FIELDS = (
+MEMO_FIELDS = (
     "ts",            # ISO8601, when the capture was made
     "kind",          # info | handoff | bug | request | verification
     "topic",         # semantic subject, kebab
@@ -115,13 +117,33 @@ def encode_cwd(cwd: str) -> str:
     return f"{encoded[:PROJECT_DIR_CAP]}-{_base36(abs(_js_string_hash(text)))}"
 
 
-def notes_root() -> Path:
-    """`~/.scad/notes` — durable, never pruned, not part of the archive."""
-    return get_scad_home() / "notes"
+OLD_STORE = "notes"
+STORE = "memos"
 
 
-def note_path(session_id: str, agent: str = "claude") -> Path:
-    return notes_root() / agent / f"{session_id}.jsonl"
+class StoreNotMoved(Exception):
+    """The pre-0.9.0 store is here and the new one is not."""
+
+
+def memos_root() -> Path:
+    """`~/.scad/memos` — durable, never pruned, not part of the archive.
+
+    Refuses a machine that still has only `~/.scad/notes`. Reading there would
+    show no memos at all, and writing would start a second store beside the
+    old one; both look like the store working. Neither directory is a fresh
+    machine, and both is a person's own doing, so neither is stopped.
+    """
+    home = get_scad_home()
+    old, new = home / OLD_STORE, home / STORE
+    if old.is_dir() and not new.exists():
+        raise StoreNotMoved(
+            f"scad's notes are memos since 0.9.0, and this machine's store has "
+            f"not moved. Run:\n  mv {old} {new}\nthen `scad reindex`.")
+    return new
+
+
+def memo_path(session_id: str, agent: str = "claude") -> Path:
+    return memos_root() / agent / f"{session_id}.jsonl"
 
 
 def _checked_id(value: str, label: str) -> str:
@@ -138,7 +160,7 @@ def _checked_id(value: str, label: str) -> str:
     return value
 
 
-def normalize_note(record: dict, *, cwd: str | None = None) -> dict:
+def normalize_memo(record: dict, *, cwd: str | None = None) -> dict:
     """Fill the defaults a caller may omit; leave everything else alone.
 
     Unknown keys are carried through untouched. The record shape is owned by
@@ -148,8 +170,8 @@ def normalize_note(record: dict, *, cwd: str | None = None) -> dict:
     if not isinstance(record, dict):
         raise ValueError("a note must be a JSON object")
 
-    out = {field: record.get(field) for field in NOTE_FIELDS}
-    out.update({k: v for k, v in record.items() if k not in NOTE_FIELDS})
+    out = {field: record.get(field) for field in MEMO_FIELDS}
+    out.update({k: v for k, v in record.items() if k not in MEMO_FIELDS})
 
     out["ts"] = record.get("ts") or datetime.now().astimezone().isoformat(timespec="seconds")
     out["kind"] = record.get("kind") or DEFAULT_KIND
@@ -160,7 +182,7 @@ def normalize_note(record: dict, *, cwd: str | None = None) -> dict:
     return out
 
 
-def append_note(
+def append_memo(
     record: dict, *, session_id: str, agent: str = "claude", cwd: str | None = None
 ) -> Path:
     """Append one capture to a session's note file. The only write there is.
@@ -171,9 +193,9 @@ def append_note(
     """
     _checked_id(session_id, "session id")
     _checked_id(agent, "agent")
-    line = json.dumps(normalize_note(record, cwd=cwd), ensure_ascii=False, default=str)
+    line = json.dumps(normalize_memo(record, cwd=cwd), ensure_ascii=False, default=str)
 
-    path = note_path(session_id, agent)
+    path = memo_path(session_id, agent)
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a", encoding="utf-8") as fh:
         fh.write(line + "\n")
@@ -205,15 +227,15 @@ SESSION_ID_ENV = {
 }
 
 
-class NoteTargetError(Exception):
+class MemoTargetError(Exception):
     """`--current` could not name exactly one session."""
 
 
-class NoSessionFound(NoteTargetError):
+class NoSessionFound(MemoTargetError):
     pass
 
 
-class AmbiguousSession(NoteTargetError):
+class AmbiguousSession(MemoTargetError):
     pass
 
 
@@ -338,7 +360,7 @@ def current_session_id(
     return candidates[0].stem
 
 
-def read_note_file(path: Path, start_offset: int = 0) -> list[dict]:
+def read_memo_file(path: Path, start_offset: int = 0) -> list[dict]:
     """Read a note file's records in append order — oldest first, newest last.
 
     Tolerant like the trace readers: a malformed line is skipped rather than
@@ -388,7 +410,7 @@ def derived_relation(record: dict, earlier: list[dict]) -> str:
     return "shift"
 
 
-def hydrate_notes(records: list[dict]) -> list[dict]:
+def hydrate_memos(records: list[dict]) -> list[dict]:
     """Fill the read-time fields on a file's records, oldest first.
 
     `relation` is derived here and `kind` defaults here, so a record written

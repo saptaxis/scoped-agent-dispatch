@@ -2063,6 +2063,35 @@ class TestRenameLeftNoStaleDocs:
         assert stale == []
 
 
+class TestStoreNotMovedStopsTheCommand:
+    """A machine with only the pre-0.9.0 ~/.scad/notes gets one error naming
+    the move, from every command that reads or writes memos, not a traceback
+    and not an empty listing."""
+
+    def _old_store_only(self, tmp_path, monkeypatch):
+        home = tmp_path / ".scad"
+        (home / "notes" / "claude").mkdir(parents=True)
+        (home / "notes" / "claude" / "S1.jsonl").write_text('{"title": "t"}\n')
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return home
+
+    @pytest.mark.parametrize("argv", [
+        ["session", "note", "--session", "S1"],
+        ["session", "notes", "S1"],
+        ["notes", "read", "S1"],
+        ["reindex"],
+    ])
+    def test_each_memo_command_exits_non_zero_naming_the_move(self, runner, tmp_path,
+                                                              monkeypatch, argv):
+        home = self._old_store_only(tmp_path, monkeypatch)
+        result = runner.invoke(main, argv, input='{"title": "t"}')
+        assert result.exit_code == 1, result.output
+        assert f"mv {home / 'notes'} {home / 'memos'}" in result.output
+        assert "Traceback" not in result.output
+        assert not (home / "memos").exists()
+
+
 class TestSessionNote:
     """`scad session note` — the write CLI for the one tier with no second copy."""
 
@@ -2077,7 +2106,7 @@ class TestSessionNote:
 
     def _projects(self, tmp_path, monkeypatch, cwd, session_id="S1"):
         """A fake ~/.claude/projects holding one live transcript for `cwd`."""
-        from scad.notes import encode_cwd
+        from scad.memos import encode_cwd
         home = tmp_path / "home"
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         d = home / ".claude" / "projects" / encode_cwd(str(Path(cwd).resolve()))
@@ -2091,21 +2120,21 @@ class TestSessionNote:
         result = runner.invoke(main, ["session", "note", "--session", "S1"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        path = scad_home / "notes" / "claude" / "S1.jsonl"
+        path = scad_home / "memos" / "claude" / "S1.jsonl"
         assert json.loads(path.read_text())["title"] == "built it"
 
     def test_the_file_lands_agent_sharded_and_session_keyed(self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
         runner.invoke(main, ["session", "note", "--session", "X9", "--agent", "codex"],
                       input=json.dumps(self.NOTE))
-        assert (scad_home / "notes" / "codex" / "X9.jsonl").is_file()
+        assert (scad_home / "memos" / "codex" / "X9.jsonl").is_file()
 
     def test_a_second_note_appends_leaving_the_first_byte_identical(
             self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
         runner.invoke(main, ["session", "note", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        path = scad_home / "notes" / "claude" / "S1.jsonl"
+        path = scad_home / "memos" / "claude" / "S1.jsonl"
         first = path.read_bytes()
         runner.invoke(main, ["session", "note", "--session", "S1"],
                       input=json.dumps({**self.NOTE, "title": "and again"}))
@@ -2121,7 +2150,7 @@ class TestSessionNote:
         result = runner.invoke(main, ["session", "note", "--current"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        assert (scad_home / "notes" / "claude" / "LIVE.jsonl").is_file()
+        assert (scad_home / "memos" / "claude" / "LIVE.jsonl").is_file()
 
     def test_current_records_the_cwd_it_resolved_from(self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
@@ -2130,7 +2159,7 @@ class TestSessionNote:
         self._projects(tmp_path, monkeypatch, work, session_id="LIVE")
         monkeypatch.chdir(work)
         runner.invoke(main, ["session", "note", "--current"], input=json.dumps(self.NOTE))
-        rec = json.loads((scad_home / "notes" / "claude" / "LIVE.jsonl").read_text())
+        rec = json.loads((scad_home / "memos" / "claude" / "LIVE.jsonl").read_text())
         assert rec["cwd_at_write"] == str(work.resolve())
 
     def test_two_live_sessions_refuse_and_name_the_flag(self, runner, tmp_path, monkeypatch):
@@ -2138,7 +2167,7 @@ class TestSessionNote:
         work = tmp_path / "work"
         work.mkdir()
         home = self._projects(tmp_path, monkeypatch, work, session_id="alpha")
-        from scad.notes import encode_cwd
+        from scad.memos import encode_cwd
         d = home / ".claude" / "projects" / encode_cwd(str(work.resolve()))
         (d / "beta.jsonl").write_text(json.dumps({"cwd": str(work.resolve())}) + "\n")
         monkeypatch.chdir(work)
@@ -2167,7 +2196,7 @@ class TestSessionNote:
         result = runner.invoke(main, ["session", "note", "--current"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        assert (scad_home / "notes" / "claude" / "EXPORTED.jsonl").is_file()
+        assert (scad_home / "memos" / "claude" / "EXPORTED.jsonl").is_file()
 
     def test_current_resolves_against_the_agent_that_was_asked_for(
             self, runner, tmp_path, monkeypatch):
@@ -2178,8 +2207,8 @@ class TestSessionNote:
         result = runner.invoke(main, ["session", "note", "--current", "--agent", "codex"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        assert (scad_home / "notes" / "codex" / "CX7.jsonl").is_file()
-        assert not (scad_home / "notes" / "codex" / "CLAUDE-PARENT.jsonl").exists()
+        assert (scad_home / "memos" / "codex" / "CX7.jsonl").is_file()
+        assert not (scad_home / "memos" / "codex" / "CLAUDE-PARENT.jsonl").exists()
 
     def test_current_for_codex_refuses_rather_than_using_an_inherited_claude_id(
             self, runner, tmp_path, monkeypatch):
@@ -2193,7 +2222,7 @@ class TestSessionNote:
                                input=json.dumps(self.NOTE))
         assert result.exit_code != 0
         assert "CODEX_THREAD_ID" in result.output
-        assert not (scad_home / "notes" / "codex").exists()
+        assert not (scad_home / "memos" / "codex").exists()
 
     def test_neither_target_is_refused(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
@@ -2206,7 +2235,7 @@ class TestSessionNote:
         result = runner.invoke(main, ["session", "note", "--session", "S1"],
                                input="not json at all")
         assert result.exit_code != 0
-        assert not (scad_home / "notes" / "claude" / "S1.jsonl").exists()
+        assert not (scad_home / "memos" / "claude" / "S1.jsonl").exists()
 
     def test_it_confirms_briefly_without_echoing_the_record(
             self, runner, tmp_path, monkeypatch):
@@ -2301,7 +2330,7 @@ class TestSessionNotes:
         # a note that arrived some other way: another machine, a restored
         # backup, a shard synced in.
         home = self._home(tmp_path, monkeypatch)
-        shard = home / "notes" / "claude"
+        shard = home / "memos" / "claude"
         shard.mkdir(parents=True)
         (shard / "S9.jsonl").write_text(
             json.dumps({**self.NOTE, "ts": "2026-08-05T10:00:00+05:30"}) + "\n")
@@ -2390,8 +2419,8 @@ class TestRememberSkillIsAThinCaller:
         assert "reverse it" in self.text
 
     def test_the_record_fields_still_match_the_capture_format(self):
-        from scad.notes import NOTE_FIELDS
-        authored = set(NOTE_FIELDS) - {"ts", "cwd_at_write"}   # filled by the CLI
+        from scad.memos import MEMO_FIELDS
+        authored = set(MEMO_FIELDS) - {"ts", "cwd_at_write"}   # filled by the CLI
         for field in authored:
             assert f"`{field}`" in self.text, f"{field} undocumented in /remember"
 
@@ -2642,8 +2671,8 @@ class TestNotesForHandoff:
     def test_read_prints_the_full_record(self, runner, tmp_path, monkeypatch):
         """Reads the FILE, not the index — the index holds no body text at all."""
         self._index(tmp_path, monkeypatch)
-        from scad.notes import append_note
-        append_note({"topic": "registry", "title": "What the registry solved",
+        from scad.memos import append_memo
+        append_memo({"topic": "registry", "title": "What the registry solved",
                      "text": "THE FULL BODY GOES HERE"}, session_id="S1", agent="claude")
         result = runner.invoke(main, ["notes", "read", "S1"])
         assert "THE FULL BODY GOES HERE" in result.output
@@ -2777,7 +2806,7 @@ class TestSessionNoteValidatesKindAndProject:
         conn.close()
 
     def _note(self, scad_home, session="S1"):
-        return scad_home / "notes" / "claude" / f"{session}.jsonl"
+        return scad_home / "memos" / "claude" / f"{session}.jsonl"
 
     def test_an_unknown_kind_is_refused_and_nothing_is_written(
             self, runner, tmp_path, monkeypatch):
@@ -2789,7 +2818,7 @@ class TestSessionNoteValidatesKindAndProject:
         assert not self._note(scad_home).exists()
 
     def test_each_of_the_five_kinds_is_accepted(self, runner, tmp_path, monkeypatch):
-        from scad.notes import KINDS
+        from scad.memos import KINDS
         scad_home = self._home(tmp_path, monkeypatch)
         for kind in KINDS:
             result = runner.invoke(main, ["session", "note", "--session", kind],
@@ -2859,16 +2888,16 @@ class TestNotesReadDerivesRelation:
 
     def _store(self, tmp_path, monkeypatch, records):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
-        from scad.notes import append_note
+        from scad.memos import append_memo
         for r in records:
-            append_note(r, session_id="S1", agent="claude")
+            append_memo(r, session_id="S1", agent="claude")
 
     def test_the_json_output_carries_a_relation_the_file_does_not(
             self, runner, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch, [
             {"topic": "a", "title": "one"}, {"topic": "a", "title": "two"},
             {"topic": "b", "parent": "a", "title": "three"}])
-        raw = (tmp_path / ".scad" / "notes" / "claude" / "S1.jsonl").read_text()
+        raw = (tmp_path / ".scad" / "memos" / "claude" / "S1.jsonl").read_text()
         assert "relation" not in raw
 
         rows = json.loads(runner.invoke(main, ["session", "notes", "S1", "--json"]).output)
@@ -2894,10 +2923,10 @@ class TestNotesReadIsProgressive:
 
     def _store(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
-        from scad.notes import append_note
+        from scad.memos import append_memo
         for i, (topic, body) in enumerate((
             ("older", "OLDEST BODY"), ("middle", "MIDDLE BODY"), ("newest", "NEWEST BODY"))):
-            append_note({"topic": topic, "title": f"t{i}", "text": body},
+            append_memo({"topic": topic, "title": f"t{i}", "text": body},
                         session_id="S1", agent="claude")
 
     def test_last_reads_only_the_newest(self, runner, tmp_path, monkeypatch):
@@ -3901,10 +3930,10 @@ class TestSessionNotesCurrent:
     resolved the same way `session note --current` writes them."""
 
     def test_current_resolves_like_note_current(self, runner, tmp_path, monkeypatch):
-        from scad.notes import append_note
+        from scad.memos import append_memo
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setattr("scad.cli.current_session_id", lambda agent="claude": "S9")
-        append_note({"title": "mine", "text": "b"}, session_id="S9")
+        append_memo({"title": "mine", "text": "b"}, session_id="S9")
         result = runner.invoke(main, ["session", "notes", "--current"])
         assert result.exit_code == 0, result.output
         assert "mine" in result.output
