@@ -107,23 +107,23 @@ class JobStateRecord:
 
 
 @dataclass(frozen=True)
-class NoteRecord:
-    """One row of `notes` — the indexed projection of a `/remember` capture.
+class MemoRecord:
+    """One row of `memos` — the indexed projection of a `/memo-write` capture.
 
-    Deliberately NOT the whole record. The note file is truth; this carries only
-    what makes a note *findable* (`sessions tagged X` as a query rather than a
-    grep), so `text` is read off disk when someone actually wants it. That
-    asymmetry is the point: losing this table costs a reindex, while losing the
-    file costs the note, and a schema that copied everything would blur which of
-    the two is the artifact.
+    The memo file is truth; this is what makes a memo *findable* (`sessions
+    tagged X` as a query rather than a grep). Losing this table costs a
+    reindex, while losing the file costs the memo. Until 0.9.0 the body stayed
+    on disk and only the labels were indexed, which meant a search for what a
+    memo *said* found nothing unless a tag happened to say it too; `text` is
+    here so a search can match the body. Listings still never print it.
 
     `relation` is absent on purpose: it is derived from `parent` and from the
-    topics already in the thread (see `notes.derived_relation`), so storing it
+    topics already in the thread (see `memos.derived_relation`), so storing it
     would be storing an answer the query can compute.
 
-    `cwd_at_write` is the exception, and the reason it exists at all: it is not
-    a `notes` column but the note's only statement of where it happened, so the
-    project stays derivable after the transcript that knew the cwd is pruned.
+    `cwd_at_write` is not a `memos` column but the memo's only statement of
+    where it happened, so the project stays derivable after the transcript that
+    knew the cwd is pruned.
     """
 
     ts: int | None = None
@@ -134,6 +134,7 @@ class NoteRecord:
     title: str | None = None
     tags: tuple | list = ()
     entities: tuple | list = ()
+    text: str | None = None
     cwd_at_write: str | None = None
 
 

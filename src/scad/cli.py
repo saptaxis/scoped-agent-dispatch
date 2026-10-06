@@ -82,18 +82,18 @@ from scad.archive import archive_all, archive_root, archive_run, summarize
 from scad import aliases
 from scad.project import UNFILED, project_resolution, resolve_project
 from scad.index import (
-    NOTE_KIND_SQL,
-    NOTE_PROJECT_RESOLVED,
-    NOTE_PROJECT_SQL,
-    NOTE_RELATION_SQL,
+    MEMO_KIND_SQL,
+    MEMO_PROJECT_RESOLVED,
+    MEMO_PROJECT_SQL,
+    MEMO_RELATION_SQL,
     connect as index_connect,
     ensure_launched_session,
-    index_note_file,
+    index_memo_file,
     known_projects,
     reindex as run_reindex,
-    search_notes,
+    search_memos,
     search_turns,
-    session_notes as index_session_notes,
+    session_memos as index_session_notes,
     session_row,
     session_turns,
 )
@@ -2065,7 +2065,7 @@ def reindex(rebuild, force, no_archive):
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
-    for key in ("files", "sessions", "turns", "replaced", "notes", "named",
+    for key in ("files", "sessions", "turns", "replaced", "memos", "named",
                 "skipped_lines", "skipped_files"):
         if stats.get(key):
             click.echo(f"[scad]   {key}: {stats[key]}")
@@ -2605,7 +2605,7 @@ def session_note(session_id, current, agent):
     # project, so checking afterwards would find the name known because we had
     # just written it and the warning would never fire.
     try:
-        index_note_file(index_connect(), path, agent)
+        index_memo_file(index_connect(), path, agent)
     except Exception as exc:
         # Never fatal. The file is truth and `reindex` will pick it up; a locked
         # or absent index must not turn a successful capture into an error.
@@ -2794,7 +2794,7 @@ def notes_ls(project_name, session_id, about, kind, limit, as_json):
         # The note's own project first, the writing session's second. Filtering
         # on `s.project` alone is what hid a cross-captured note: filed against
         # B, listed only under A, findable by nobody looking for either.
-        where.append(f"{NOTE_PROJECT_RESOLVED} = ?")
+        where.append(f"{MEMO_PROJECT_RESOLVED} = ?")
         params.append(project_name)
     if session_id:
         where.append("n.session_id = ?")
@@ -2807,19 +2807,19 @@ def notes_ls(project_name, session_id, about, kind, limit, as_json):
         clauses = []
         for name in about:
             clauses.append(f"(n.tags LIKE ? OR n.entities LIKE ? OR n.topic = ? "
-                           f"OR {NOTE_PROJECT_RESOLVED} = ?)")
+                           f"OR {MEMO_PROJECT_RESOLVED} = ?)")
             quoted = f'%{json.dumps(name)}%'
             params.extend([quoted, quoted, name, name])
         where.append("(" + " OR ".join(clauses) + ")")
     if kind:
-        where.append(f"{NOTE_KIND_SQL} = ?")
+        where.append(f"{MEMO_KIND_SQL} = ?")
         params.append(kind)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = [dict(r) for r in conn.execute(
-        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
-        f"       {NOTE_PROJECT_SQL}, s.name, s.agent "
-        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"SELECT n.session_id, n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, "
+        f"       {MEMO_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       {MEMO_PROJECT_SQL}, s.name, s.agent "
+        f"FROM memos n LEFT JOIN sessions s ON s.id = n.session_id "
         f"{clause} ORDER BY n.ts DESC LIMIT ?", (*params, limit))]
 
     if as_json:
@@ -3029,7 +3029,7 @@ def search(query, project, kind, limit, notes_only, as_json):
     """Full-text search across every indexed turn, or across notes with --notes."""
     conn = index_connect()
     if notes_only:
-        hits = search_notes(conn, query, limit=limit)
+        hits = search_memos(conn, query, limit=limit)
         if as_json:
             click.echo(json.dumps(hits, default=str))
             return

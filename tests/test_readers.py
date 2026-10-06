@@ -693,7 +693,7 @@ class TestJobState:
 
 # --- notes: the authored tier -------------------------------------------------
 
-from scad.readers import read_notes  # noqa: E402
+from scad.readers import read_memos  # noqa: E402
 
 NOTE = {
     "ts": "2026-07-29T11:00:00+05:30",
@@ -714,18 +714,18 @@ NOTE = {
 class TestReadNotes:
     def test_one_record_per_line_in_order(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE, {**NOTE, "title": "second"}])
-        notes, end = read_notes(p)
+        notes, end = read_memos(p)
         assert [n.title for n in notes] == ["Built the notes store", "second"]
         assert end == p.stat().st_size
 
     def test_ts_becomes_epoch_ms(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
-        notes, _ = read_notes(p)
+        notes, _ = read_memos(p)
         assert notes[0].ts == 1785303000000   # 2026-07-29T05:30:00Z
 
     def test_indexed_fields_are_carried(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
-        n = read_notes(p)[0][0]
+        n = read_memos(p)[0][0]
         assert (n.kind, n.topic, n.parent) == ("info", "notes-store", None)
         assert n.tags == ["notes", "jsonl", "append-only"]
         assert n.entities == ["session-index.md"]
@@ -734,42 +734,42 @@ class TestReadNotes:
         # NULL is not "no project" — it means "the writing session's project",
         # which only the index can resolve. A value here overrides that.
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE, {**NOTE, "project": "orglens"}])
-        assert [n.project for n in read_notes(p)[0]] == [None, "orglens"]
+        assert [n.project for n in read_memos(p)[0]] == [None, "orglens"]
 
     def test_a_record_written_before_kind_existed_reads_as_the_default(self, tmp_path):
         older = {k: v for k, v in NOTE.items() if k != "kind"}
         p = write_jsonl(tmp_path / "S1.jsonl", [older])
-        assert read_notes(p)[0][0].kind == "info"
+        assert read_memos(p)[0][0].kind == "info"
 
     def test_cwd_at_write_is_carried_so_the_project_survives_the_trace(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
-        assert read_notes(p)[0][0].cwd_at_write == "/Users/vsr/code/scad"
+        assert read_memos(p)[0][0].cwd_at_write == "/Users/vsr/code/scad"
 
     def test_resume_reads_only_what_was_appended(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
         first_end = p.stat().st_size
         with p.open("a") as fh:
             fh.write(json.dumps({**NOTE, "title": "later"}) + "\n")
-        notes, end = read_notes(p, first_end)
+        notes, end = read_memos(p, first_end)
         assert [n.title for n in notes] == ["later"]
         assert end == p.stat().st_size
 
     def test_a_malformed_line_is_skipped_not_fatal(self, tmp_path):
         p = tmp_path / "S1.jsonl"
         p.write_text("{not json\n" + json.dumps(NOTE) + "\n")
-        notes, _ = read_notes(p)
+        notes, _ = read_memos(p)
         assert [n.title for n in notes] == ["Built the notes store"]
 
     def test_a_sparse_record_survives(self, tmp_path):
         # The record is written by a model; missing optional fields are normal
         # and must never cost the note.
         p = write_jsonl(tmp_path / "S1.jsonl", [{"title": "bare"}])
-        n = read_notes(p)[0][0]
+        n = read_memos(p)[0][0]
         assert (n.title, n.ts, n.topic, n.tags) == ("bare", None, None, [])
 
     def test_non_list_tags_are_coerced_rather_than_dropped(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [{**NOTE, "tags": "notes"}])
-        assert read_notes(p)[0][0].tags == ["notes"]
+        assert read_memos(p)[0][0].tags == ["notes"]
 
 
 # --- kimi: one session directory, one wire per agent --------------------------

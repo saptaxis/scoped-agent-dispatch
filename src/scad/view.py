@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from scad.aliases import current_cwd
-from scad.index import NOTE_KIND_SQL, NOTE_PROJECT_SQL, NOTE_RELATION_SQL
+from scad.index import MEMO_KIND_SQL, MEMO_PROJECT_SQL, MEMO_RELATION_SQL
 from scad.live import (
     ClaudeSession,
     TmuxPane,
@@ -652,10 +652,10 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     # Notes are the authored tier — the only thing here that can never be
     # re-derived — and until now they were write-only from the page's side.
     notes = [dict(r) for r in conn.execute(
-        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
-        f"       n.note_path, {NOTE_PROJECT_SQL}, s.name, s.agent, s.cwd "
-        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"SELECT n.session_id, n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, "
+        f"       {MEMO_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       n.memo_path, {MEMO_PROJECT_SQL}, s.name, s.agent, s.cwd "
+        f"FROM memos n LEFT JOIN sessions s ON s.id = n.session_id "
         f"ORDER BY n.ts DESC"
     ).fetchall()]
     for note in notes:

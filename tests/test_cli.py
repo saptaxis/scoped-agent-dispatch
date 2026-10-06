@@ -2335,7 +2335,7 @@ class TestSessionNotes:
         (shard / "S9.jsonl").write_text(
             json.dumps({**self.NOTE, "ts": "2026-08-05T10:00:00+05:30"}) + "\n")
         result = runner.invoke(main, ["reindex", "--no-archive"])
-        assert "notes: 1" in result.output
+        assert "memos: 1" in result.output
 
     def test_a_note_written_here_is_not_news_to_the_next_pass(
             self, runner, tmp_path, monkeypatch):
@@ -2635,9 +2635,9 @@ class TestNotesForHandoff:
                 "INSERT INTO sessions (id, kind, agent, machine, grade, source, "
                 "project, name, ended) VALUES (?,?,?,?,?,?,?,?,?)",
                 (sid, "main", "claude", "m", "full", "claude-transcript", proj, name, ended))
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                      "VALUES ('S1',0,200,'registry','What the registry solved','/n')")
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                      "VALUES ('S2',0,150,'other-thing','Unrelated','/n')")
         conn.commit()
         conn.close()
@@ -2693,12 +2693,12 @@ class TestNotesCrossCapture:
             "INSERT INTO sessions (id, kind, agent, machine, grade, source, project) "
             "VALUES ('S1','main','claude','m','full','claude-transcript','alpha')")
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, kind, topic, project, title, "
-            "tags, entities, note_path) VALUES "
+            "INSERT INTO memos (session_id, idx, ts, kind, topic, project, title, "
+            "tags, entities, memo_path) VALUES "
             "('S1',0,300,'bug','beta-crash','beta','BETA IS BROKEN','[]','[]','/n')")
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, kind, topic, project, title, "
-            "tags, entities, note_path) VALUES "
+            "INSERT INTO memos (session_id, idx, ts, kind, topic, project, title, "
+            "tags, entities, memo_path) VALUES "
             "('S1',1,200,'info','alpha-work',NULL,'ORDINARY ALPHA NOTE','[]','[]','/n')")
         conn.commit()
         conn.close()
@@ -2747,13 +2747,13 @@ class TestNotesKindFilter:
                 ("handoff", "WHERE WE STOPPED"), ("bug", "SOMETHING BROKE"),
                 ("info", "AN ORDINARY NOTE"))):
             conn.execute(
-                "INSERT INTO notes (session_id, idx, ts, kind, topic, title, tags, "
-                "entities, note_path) VALUES ('S1',?,?,?,'t',?,'[]','[]','/n')",
+                "INSERT INTO memos (session_id, idx, ts, kind, topic, title, tags, "
+                "entities, memo_path) VALUES ('S1',?,?,?,'t',?,'[]','[]','/n')",
                 (idx, 100 - idx, kind, title))
         # Written before `kind` existed: NULL in the column, `info` by default.
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, topic, title, tags, entities, "
-            "note_path) VALUES ('S1',9,50,'t','A LEGACY NOTE','[]','[]','/n')")
+            "INSERT INTO memos (session_id, idx, ts, topic, title, tags, entities, "
+            "memo_path) VALUES ('S1',9,50,'t','A LEGACY NOTE','[]','[]','/n')")
         conn.commit()
         conn.close()
 
@@ -3638,7 +3638,7 @@ class TestNoteWriteIndexesImmediately:
         assert "S1" in result.output
 
     def test_write_then_reindex_does_not_duplicate(self, runner, tmp_path, monkeypatch):
-        # Indexing at write must ALSO advance notes_offset -- otherwise the next
+        # Indexing at write must ALSO advance memos_offset -- otherwise the next
         # pass re-appends the same record under a fresh idx, a duplicate that
         # reads as a real second note.
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
@@ -3860,8 +3860,8 @@ class TestNotesAbout:
 
     def _seed(self, tmp_path, monkeypatch):
         import time as _time
-        from scad.index import append_notes, connect, upsert_session
-        from scad.records import KIND_MAIN, NoteRecord, SessionRecord
+        from scad.index import append_memos, connect, upsert_session
+        from scad.records import KIND_MAIN, MemoRecord, SessionRecord
 
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
@@ -3873,14 +3873,14 @@ class TestNotesAbout:
             upsert_session(conn, rec, machine="mac", project=project,
                            archive_path=f"/arc/{sid}.jsonl", source_size=1,
                            source_mtime=1, parsed_offset=1)
-        append_notes(conn, "SA", [
-            NoteRecord(ts=now - 500, title="by tag", tags=["orglens", "x"]),
-            NoteRecord(ts=now - 400, title="by entity", entities=["orglens"]),
-            NoteRecord(ts=now - 300, title="by topic", topic="orglens"),
-            NoteRecord(ts=now - 200, title="by authored project", project="orglens"),
-            NoteRecord(ts=now - 100, title="unrelated", tags=["scad"]),
+        append_memos(conn, "SA", [
+            MemoRecord(ts=now - 500, title="by tag", tags=["orglens", "x"]),
+            MemoRecord(ts=now - 400, title="by entity", entities=["orglens"]),
+            MemoRecord(ts=now - 300, title="by topic", topic="orglens"),
+            MemoRecord(ts=now - 200, title="by authored project", project="orglens"),
+            MemoRecord(ts=now - 100, title="unrelated", tags=["scad"]),
         ], "/notes/SA.jsonl")
-        append_notes(conn, "SO", [NoteRecord(ts=now - 50, title="by session project")],
+        append_memos(conn, "SO", [MemoRecord(ts=now - 50, title="by session project")],
                      "/notes/SO.jsonl")
         conn.commit()
 
@@ -3914,11 +3914,11 @@ class TestNotesAbout:
 
     def test_about_is_a_whole_word_in_the_json_arrays(self, runner, tmp_path, monkeypatch):
         """`orglens` must not match a tag `orglens-extras`."""
-        from scad.index import append_notes, connect
-        from scad.records import NoteRecord
+        from scad.index import append_memos, connect
+        from scad.records import MemoRecord
         self._seed(tmp_path, monkeypatch)
         conn = connect()
-        append_notes(conn, "SA", [NoteRecord(ts=1, title="near miss", tags=["orglens-extras"])],
+        append_memos(conn, "SA", [MemoRecord(ts=1, title="near miss", tags=["orglens-extras"])],
                      "/notes/SA.jsonl")
         conn.commit()
         result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])

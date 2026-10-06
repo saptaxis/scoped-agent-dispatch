@@ -26,19 +26,19 @@ from scad.readers import (
     read_codex_rollout,
     read_job_state,
     read_kimi_wire,
-    read_notes,
+    read_memos,
 )
 from scad.records import (
     GRADE_FULL,
     GRADE_SKELETON,
     KIND_MAIN,
     JobStateRecord,
-    NoteRecord,
+    MemoRecord,
     SessionRecord,
     TurnRecord,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXTRACTOR_VERSION = 1
 
 # A real `source` value, alongside claude-transcript / claude-subagent /
@@ -46,8 +46,8 @@ EXTRACTOR_VERSION = 1
 # state.
 SOURCE_JOBSTATE = "claude-jobstate"
 
-# ...and some exist only as a note. See index_notes for why that is a row.
-SOURCE_NOTE = "scad-note"
+# ...and some exist only as a memo. See index_memos for why that is a row.
+SOURCE_MEMO = "scad-memo"
 
 # ...and some exist only because scad started them and nothing has been
 # archived yet. See ensure_launched_session.
@@ -94,8 +94,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   source_mtime      INTEGER,
   source_size       INTEGER,
   parsed_offset     INTEGER NOT NULL DEFAULT 0,
-  notes_offset      INTEGER NOT NULL DEFAULT 0,
-  notes_mtime       INTEGER,
+  memos_offset      INTEGER NOT NULL DEFAULT 0,
+  memos_mtime       INTEGER,
   raw_present       INTEGER NOT NULL DEFAULT 1,
   extractor_version INTEGER NOT NULL DEFAULT 1
 );
@@ -114,10 +114,10 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 -- No `relation` column: it is derived per query from `parent` and the topics
--- already in the thread (NOTE_RELATION_SQL). Older indexes still carry the
--- column with its authored values in it — nothing reads it, and dropping it
--- would be the one destructive act this file otherwise refuses.
-CREATE TABLE IF NOT EXISTS notes (
+-- already in the thread (MEMO_RELATION_SQL). Until 0.9.0 these rows were
+-- `notes`; an index from before then keeps that table, read by nothing, until
+-- it is dropped by hand. Every row here is re-derivable from the memo files.
+CREATE TABLE IF NOT EXISTS memos (
   session_id TEXT NOT NULL,
   idx        INTEGER NOT NULL,
   ts         INTEGER,
@@ -128,7 +128,8 @@ CREATE TABLE IF NOT EXISTS notes (
   title      TEXT,
   tags       TEXT,
   entities   TEXT,
-  note_path  TEXT NOT NULL,
+  text       TEXT,               -- the body, so a search can find what a memo says
+  memo_path  TEXT NOT NULL,
   PRIMARY KEY (session_id, idx)
 );
 
@@ -158,21 +159,14 @@ def index_path() -> Path:
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "sessions": {
         "name": "TEXT", "harness_state": "TEXT", "needs": "TEXT", "needs_detail": "TEXT",
-        # When the note file was last written, so an edit that leaves the size
-        # alone is still seen. NULL on an existing index reads as "never", and
-        # the next pass re-reads every note file once and stamps it.
-        "notes_mtime": "INTEGER",
+        # How far into each memo file the index has read, and when the file
+        # was last written, so an edit that leaves the size alone is still
+        # seen. On an index from before 0.9.0 they arrive at 0 and NULL, beside
+        # the old notes_offset and notes_mtime, and the next pass reads every
+        # memo file from the start into the new, empty `memos` table.
+        "memos_offset": "INTEGER NOT NULL DEFAULT 0",
+        "memos_mtime": "INTEGER",
     },
-    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass skips a
-    # file whose size and mtime it has seen — so on an index that already has
-    # rows, these stay NULL through any number of ordinary reindexes. Only
-    # re-reading the note files fills them: `scad reindex --rebuild`, or
-    # `UPDATE sessions SET notes_mtime = NULL;` followed by `scad reindex`,
-    # which re-reads every note file, finds the rows disagree with the lines,
-    # and replaces them. Meanwhile queries read `kind` through
-    # COALESCE(kind,'info'), so an un-backfilled row answers as the default
-    # rather than as nothing.
-    "notes": {"kind": "TEXT", "project": "TEXT"},
 }
 
 
@@ -390,9 +384,9 @@ def apply_job_state(conn, job: JobStateRecord) -> bool:
 # `relation` in SQL, and the same rule as notes.derived_relation. The EXISTS
 # looks at the whole session's rows rather than at insert order, so an
 # incremental pass that appends one note gets the same answer a rebuild does.
-NOTE_RELATION_SQL = (
+MEMO_RELATION_SQL = (
     "CASE WHEN COALESCE(n.parent, '') <> '' THEN 'branch' "
-    "     WHEN EXISTS (SELECT 1 FROM notes prior "
+    "     WHEN EXISTS (SELECT 1 FROM memos prior "
     "                  WHERE prior.session_id = n.session_id AND prior.idx < n.idx "
     "                    AND prior.topic IS NOT NULL AND prior.topic = n.topic) "
     "     THEN 'continue' "
@@ -404,15 +398,15 @@ NOTE_RELATION_SQL = (
 # against project B, and before this it was filed under A because the project
 # only ever arrived through this JOIN. Nothing is lost by letting the note win —
 # `cwd_at_write` still records where it was actually written.
-NOTE_PROJECT_RESOLVED = "COALESCE(n.project, s.project)"
-NOTE_PROJECT_SQL = f"{NOTE_PROJECT_RESOLVED} AS project"
+MEMO_PROJECT_RESOLVED = "COALESCE(n.project, s.project)"
+MEMO_PROJECT_SQL = f"{MEMO_PROJECT_RESOLVED} AS project"
 
 # An index row written before `kind` existed reads as the default, not as NULL.
-NOTE_KIND_SQL = f"COALESCE(n.kind, '{DEFAULT_KIND}')"
+MEMO_KIND_SQL = f"COALESCE(n.kind, '{DEFAULT_KIND}')"
 
 
-def append_notes(
-    conn, session_id: str, notes: list[NoteRecord], note_path: str
+def append_memos(
+    conn, session_id: str, notes: list[MemoRecord], memo_path: str
 ) -> int:
     """Append note rows, continuing idx from whatever is already stored.
 
@@ -424,16 +418,16 @@ def append_notes(
     if not notes:
         return 0
     start = conn.execute(
-        "SELECT COALESCE(MAX(idx) + 1, 0) FROM notes WHERE session_id = ?", (session_id,)
+        "SELECT COALESCE(MAX(idx) + 1, 0) FROM memos WHERE session_id = ?", (session_id,)
     ).fetchone()[0]
     conn.executemany(
-        "INSERT OR IGNORE INTO notes "
+        "INSERT OR IGNORE INTO memos "
         "(session_id, idx, ts, kind, topic, parent, project, title, tags, entities, "
-        " note_path) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        " text, memo_path) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             (session_id, start + i, n.ts, n.kind, n.topic, n.parent, n.project, n.title,
-             json.dumps(list(n.tags)), json.dumps(list(n.entities)), note_path)
+             json.dumps(list(n.tags)), json.dumps(list(n.entities)), n.text, memo_path)
             for i, n in enumerate(notes)
         ],
     )
@@ -441,7 +435,7 @@ def append_notes(
     return len(notes)
 
 
-def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> None:
+def _ensure_memo_session(conn, session_id: str, agent: str, cwd: str | None) -> None:
     """Make sure a note has a session row to hang off, without disturbing one.
 
     A note can arrive for a session the index has never seen: the transcript may
@@ -474,7 +468,7 @@ def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> 
         ) VALUES (?,?,?,?,?,?,?,?,0,1,?)
         """,
         (session_id, KIND_MAIN, agent, platform.node(), cwd,
-         resolve_project(cwd), GRADE_SKELETON, SOURCE_NOTE, EXTRACTOR_VERSION),
+         resolve_project(cwd), GRADE_SKELETON, SOURCE_MEMO, EXTRACTOR_VERSION),
     )
 
 
@@ -533,10 +527,10 @@ def ensure_launched_session(
     conn.commit()
 
 
-def index_notes(conn) -> collections.Counter:
+def index_memos(conn) -> collections.Counter:
     """Scan `~/.scad/memos/<agent>/*.jsonl` into the `notes` table.
 
-    `notes_offset` is `parsed_offset` on a different file, and works identically:
+    `memos_offset` is `parsed_offset` on a different file, and works identically:
     a note file whose size already equals the offset is skipped without being
     opened, and a resumed read appends rows whose idx continues from the maximum.
 
@@ -554,18 +548,18 @@ def index_notes(conn) -> collections.Counter:
 
     for shard in sorted(p for p in root.iterdir() if p.is_dir()):
         for path in sorted(shard.glob("*.jsonl")):
-            stats += index_note_file(conn, path, shard.name)
+            stats += index_memo_file(conn, path, shard.name)
 
     return stats
 
 
-def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
+def index_memo_file(conn, path: Path, agent: str) -> collections.Counter:
     """Index one note file from wherever its offset left off.
 
     Split out of the pass above so the WRITE path can index the record it just
     appended without a second implementation of the offset rule. That rule is
     the whole reason this is shared: reading rows in without advancing
-    `notes_offset` makes the next pass re-append the same records under fresh
+    `memos_offset` makes the next pass re-append the same records under fresh
     `idx` values, which is a duplicate that looks like a real second note.
     """
     stats = collections.Counter()
@@ -573,8 +567,8 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
     row = session_row(conn, session_id)
     stat = path.stat()
     size = stat.st_size
-    held = row["notes_offset"] if row is not None else 0
-    if row is not None and held >= size and int(stat.st_mtime) <= (row["notes_mtime"] or 0):
+    held = row["memos_offset"] if row is not None else 0
+    if row is not None and held >= size and int(stat.st_mtime) <= (row["memos_mtime"] or 0):
         return stats
 
     # A note file is the one store a person edits by hand: the CLI warns
@@ -585,7 +579,7 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
     # The one case the offset rule still serves is the pure append, which
     # stays an append so idx values are stable.
     try:
-        notes, end = read_notes(path, 0)
+        notes, end = read_memos(path, 0)
     except Exception as exc:          # a note we cannot read must not stop the pass
         click.echo(f"[scad] skipped note {path.name}: {exc}")
         stats["skipped_files"] += 1
@@ -593,20 +587,20 @@ def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
 
     if row is None:
         cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
-        _ensure_note_session(conn, session_id, agent, cwd)
+        _ensure_memo_session(conn, session_id, agent, cwd)
 
     stored = conn.execute(
-        "SELECT ts, topic, title, project, parent FROM notes WHERE session_id = ? "
+        "SELECT ts, topic, title, project, parent FROM memos WHERE session_id = ? "
         "ORDER BY idx", (session_id,)).fetchall()
     prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in notes[:len(stored)]]
     if prefix == [tuple(r) for r in stored]:
         new = notes[len(stored):]
     else:
-        conn.execute("DELETE FROM notes WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM memos WHERE session_id = ?", (session_id,))
         stats["replaced"] += 1
         new = notes
-    stats["notes"] += append_notes(conn, session_id, new, str(path))
-    conn.execute("UPDATE sessions SET notes_offset = ?, notes_mtime = ? WHERE id = ?",
+    stats["memos"] += append_memos(conn, session_id, new, str(path))
+    conn.execute("UPDATE sessions SET memos_offset = ?, memos_mtime = ? WHERE id = ?",
                  (end, int(stat.st_mtime), session_id))
     conn.commit()
     return stats
@@ -708,14 +702,14 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
                 "destroy the only copy of their turns. Re-run with --force to override."
             )
         # Notes rows go too, and safely: the note FILES are truth, are never
-        # deleted, and index_notes below reads every one of them back from
+        # deleted, and index_memos below reads every one of them back from
         # offset 0. Leaving them would strand rows whose session no longer
         # exists and break the idx continuation on the next append.
-        conn.executescript("DELETE FROM notes; DELETE FROM turns; DELETE FROM sessions;")
+        conn.executescript("DELETE FROM memos; DELETE FROM turns; DELETE FROM sessions;")
         conn.commit()
 
     if not root.is_dir():
-        stats.update(index_notes(conn))   # a note does not need an archive to exist
+        stats.update(index_memos(conn))   # a note does not need an archive to exist
         return stats
 
     job_states: list[JobStateRecord] = []
@@ -836,7 +830,7 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
 
     # Last, for the same reason: a note only inserts a session row when the scan
     # has already had its chance to produce a better one.
-    stats.update(index_notes(conn))
+    stats.update(index_memos(conn))
 
     # A Counter, not a plain dict: callers ask for counts that a quiet pass never
     # incremented ("how many sessions?" after a no-op scan), and 0 is the honest
@@ -898,24 +892,25 @@ def _fts_query(raw: str) -> str:
     return " ".join(f'"{w}"' for w in words if w)
 
 
-def session_notes(conn, session_id: str) -> list[dict]:
+def session_memos(conn, session_id: str) -> list[dict]:
     """A session's notes, oldest first — the order they were written."""
     rows = conn.execute(
-        f"SELECT n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, {NOTE_RELATION_SQL}, "
-        f"       n.parent, n.project, n.title, n.tags, n.entities, n.note_path "
-        f"FROM notes n WHERE n.session_id = ? ORDER BY n.idx",
+        f"SELECT n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, {MEMO_RELATION_SQL}, "
+        f"       n.parent, n.project, n.title, n.tags, n.entities, n.memo_path "
+        f"FROM memos n WHERE n.session_id = ? ORDER BY n.idx",
         (session_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def search_notes(conn, query: str, *, limit: int = 20) -> list[dict]:
-    """Search notes by topic, title, tags, entities and the note's own project.
+def search_memos(conn, query: str, *, limit: int = 20) -> list[dict]:
+    """Search memos by body, topic, title, tags, entities and the memo's own project.
 
-    Deliberately not FTS. Notes are the authored tier and there are few of them;
-    a LIKE over five short columns is exact enough and needs no second index to
-    keep in sync with `turns_fts`. If the note count ever reaches the thousands
-    this becomes an FTS table over `notes.title`.
+    Deliberately not FTS. Memos are the authored tier and there are few of them
+    (94 on the author's machine in October 2026); a LIKE over six columns is
+    exact enough and needs no second index to keep in sync with `turns_fts`. If
+    the count ever reaches the thousands this becomes an FTS table. The body is
+    matched but not returned: a hit says which memo, and `memos read` shows it.
 
     `n.project` is matched, not the resolved one: matching the JOINed project
     would make every note in a project a hit for that project's name, which
@@ -924,15 +919,15 @@ def search_notes(conn, query: str, *, limit: int = 20) -> list[dict]:
     """
     like = f"%{query.lower()}%"
     rows = conn.execute(
-        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
-        f"       n.note_path, {NOTE_PROJECT_SQL}, s.name, s.agent "
-        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"SELECT n.session_id, n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, "
+        f"       {MEMO_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       n.memo_path, {MEMO_PROJECT_SQL}, s.name, s.agent "
+        f"FROM memos n LEFT JOIN sessions s ON s.id = n.session_id "
         f"WHERE lower(COALESCE(n.topic,'')) LIKE ? OR lower(COALESCE(n.title,'')) LIKE ? "
         f"   OR lower(COALESCE(n.tags,'')) LIKE ? OR lower(COALESCE(n.entities,'')) LIKE ? "
-        f"   OR lower(COALESCE(n.project,'')) LIKE ? "
+        f"   OR lower(COALESCE(n.project,'')) LIKE ? OR lower(COALESCE(n.text,'')) LIKE ? "
         f"ORDER BY n.ts DESC LIMIT ?",
-        (like, like, like, like, like, limit),
+        (like, like, like, like, like, like, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
@@ -949,7 +944,7 @@ def known_projects(conn) -> set[str]:
     rows = conn.execute(
         "SELECT DISTINCT project FROM sessions WHERE COALESCE(project,'') <> '' "
         "UNION "
-        "SELECT DISTINCT project FROM notes WHERE COALESCE(project,'') <> ''"
+        "SELECT DISTINCT project FROM memos WHERE COALESCE(project,'') <> ''"
     ).fetchall()
     return {r[0] for r in rows}
 

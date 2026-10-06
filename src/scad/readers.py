@@ -25,7 +25,7 @@ from scad.records import (
     OUTCOME_USER_LAST,
     TOOL_RESULT_CAP,
     JobStateRecord,
-    NoteRecord,
+    MemoRecord,
     SessionRecord,
     TurnRecord,
 )
@@ -373,26 +373,26 @@ def _as_list(value) -> list:
     return [value]
 
 
-def read_notes(path: Path, start_offset: int = 0) -> tuple[list[NoteRecord], int]:
-    """Read a `/remember` note file into indexable records.
+def read_memos(path: Path, start_offset: int = 0) -> tuple[list[MemoRecord], int]:
+    """Read a memo file into indexable records.
 
     The one reader whose source is not a trace. Everything else here parses
     something an agent emitted as a by-product; this parses something an agent
     was asked to write, which is why it is the tier that can never be
     re-derived. Same append-only shape though, so the same resume-from-offset
-    mechanism works unchanged — `notes_offset` is `parsed_offset` on a different
+    mechanism works unchanged — `memos_offset` is `parsed_offset` on a different
     file.
 
     Tolerant for the usual reason and one extra: these records come straight
     from a model, so absent fields are ordinary rather than corrupt. A note with
     nothing but a title still gets a row.
     """
-    notes: list[NoteRecord] = []
+    notes: list[MemoRecord] = []
 
     for _, rec in _iter_lines(path, start_offset):
         if not isinstance(rec, dict):
             continue                      # None from a malformed line, or a bare scalar
-        notes.append(NoteRecord(
+        notes.append(MemoRecord(
             ts=_epoch_ms(rec.get("ts")),
             # A record written before `kind` existed has one all the same: the
             # default is part of the shape, so absent means `info` rather than
@@ -404,6 +404,7 @@ def read_notes(path: Path, start_offset: int = 0) -> tuple[list[NoteRecord], int
             title=rec.get("title"),
             tags=_as_list(rec.get("tags")),
             entities=_as_list(rec.get("entities")),
+            text=rec.get("text") if isinstance(rec.get("text"), str) else None,
             cwd_at_write=rec.get("cwd_at_write"),
         ))
 

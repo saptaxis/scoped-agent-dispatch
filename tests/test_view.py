@@ -735,13 +735,13 @@ class TestNotesSection:
         row = {"session_id": "S1", "idx": 0, "ts": int(time.time() * 1000),
                "kind": "info", "topic": "notes-store", "parent": None, "project": None,
                "title": "Built the notes store", "tags": '["append-only","jsonl"]',
-               "entities": '["notes.py"]', "note_path": "/n/S1.jsonl"}
+               "entities": '["notes.py"]', "memo_path": "/n/S1.jsonl"}
         row.update(over)
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, kind, topic, parent, project, "
-            "title, tags, entities, note_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO memos (session_id, idx, ts, kind, topic, parent, project, "
+            "title, tags, entities, memo_path) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             tuple(row[k] for k in ("session_id", "idx", "ts", "kind", "topic", "parent",
-                                   "project", "title", "tags", "entities", "note_path")))
+                                   "project", "title", "tags", "entities", "memo_path")))
         conn.commit()
         return conn
 
@@ -1030,7 +1030,7 @@ class TestTabsInThePage:
     def test_notes_rows_declare_their_project(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                      "VALUES ('S1', 0, 1, 'topic', 'a note', '/n.jsonl')")
         conn.commit()
         html = render(gather(conn, [], set()))
@@ -1227,7 +1227,7 @@ class TestNotesAreVisibleOnTheRow:
             "('S2','main','claude','m','full','claude-transcript','/r','p',8,3)")
         for i in range(2):
             conn.execute(
-                "INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+                "INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                 "VALUES ('S1', ?, 1, 't', 'ti', '/n.jsonl')", (i,))
         conn.commit()
         return conn
@@ -1510,14 +1510,14 @@ class TestNotesOnTheRow:
     def _seed(self, tmp_path):
         import json as _json
         import time as _time
-        from scad.index import append_notes, connect
-        from scad.records import NoteRecord
+        from scad.index import append_memos, connect
+        from scad.records import MemoRecord
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/repo", project="proj")
         now = int(_time.time() * 1000)
-        append_notes(conn, "S1", [
-            NoteRecord(ts=now - 200, kind="handoff", topic="the-topic", title="first note"),
-            NoteRecord(ts=now - 100, kind="bug", topic="a-bug", title="second note"),
+        append_memos(conn, "S1", [
+            MemoRecord(ts=now - 200, kind="handoff", topic="the-topic", title="first note"),
+            MemoRecord(ts=now - 100, kind="bug", topic="a-bug", title="second note"),
         ], "/notes/S1.jsonl")
         conn.commit()
         return conn
