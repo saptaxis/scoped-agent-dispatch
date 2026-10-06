@@ -94,6 +94,28 @@ def _no_inherited_session_ids(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_vm(monkeypatch):
+    """No test may run colima. A test that needs it patches `scad.vm._colima`
+    itself, which overrides this.
+
+    Without it, a test that left `reconcile_vm_mounts` unmocked restarted the
+    developer's real scad VM on every run once SCAD_HOME pointed outside
+    $HOME, and wrote each run's temporary directory into its colima.yaml.
+    """
+    def refuse(*args):
+        raise AssertionError(f"a test tried to run the real `colima {' '.join(args)}`")
+    monkeypatch.setattr("scad.vm._colima", refuse)
+
+    # And no test may reach the real Docker daemon: the same unmocked path
+    # listed the developer's running scad containers and restarted them after
+    # the VM came back. Tests that want a client patch these themselves.
+    def no_daemon(*args, **kwargs):
+        raise AssertionError("a test tried to reach the real Docker daemon")
+    monkeypatch.setattr("docker.DockerClient", no_daemon)
+    monkeypatch.setattr("docker.from_env", no_daemon)
+
+
+@pytest.fixture(autouse=True)
 def _fresh_aliases():
     """The alias rules are read once per process and cached on the file's path.
 

@@ -458,6 +458,12 @@ class TestSessionStart:
 class TestRunAgentInjectIntegration:
     """Test that run_agent() uses inject_job() when prompt is given."""
 
+    @pytest.fixture(autouse=True)
+    def _no_vm_reconcile(self, monkeypatch):
+        # run_agent reconciles the VM's mounts before it starts a container;
+        # left real, that restarted the developer's VM on every test run.
+        monkeypatch.setattr("scad.cli.reconcile_vm_mounts", lambda config: False)
+
     @patch("scad.cli.ensure_vm_running")
     @patch("scad.cli.ensure_gpu_supported")
     @patch("scad.cli.inject_job")
@@ -927,8 +933,9 @@ class TestSessionInfo:
         assert "12,450 input" in result.output
         assert "Usage:" in result.output
 
+    @patch("scad.container._container_exists", return_value=False)
     @patch("scad.cli.get_session_info")
-    def test_info_not_found(self, mock_info, runner):
+    def test_info_not_found(self, mock_info, _exists, runner):
         mock_info.side_effect = FileNotFoundError("No session found for bad-id")
         result = runner.invoke(main, ["session", "info", "bad-id"])
         assert result.exit_code != 0
