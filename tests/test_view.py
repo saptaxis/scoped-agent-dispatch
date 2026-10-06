@@ -748,7 +748,7 @@ class TestNotesSection:
     def test_notes_are_gathered(self, tmp_path):
         conn = self._with_note(tmp_path)
         data = gather(conn, [], set())
-        assert [n["session_id"] for n in data["notes"]] == ["S1"]
+        assert [n["session_id"] for n in data["memos"]] == ["S1"]
 
     def test_a_notes_title_and_kind_reach_the_page(self, tmp_path):
         """Notes moved onto their session's row (2026-09-27) and the row carries
@@ -757,8 +757,8 @@ class TestNotesSection:
         have dominated every row. Tags stay searchable through
         `scad notes ls --about` and `scad search --notes`."""
         html = render(gather(self._with_note(tmp_path), [], set()))
-        assert 'class="fold-tag">notes<' in html
-        assert 'class="note-kind"' in html
+        assert 'class="fold-tag">memos<' in html
+        assert 'class="memo-kind"' in html
         assert 'class="tag">append-only<' not in html
 
     def test_topic_and_relation_are_shown(self, tmp_path):
@@ -782,7 +782,7 @@ class TestNotesSection:
         notes visible would have made them harder to discover."""
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S1", "awaiting-user", cwd="/repo")
-        assert "/remember" in render(gather(conn, [], set()))
+        assert "/memo-write" in render(gather(conn, [], set()))
 
 
 def _session(sid, **over) -> ClaudeSession:
@@ -1235,18 +1235,18 @@ class TestNotesAreVisibleOnTheRow:
     def test_a_row_carries_its_note_count(self, tmp_path):
         data = gather(self._conn(tmp_path), [], set(), live_sessions=[])
         by_id = {r["id"]: r for r in data["all"]}
-        assert by_id["S1"]["n_notes"] == 2
+        assert by_id["S1"]["n_memos"] == 2
 
     def test_a_session_without_notes_reports_zero_not_none(self, tmp_path):
         # Zero must be a number so the renderer can test it without guarding
         # for None, and so "no notes" is a stated fact rather than missing data.
         data = gather(self._conn(tmp_path), [], set(), live_sessions=[])
         by_id = {r["id"]: r for r in data["all"]}
-        assert by_id["S2"]["n_notes"] == 0
+        assert by_id["S2"]["n_memos"] == 0
 
     def test_the_count_reaches_the_rendered_page(self, tmp_path):
         html = render(gather(self._conn(tmp_path), [], set(), live_sessions=[]))
-        assert "2 notes" in html
+        assert "2 memos" in html
 
 
 class TestWhatASessionWasAbout:
@@ -1526,11 +1526,11 @@ class TestNotesOnTheRow:
         from scad.view import gather
         conn = self._seed(tmp_path)
         row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S1")
-        assert row["n_notes"] == 2
+        assert row["n_memos"] == 2
         # Newest first, and enough to read: what kind it was and what it said.
-        assert [n["title"] for n in row["notes"]] == ["second note", "first note"]
-        assert row["notes"][0]["kind"] == "bug"
-        assert row["notes"][0]["topic"] == "a-bug"
+        assert [n["title"] for n in row["memos"]] == ["second note", "first note"]
+        assert row["memos"][0]["kind"] == "bug"
+        assert row["memos"][0]["topic"] == "a-bug"
 
     def test_a_session_with_no_notes_carries_an_empty_list(self, tmp_path):
         from scad.index import connect
@@ -1538,12 +1538,12 @@ class TestNotesOnTheRow:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "S2", "awaiting-user", cwd="/repo")
         row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S2")
-        assert row["notes"] == [] and row["n_notes"] == 0
+        assert row["memos"] == [] and row["n_memos"] == 0
 
     def test_the_server_rendered_row_shows_them(self, tmp_path):
         from scad.view import session_row
-        html = session_row({"id": "S1", "agent": "claude", "kind": "main", "n_notes": 1,
-                            "notes": [{"kind": "handoff", "topic": "t", "title": "the note",
+        html = session_row({"id": "S1", "agent": "claude", "kind": "main", "n_memos": 1,
+                            "memos": [{"kind": "handoff", "topic": "t", "title": "the note",
                                        "ts": 1}]})
         assert "the note" in html and "handoff" in html
 
@@ -1556,7 +1556,7 @@ class TestNotesOnTheRow:
     def test_the_client_side_list_renders_them_too(self, tmp_path):
         from scad.view import gather, render
         html = render(gather(self._seed(tmp_path), [], set()))
-        assert "function noteBlock" in html
+        assert "function memoBlock" in html
 
 
 def _alias_home(tmp_path, monkeypatch, text=""):
