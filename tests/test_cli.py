@@ -2373,7 +2373,7 @@ class TestSessionNotes:
         assert "notes: 1" not in result.output
 
 
-class TestRememberSkillIsAThinCaller:
+class TestMemoWriteSkillIsAThinCaller:
     """`/remember` produces the record; `scad session note` decides where it goes.
 
     The split is the point. The old command reimplemented project resolution in
@@ -2390,7 +2390,7 @@ class TestRememberSkillIsAThinCaller:
 
     @property
     def text(self):
-        return (self.ROOT / "skills" / "remember" / "SKILL.md").read_text()
+        return (self.ROOT / "skills" / "memo-write" / "SKILL.md").read_text()
 
     def test_the_claude_only_command_is_gone(self):
         # Leaving it would re-create the duplication the migration removes: the
@@ -2398,11 +2398,11 @@ class TestRememberSkillIsAThinCaller:
         assert not (self.ROOT / "commands" / "remember.md").exists()
 
     def test_its_name_preserves_the_slash_verb(self):
-        # A skill's frontmatter `name` IS its invocation — `/remember` in Claude,
-        # `$remember` in codex. Renaming the directory or the field changes what
-        # the human types, so both are pinned.
-        assert (self.ROOT / "skills" / "remember" / "SKILL.md").exists()
-        assert re.search(r"^name:\s*remember\s*$", self.text, re.M)
+        # A skill's frontmatter `name` IS its invocation — `/memo-write` in
+        # Claude, `$memo-write` in codex. Renaming the directory or the field
+        # changes what the human types, so both are pinned.
+        assert (self.ROOT / "skills" / "memo-write" / "SKILL.md").exists()
+        assert re.search(r"^name:\s*memo-write\s*$", self.text, re.M)
 
     def test_it_carries_no_command_only_syntax(self):
         # $ARGUMENTS and argument-hint are slash-command features with no meaning
@@ -2418,7 +2418,7 @@ class TestRememberSkillIsAThinCaller:
         assert "../" not in self.text
 
     def test_it_pipes_to_the_cli(self):
-        assert "scad session note --current" in self.text
+        assert "scad session memo --current" in self.text
 
     def test_the_dead_store_path_is_gone(self):
         # ~/.capture/<project>/ was never created on any machine, and a project
@@ -2447,10 +2447,59 @@ class TestRememberSkillIsAThinCaller:
         from scad.memos import MEMO_FIELDS
         authored = set(MEMO_FIELDS) - {"ts", "cwd_at_write"}   # filled by the CLI
         for field in authored:
-            assert f"`{field}`" in self.text, f"{field} undocumented in /remember"
+            assert f"`{field}`" in self.text, f"{field} undocumented in /memo-write"
 
     def test_the_fields_the_cli_fills_are_marked_as_not_the_callers_job(self):
         assert "Do not set them." in self.text
+
+
+class TestTheMemoSkills:
+    """0.9.0: /remember and /recall became /memo-write and /memo-recall, and
+    /memo-handoff is new. The prefix is what routes "write a memo" and "write a
+    handoff memo"; the plain verbs collided with Claude Code's own memory."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _text(self, name):
+        return (self.ROOT / "skills" / name / "SKILL.md").read_text()
+
+    @pytest.mark.parametrize("name", ["memo-write", "memo-handoff", "memo-recall"])
+    def test_each_ships_under_its_name(self, name):
+        assert re.search(rf"^name:\s*{name}\s*$", self._text(name), re.M)
+
+    @pytest.mark.parametrize("name", ["remember", "recall"])
+    def test_the_old_skills_are_gone(self, name):
+        assert not (self.ROOT / "skills" / name).exists()
+
+    def test_recall_reads_memos_then_checks_the_repo(self):
+        text = self._text("memo-recall")
+        assert "scad memos ls" in text and "scad memos read" in text
+        assert "git log" in text
+
+    def test_handoff_writes_a_handoff_memo_for_its_own_session(self):
+        text = self._text("memo-handoff")
+        assert "scad session memo --current --agent" in text
+        assert '"kind": "handoff"' in text
+
+    def test_handoff_checks_the_repo_before_it_writes(self):
+        text = self._text("memo-handoff")
+        assert "git status" in text and "git log" in text
+
+    def test_handoff_takes_its_scope_from_the_arguments(self):
+        text = self._text("memo-handoff")
+        assert "brief" in text and "focus" in text
+
+    def test_write_points_handoffs_at_memo_handoff(self):
+        assert "/memo-handoff" in self._text("memo-write")
+
+    def test_no_skill_teaches_an_old_name(self):
+        old = ("scad notes ", "scad session note ", "scad session notes ", "--notes",
+               "/remember", "/recall", "~/.scad/notes")
+        stale = []
+        for path in (self.ROOT / "skills").glob("**/*.md"):
+            text = path.read_text()
+            stale += [f"{path.relative_to(self.ROOT)}: {o}" for o in old if o in text]
+        assert stale == []
 
 
 @pytest.mark.usefixtures("offline_view")

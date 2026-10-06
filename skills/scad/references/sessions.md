@@ -8,7 +8,7 @@ terminal is in here beside one a container produced.
 ## The two questions this tier answers
 
 **Which one was that?** — search and list.
-**What happened in it?** — read the turns, or the notes if any were written.
+**What happened in it?** — read the turns, or the memos if any were written.
 
 ## Finding a session
 
@@ -16,23 +16,23 @@ terminal is in here beside one a container produced.
 scad session ls                      # every indexed session, newest first
 scad session ls --project <name>     # scoped to one project
 scad search "phrase"                 # full-text across every indexed turn
-scad search "phrase" --notes         # topic/title/tags/entities only, NOT bodies
+scad search "phrase" --memos         # memos: body, topic, title, tags, entities
 scad project ls                      # projects with session counts
 scad project show <name>             # one project's sessions
 ```
 
-`search --notes` matches metadata only. Searching `"cwd drift"` will miss a
-note that the tag `cwd-drift` finds — use it to *locate* a note, then read it.
+`search --memos` matches a memo's body as well as its labels, and prints
+which memo matched, never the body: use it to *locate* a memo, then read it.
 
 ## Reading one
 
 ```bash
 scad session show <id>               # metadata and a turn breakdown
 scad session read <id>               # the turns, in order
-scad session notes <id>              # this session's notes, from the FILE
+scad session memos <id>              # this session's memos, from the FILE
 ```
 
-`session notes` reads the note file rather than the index deliberately: the
+`session memos` reads the memo file rather than the index deliberately: the
 file is the truth, and it stays readable before anything is indexed and after
 a `--rebuild` has dropped every row.
 
@@ -92,16 +92,19 @@ spelling. `scad project aliases` checks the rules (`ok`, `stale`, `broken`), and
 gone directory still resumes, with a warning that the agent will start in the
 current directory.
 
-## Notes
+## Memos
 
 The authored tier — the only thing in the corpus that cannot be re-derived.
+Until 0.9.0 these were called notes; the store is `~/.scad/memos` now, and
+the old commands are gone.
 
 ```bash
-scad notes ls                        # every note, newest first
-scad notes ls --project <name>
-scad notes read <session-id> --last  # the newest note in a session
-scad notes read <session-id> --idx N
+scad memos ls                        # every memo, newest first
+scad memos ls --project <name>
+scad memos read <session-id> --last  # the newest memo in a session
+scad memos read <session-id> --idx N
 ```
 
-Writing them is the `remember` skill; catching up from them is `recall`. Do not
-hand-roll either — both exist, and `recall` knows when to stop reading.
+Writing them is the `memo-write` skill, or `memo-handoff` for a handoff;
+catching up from them is `memo-recall`. Do not hand-roll any of them: they
+exist, and `memo-recall` knows when to stop reading.

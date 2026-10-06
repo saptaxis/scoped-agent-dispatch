@@ -373,9 +373,9 @@ class TestThePrimingTurn:
         assert "scad" in PRIMING_PROMPT
 
     def test_it_forbids_action_because_skills_are_live_trigger_words(self):
-        """`scad`, `remember` and `recall` install into every family, so naming
-        scad in turn 1 makes them live. A fired `remember` writes junk into the
-        authored notes tier — the one tier nothing can re-derive."""
+        """`scad` and the memo skills install into every family, so naming scad
+        in turn 1 makes them live. A fired `memo-write` writes junk into the
+        authored memo tier — the one tier nothing can re-derive."""
         from scad.launch import PRIMING_PROMPT
 
         assert "Take no action and read nothing" in PRIMING_PROMPT

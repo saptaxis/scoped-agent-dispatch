@@ -70,14 +70,15 @@ scad session send <id> "text" | --file f        # a later turn into the open pan
 scad session ls                                 # every indexed session
 scad search "phrase"                            # full text across turns
 scad view                                       # the browsable page
-scad notes ls                                   # the authored tier
+scad memos ls                                   # the authored tier
 scad where                                      # what project resolves here
 ```
 
 ## When NOT to use scad
 
 - A local edit that needs no isolation and no record.
-- Writing or catching up on notes — that is the `remember` and `recall` skills.
+- Writing memos or catching up from them: that is the `memo-write`,
+  `memo-handoff` and `memo-recall` skills.
 - Reaching another model family for a one-off opinion — that is the `codex`
   skill, which needs no scad at all.
 

@@ -140,9 +140,9 @@ _FLAGS = {"claude": "--session-id {id}", "codex": "", "kimi": ""}
 # Every clause is load-bearing. Naming scad gives the session the context to
 # reach for scad's own skills later; `Take no action and read nothing` is what
 # makes that safe, because skills install globally into every family, so `scad`,
-# `remember` and `recall` are live trigger words inside the session being
-# primed — and a fired `remember` writes junk into the authored notes tier, the
-# one tier nothing can re-derive.
+# `memo-write`, `memo-handoff` and `memo-recall` are live trigger words inside
+# the session being primed — and a fired memo skill writes junk into the
+# authored memo tier, the one tier nothing can re-derive.
 PRIMING_PROMPT = ("This is a scad-launched session. Take no action and read "
                   "nothing. Reply with exactly: ready.")
 

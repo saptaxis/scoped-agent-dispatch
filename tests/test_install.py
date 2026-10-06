@@ -836,7 +836,7 @@ class TestUninstallSkillRemoval:
 
     ~/.agents/skills and ~/.claude/skills are flat and global: every skill on
     the machine, from every source, lands in the same two directories. scad
-    ships a skill called `remember` — about as generic a name as exists — so
+    ships skills called `scad` and `memo-write` — names generic enough to collide — so
     deleting by name alone means uninstalling scad can take a stranger's work
     with it.
     """
@@ -890,15 +890,15 @@ class TestUninstallSkillRemoval:
                 assert not (target / name).exists(), f"{target / name} survived"
 
     def test_uninstall_does_not_remove_a_same_named_foreign_skill(self, tmp_path):
-        """Someone else's `remember` must survive scad's uninstall.
+        """Someone else's `memo-write` must survive scad's uninstall.
 
         Regression: removal matched on directory name only, so any third-party
         skill that happened to share a name with one of ours was deleted.
         """
-        foreign = tmp_path / ".agents/skills/remember"
+        foreign = tmp_path / ".agents/skills/memo-write"
         foreign.mkdir(parents=True)
         (foreign / "SKILL.md").write_text(
-            "---\nname: remember\n---\nSomebody else's remember skill.\n"
+            "---\nname: memo-write\n---\nSomebody else's memo-write skill.\n"
         )
 
         result = self._uninstall(tmp_path)
@@ -906,7 +906,7 @@ class TestUninstallSkillRemoval:
         assert result.returncode == 0, result.stdout + result.stderr
         assert foreign.is_dir(), "uninstall deleted a foreign skill that shared a name"
         assert "Somebody else's" in (foreign / "SKILL.md").read_text()
-        assert "Left remember" in result.stdout, \
+        assert "Left memo-write" in result.stdout, \
             f"uninstall should report what it left behind:\n{result.stdout}"
 
     def test_uninstall_leaves_a_foreign_skill_with_an_unrelated_name(self, tmp_path):
@@ -959,7 +959,7 @@ class TestUninstallSkillRemoval:
         — every link in a shared directory. Refuse rather than guess."""
         target = tmp_path / ".agents/skills"
         target.mkdir(parents=True)
-        (target / "remember").symlink_to(REPO / "skills" / "remember")
+        (target / "memo-write").symlink_to(REPO / "skills" / "memo-write")
 
         result = _run_helper(
             tmp_path,
@@ -967,5 +967,5 @@ class TestUninstallSkillRemoval:
         )
 
         assert result.returncode == 0, result.stdout + result.stderr
-        assert (target / "remember").is_symlink()
+        assert (target / "memo-write").is_symlink()
         assert "Skipped skill removal" in result.stdout

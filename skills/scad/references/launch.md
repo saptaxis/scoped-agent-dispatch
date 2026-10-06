@@ -103,9 +103,11 @@ record it is unreachable.
 - **Being a git repo does not skip codex's trust prompt.** Trust is per
   directory; expect the gate on any first launch into a new tree.
 - **Anything you put in `--prompt` runs where scad's own skills are loaded.**
-  `scad`, `remember`, `recall` and `codex` are live trigger words in every
-  family. A prompt saying "remember the phrase…" made kimi invoke the
-  `remember` skill and try to write a note.
+  `scad`, `memo-write`, `memo-handoff`, `memo-recall` and `codex` are live
+  trigger words in every family. Before 0.9.0 the writer was called
+  `remember`, and a prompt saying "remember the phrase…" made kimi invoke it
+  and try to write a memo; "write a memo" or "hand this off" would do the same
+  now.
 
 ## Verifying by hand
 
