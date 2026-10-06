@@ -64,9 +64,16 @@ def pytest_configure(config):
         "\tgpgsign = false\n"
     )
 
+    # scad's own home and archive, for the same reason: a test that sets
+    # neither read the developer's real launch records and memo store, and
+    # passed or failed by what happened to be on the machine. A test that
+    # wants its own sets it with monkeypatch, which overrides this.
+    scad_home = Path(_git_config_dir.name) / "scad-home"
     for key, value in (
         ("GIT_CONFIG_GLOBAL", str(config_file)),
         ("GIT_CONFIG_SYSTEM", os.devnull),
+        ("SCAD_HOME", str(scad_home)),
+        ("SCAD_ARCHIVE", str(scad_home / "archive")),
     ):
         _saved_env[key] = os.environ.get(key)
         os.environ[key] = value

@@ -2015,7 +2015,12 @@ class TestRunSessionSplit:
 
     @patch("scad.cli.get_session_usage", return_value=None)
     @patch("scad.cli.get_session_info")
-    def test_session_info_alias_still_resolves_a_run_id(self, mock_info, _usage, runner):
+    def test_session_info_alias_still_resolves_a_run_id(self, mock_info, _usage, runner,
+                                                         tmp_path, monkeypatch):
+        # The run must exist for either name to resolve it; this passed only
+        # where a real ~/.scad/runs/demo-test-Mar03-1200 was left over.
+        (tmp_path / "demo-test-Mar03-1200").mkdir()
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
         mock_info.return_value = {"run_id": "demo-test-Mar03-1200", "config": "demo",
                                   "branch": "b", "container": "running",
                                   "clones_path": None, "clones": [],
