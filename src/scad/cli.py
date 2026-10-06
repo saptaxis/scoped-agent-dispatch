@@ -93,7 +93,7 @@ from scad.index import (
     reindex as run_reindex,
     search_memos,
     search_turns,
-    session_memos as index_session_notes,
+    session_memos as index_session_memos,
     session_row,
     session_turns,
 )
@@ -197,7 +197,7 @@ def _fmt_span(start_ms, end_ms) -> str | None:
 def _fmt_ago(ts: str | None) -> str:
     """An ISO stamp as written, plus how long ago it was.
 
-    Notes carry an ISO string rather than epoch ms — a different tier with a
+    Memos carry an ISO string rather than epoch ms — a different tier with a
     different format — so this is deliberately not `_fmt_ms`.
     """
     if not ts:
@@ -2228,12 +2228,12 @@ def session_show(session_id):
         click.echo(f"{'subagents':<18} {kids}")
 
     # The authored tier. Listed by topic rather than counted alone, because the
-    # question a note answers is "what did I decide here", and a bare count
-    # answers nothing. `scad session notes <id>` prints the text.
-    notes = index_session_notes(conn, session_id)
-    click.echo(f"{'notes':<18} {len(notes)}")
-    for n in notes:
-        # `kind` earns its column here: a handoff among a session's notes is
+    # question a memo answers is "what did I decide here", and a bare count
+    # answers nothing. `scad session memos <id>` prints the text.
+    memos = index_session_memos(conn, session_id)
+    click.echo(f"{'memos':<18} {len(memos)}")
+    for n in memos:
+        # `kind` earns its column here: a handoff among a session's memos is
         # the one you want first, and topic alone never said which was which.
         click.echo(f"  [{n['idx']:>3}] {n['kind'] or DEFAULT_KIND:<12} "
                    f"{n['topic'] or '?':<24} {(n['title'] or '')[:48]}")
@@ -2540,14 +2540,14 @@ def _resume_cwd(session_id: str, recorded, scad_run_id, quiet: bool):
     return None
 
 
-@session.command("note")
+@session.command("memo")
 @click.option("--session", "session_id", default=None,
-              help="Append to this session's note file.")
+              help="Append to this session's memo file.")
 @click.option("--current", is_flag=True,
               help="Append to the session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
-def session_note(session_id, current, agent):
-    """Append one /remember capture, read as JSON on stdin.
+def session_memo(session_id, current, agent):
+    """Append one /memo-write capture, read as JSON on stdin.
 
     The record is composed in-session, where the context already is — this only
     decides where it lands and appends it. That split is the point: judgment
@@ -2585,23 +2585,23 @@ def session_note(session_id, current, agent):
     if project and project not in _known_projects():
         # WARN, never refuse. `scad project ls` counts sessions, so a genuinely
         # new project — or one whose work has only ever been dispatched — does
-        # not appear in it yet, and a real note would be lost to a name the
+        # not appear in it yet, and a real memo would be lost to a name the
         # index simply has not met. A wrong label costs a listing; a refused
-        # note costs the note, and nothing can rebuild it.
+        # memo costs the memo, and nothing can rebuild it.
         click.echo(f"[scad] warning: no project named {project!r} in the index "
-                   f"— the note is written and filed under it anyway. "
+                   f"— the memo is written and filed under it anyway. "
                    f"Check the name with: scad project ls")
 
     # Index it NOW rather than leaving it for the next `scad reindex`. The write
-    # path is the only moment we know a note exists, and until it is indexed
-    # nothing can find it — `notes ls`, `search` and `view` all read the index.
-    # That gap is worst for a cross-filed note, whose whole purpose is that
+    # path is the only moment we know a memo exists, and until it is indexed
+    # nothing can find it — `memos ls`, `search` and `view` all read the index.
+    # That gap is worst for a cross-filed memo, whose whole purpose is that
     # someone working in the *other* project picks it up, and who has no reason
-    # to know a reindex is owed. Costs one row: the notes tier is ~20 records
+    # to know a reindex is owed. Costs one row: the memos tier is ~20 records
     # against 39,000 turns, nothing like the pass that makes `reindex` a
     # deliberate command.
     #
-    # AFTER the warning above, deliberately: indexing inserts this note's own
+    # AFTER the warning above, deliberately: indexing inserts this memo's own
     # project, so checking afterwards would find the name known because we had
     # just written it and the warning would never fire.
     try:
@@ -2609,14 +2609,14 @@ def session_note(session_id, current, agent):
     except Exception as exc:
         # Never fatal. The file is truth and `reindex` will pick it up; a locked
         # or absent index must not turn a successful capture into an error.
-        click.echo(f"[scad] note written but not indexed ({exc}); "
+        click.echo(f"[scad] memo written but not indexed ({exc}); "
                    f"run: scad reindex")
 
     # Confirm, do not echo: the caller just wrote the record and printing it back
     # into the transcript would double its cost in context for no information.
-    # `relation` is absent on purpose — it is derived when the note is read, and
+    # `relation` is absent on purpose — it is derived when the memo is read, and
     # claiming one here would be guessing at the thread from a single record.
-    head = [f"[scad] noted {session_id}", record.get("kind") or DEFAULT_KIND,
+    head = [f"[scad] memo written {session_id}", record.get("kind") or DEFAULT_KIND,
             record.get("topic") or "?"]
     if record.get("parent"):
         head.append(f"<- {record['parent']}")
@@ -2631,7 +2631,7 @@ def _known_projects() -> set[str]:
     """Project names the index knows, or an empty set if it cannot be read.
 
     Swallowing the failure is the point: this only decides whether to print a
-    warning, and a note must never be lost to a database that would not open.
+    warning, and a memo must never be lost to a database that would not open.
     """
     try:
         return known_projects(index_connect())
@@ -2639,13 +2639,13 @@ def _known_projects() -> set[str]:
         return set()
 
 
-def _resolve_note_path(session_id: str, agent: str):
+def _resolve_memo_path(session_id: str, agent: str):
     """The named agent's shard, or whichever shard actually holds this session.
 
     The store is sharded by agent because a session id is only unique within
     one, but a LISTING does not make you type the agent — so following a row
-    from `scad notes ls` with the obvious read command used to answer "No notes
-    for <id>" about a note that plainly exists. The id is unambiguous in
+    from `scad memos ls` with the obvious read command used to answer "No memos
+    for <id>" about a memo that plainly exists. The id is unambiguous in
     practice, so searching the other shards costs one directory scan and
     removes a wrong answer. The named agent still wins when it has the file.
     """
@@ -2690,16 +2690,16 @@ def session_send_turn(session_id, text, path, as_json):
     click.echo(f"[scad] sent {result['bytes']} bytes to {result['tmux']} ({session_id})")
 
 
-@session.command("notes")
+@session.command("memos")
 @click.argument("session_id", required=False)
 @click.option("--current", is_flag=True,
               help="The session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard to read first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the records as written.")
-def session_notes_cmd(session_id, current, agent, as_json):
-    """Print a session's notes, oldest first.
+def session_memos_cmd(session_id, current, agent, as_json):
+    """Print a session's memos, oldest first.
 
-    Reads the FILE, not the index. The file is truth, and a note must be
+    Reads the FILE, not the index. The file is truth, and a memo must be
     readable before anything has been indexed and after a --rebuild has dropped
     every row.
     """
@@ -2710,7 +2710,7 @@ def session_notes_cmd(session_id, current, agent, as_json):
             session_id = current_session_id(agent=agent)
         except MemoTargetError as exc:
             raise click.ClickException(str(exc)) from exc
-    path = _resolve_note_path(session_id, agent)
+    path = _resolve_memo_path(session_id, agent)
     # Hydrated, not raw: `relation` is computed from the records around it and
     # `kind` has a default, so a consumer reading --json gets the same shape
     # whatever version wrote the file.
@@ -2720,7 +2720,7 @@ def session_notes_cmd(session_id, current, agent, as_json):
         click.echo(json.dumps(records, ensure_ascii=False, default=str))
         return
     if not records:
-        click.echo(f"[scad] No notes for {session_id}.")
+        click.echo(f"[scad] No memos for {session_id}.")
         return
 
     click.echo(f"[scad] {path}")
@@ -2746,11 +2746,11 @@ def session_notes_cmd(session_id, current, agent, as_json):
 
 
 @main.group()
-def notes():
-    """Find and read notes — how a fresh session picks up where one left off.
+def memos():
+    """Find and read memos — how a fresh session picks up where one left off.
 
-    Deliberately two verbs. A session writes a note when it stops; the next one
-    runs `notes ls --project <p>` to find it and `notes read <session-id>` to
+    Deliberately two verbs. A session writes a memo when it stops; the next one
+    runs `memos ls --project <p>` to find it and `memos read <session-id>` to
     read it. That replaces a handoff document with something written by the
     same command every time, into a store that is already indexed and
     searchable, rather than a file whose name and location must be remembered.
@@ -2759,7 +2759,7 @@ def notes():
 
 
 def _about_matches(row: dict, names) -> list[str]:
-    """The subset of `names` this note row is about, by the same rule the
+    """The subset of `names` this memo row is about, by the same rule the
     SQL used: in tags or entities, the topic, or the project."""
     def arr(key):
         try:
@@ -2770,29 +2770,30 @@ def _about_matches(row: dict, names) -> list[str]:
     return [n for n in names if n in named]
 
 
-@notes.command("ls")
+@memos.command("ls")
 @click.option("--project", "project_name", default=None,
-              help="Only notes filed under this project.")
-@click.option("--session", "session_id", default=None, help="Only this session's notes.")
+              help="Only memos filed under this project.")
+@click.option("--session", "session_id", default=None, help="Only this session's memos.")
 @click.option("--about", multiple=True,
-              help="Notes about NAME wherever they were written: NAME in tags or "
+              help="Memos about NAME wherever they were written: NAME in tags or "
                    "entities, as the topic, or as the project. Repeatable; JSON rows "
                    "then carry `about`, the names each one matched.")
 @click.option("--kind", "kind", type=click.Choice(KINDS), default=None,
-              help="Only notes of this kind (handoff is the catch-up query).")
+              help="Only memos of this kind (handoff is the catch-up query).")
 @click.option("--limit", default=20, help="How many, newest first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
-def notes_ls(project_name, session_id, about, kind, limit, as_json):
-    """List notes, newest first.
+def memos_ls(project_name, session_id, about, kind, limit, as_json):
+    """List memos, newest first.
 
-    Metadata only — the body is not in the index at all, so this can say what
-    exists and never what it says. `notes read` is the second half.
+    Metadata only: this says which memos exist, never what they say. The body
+    is indexed so `search --memos` can match it, but a listing does not print
+    it. `memos read` is the second half.
     """
     conn = index_connect()
     where, params = [], []
     if project_name:
-        # The note's own project first, the writing session's second. Filtering
-        # on `s.project` alone is what hid a cross-captured note: filed against
+        # The memo's own project first, the writing session's second. Filtering
+        # on `s.project` alone is what hid a cross-captured memo: filed against
         # B, listed only under A, findable by nobody looking for either.
         where.append(f"{MEMO_PROJECT_RESOLVED} = ?")
         params.append(project_name)
@@ -2800,9 +2801,9 @@ def notes_ls(project_name, session_id, about, kind, limit, as_json):
         where.append("n.session_id = ?")
         params.append(session_id)
     if about:
-        # A note about X is often written in Y: a field report on one project
+        # A memo about X is often written in Y: a field report on one project
         # from another project's session, cross-tagged. Project alone found
-        # three of eight such notes. `tags` and `entities` are JSON arrays,
+        # three of eight such memos. `tags` and `entities` are JSON arrays,
         # so the quoted form matches a whole element and not a prefix.
         clauses = []
         for name in about:
@@ -2832,63 +2833,63 @@ def notes_ls(project_name, session_id, about, kind, limit, as_json):
         return
     if not rows:
         scope = f" for project '{project_name}'" if project_name else ""
-        click.echo(f"[scad] No notes{scope}.")
+        click.echo(f"[scad] No memos{scope}.")
         return
 
     for r in rows:
         # `ts` is epoch MILLISECONDS here, not the ISO string _relative_time
-        # takes — the notes table stores what the CLI stamped, not what a
+        # takes — the memos table stores what the CLI stamped, not what a
         # transcript recorded.
         when = (datetime.fromtimestamp(r["ts"] / 1000).strftime("%m-%d %H:%M")
                 if r.get("ts") else "?")
         # The session id leads because it is the argument to the next command.
-        # `kind` and `relation` are both here: kind says what the note IS, and
-        # relation says whether the note before it belongs to the same thread —
+        # `kind` and `relation` are both here: kind says what the memo IS, and
+        # relation says whether the memo before it belongs to the same thread —
         # which is the whole stopping rule for backtracking.
         # `agent` is shown because the store is sharded by it: without this
         # column you cannot tell which `--agent` a row wants, and reading a
-        # non-claude note reported that it did not exist.
+        # non-claude memo reported that it did not exist.
         click.echo(f'{r["session_id"]}  [{r["idx"]}]  {when:>14}  '
                    f'{(r.get("agent") or "-"):7}  '
                    f'{(r.get("project") or "-"):22}  {(r.get("kind") or "-"):12}  '
                    f'{(r.get("relation") or "-"):9}  {(r.get("topic") or "-"):20}  '
                    f'{r.get("title") or ""}')
-    click.echo(f"\n[scad] {len(rows)} note(s). Read one: scad notes read <session-id>")
+    click.echo(f"\n[scad] {len(rows)} memo(s). Read one: scad memos read <session-id>")
 
 
-@notes.command("read")
+@memos.command("read")
 @click.argument("session_id")
-@click.option("--last", is_flag=True, help="Only the newest note.")
-@click.option("--idx", "idx", type=int, default=None, help="Only this note's index.")
+@click.option("--last", is_flag=True, help="Only the newest memo.")
+@click.option("--idx", "idx", type=int, default=None, help="Only this memo's index.")
 @click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
 @click.pass_context
-def notes_read(ctx, session_id, last, idx, agent, as_json):
-    """Print a session's notes — all of them, or one.
+def memos_read(ctx, session_id, last, idx, agent, as_json):
+    """Print a session's memos — all of them, or one.
 
-    Reads the FILE, not the index: the index stores no body text, so the file is
-    the only place the narrative exists.
+    Reads the FILE, not the index. The file is truth: it is readable before
+    anything has been indexed and after a --rebuild has dropped every row.
 
     `--last` / `--idx` are what make recall progressive. Catching up should cost
     what you actually need, not the whole length of the session that came
-    before — read the newest, and go back only while `notes ls` says the thread
+    before — read the newest, and go back only while `memos ls` says the thread
     continues.
     """
     if not last and idx is None:
-        ctx.invoke(session_notes_cmd, session_id=session_id, agent=agent, as_json=as_json)
+        ctx.invoke(session_memos_cmd, session_id=session_id, agent=agent, as_json=as_json)
         return
 
-    # Hydrated over the WHOLE file even when one note is wanted: `relation` is a
-    # statement about the notes before it, so a single record cannot answer it.
-    resolved = _resolve_note_path(session_id, agent)
+    # Hydrated over the WHOLE file even when one memo is wanted: `relation` is a
+    # statement about the memos before it, so a single record cannot answer it.
+    resolved = _resolve_memo_path(session_id, agent)
     records = hydrate_memos(read_memo_file(resolved))
     if not records:
-        click.echo(f"[scad] No notes for {session_id}.")
+        click.echo(f"[scad] No memos for {session_id}.")
         return
 
     want = len(records) - 1 if last else idx
     if not 0 <= want < len(records):
-        click.echo(f"[scad] There is no note [{want}] for {session_id} "
+        click.echo(f"[scad] There is no memo [{want}] for {session_id} "
                    f"— it has {len(records)} (0..{len(records) - 1}).")
         return
 
@@ -3023,18 +3024,19 @@ def session_read(session_id, kind, role, limit):
               type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
               help="Search only this kind — e.g. --kind thinking for reasoning.")
 @click.option("--limit", default=20, help="Hits to show.")
-@click.option("--notes", "notes_only", is_flag=True, help="Search notes instead of turns.")
+@click.option("--memos", "memos_only", is_flag=True,
+              help="Search memos (body, topic, title, tags) instead of turns.")
 @click.option("--json", "as_json", is_flag=True, help="Emit hits as JSON.")
-def search(query, project, kind, limit, notes_only, as_json):
-    """Full-text search across every indexed turn, or across notes with --notes."""
+def search(query, project, kind, limit, memos_only, as_json):
+    """Full-text search across every indexed turn, or across memos with --memos."""
     conn = index_connect()
-    if notes_only:
+    if memos_only:
         hits = search_memos(conn, query, limit=limit)
         if as_json:
             click.echo(json.dumps(hits, default=str))
             return
         if not hits:
-            click.echo(f"[scad] No note matches {query!r}.")
+            click.echo(f"[scad] No memo matches {query!r}.")
             return
         for h in hits:
             when = datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d %H:%M") if h["ts"] else "?"

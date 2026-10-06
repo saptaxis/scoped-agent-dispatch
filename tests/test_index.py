@@ -1578,7 +1578,7 @@ class TestAMovedDirectory:
 
         from scad.cli import main
 
-        result = CliRunner().invoke(main, ["notes", "ls", "--project", "myproj", "--json"])
+        result = CliRunner().invoke(main, ["memos", "ls", "--project", "myproj", "--json"])
         assert result.exit_code == 0, result.output
         return json.loads(result.stdout)
 

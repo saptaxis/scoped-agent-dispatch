@@ -187,7 +187,7 @@ def append_memo(
 ) -> Path:
     """Append one capture to a session's note file. The only write there is.
 
-    Opened "a" so the append is a single positioned write: concurrent `/remember`
+    Opened "a" so the append is a single positioned write: concurrent `/memo-write`
     calls from a session and one of its subagents interleave as whole lines
     rather than corrupting each other, and no existing byte is ever revisited.
     """
