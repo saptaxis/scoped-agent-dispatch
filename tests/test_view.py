@@ -1543,6 +1543,12 @@ class TestOneLiveSection:
     in 0.6.0. One row per live session, plus any agent pane that cannot be
     resolved to one, saying so."""
 
+    @pytest.fixture(autouse=True)
+    def _no_real_launches(self, monkeypatch, tmp_path):
+        # live_rows reads launch records, and a real one naming a pane at one
+        # of these targets in the running tmux turned a pane row into a session.
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / "scad-home"))
+
     def _sessions(self):
         from scad.live import ClaudeSession
         return [ClaudeSession("S", 200, cwd="/docs", name="current", updated_at=20,
