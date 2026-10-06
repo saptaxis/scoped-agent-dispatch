@@ -81,7 +81,7 @@ class JobStateRecord:
       process — it can see a PTY idle at a prompt. An index reading JSONL after
       the fact cannot, which is why our own `outcome` is coarser and derived.
     - SEMANTIC: `needs` and `detail` are MODEL-WRITTEN PROSE. Nothing structural
-      produces "drop the bioRxiv PDF to ~/Downloads". They belong to the notes
+      produces "drop the bioRxiv PDF to ~/Downloads". They belong to the memos
       tier — self-report — not to trace evidence, and should be read as claims
       rather than as measurements.
 

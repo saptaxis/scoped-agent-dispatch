@@ -13,7 +13,7 @@ anything from reading or writing a machine that has not made it.
 Session-keyed and project-free on purpose. A project is a *computed* property
 of a cwd — redefining what counts as a project root is a config edit, and any
 durable path containing `<project>` would orphan its files the moment that
-happened. Sharding by agent instead keeps the one property of a note that
+happened. Sharding by agent instead keeps the one property of a memo that
 cannot be recomputed.
 """
 
@@ -45,12 +45,12 @@ MEMO_FIELDS = (
     "cwd_at_write",  # where the session was working; keeps `project` derivable
 )
 
-# What the record IS, on an axis that used to leak into free text — two notes in
+# What the record IS, on an axis that used to leak into free text — two memos in
 # the corpus said `span: "handoff"` and two more prefixed their title
 # "HANDOFF —", which no listing and no search could see. Exactly five, and
 # `decision` is deliberately not among them: a decision is already a body
 # section (**Concluded** / **Rejected**), and promoting it to a kind would
-# invite a note per decision.
+# invite a memo per decision.
 KINDS = ("info", "handoff", "bug", "request", "verification")
 
 DEFAULT_KIND = "info"
@@ -168,7 +168,7 @@ def normalize_memo(record: dict, *, cwd: str | None = None) -> dict:
     would make every future addition to that spec a code change here.
     """
     if not isinstance(record, dict):
-        raise ValueError("a note must be a JSON object")
+        raise ValueError("a memo must be a JSON object")
 
     out = {field: record.get(field) for field in MEMO_FIELDS}
     out.update({k: v for k, v in record.items() if k not in MEMO_FIELDS})
@@ -185,7 +185,7 @@ def normalize_memo(record: dict, *, cwd: str | None = None) -> dict:
 def append_memo(
     record: dict, *, session_id: str, agent: str = "claude", cwd: str | None = None
 ) -> Path:
-    """Append one capture to a session's note file. The only write there is.
+    """Append one capture to a session's memo file. The only write there is.
 
     Opened "a" so the append is a single positioned write: concurrent `/memo-write`
     calls from a session and one of its subagents interleave as whole lines
@@ -247,7 +247,7 @@ def _transcripts_in(directory: Path) -> list[Path]:
     """Top-level `*.jsonl` only — never `<parent>/subagents/agent-*.jsonl`.
 
     A subagent file repeats its PARENT's sessionId and is named by its agentId,
-    so treating one as the current session would key the note onto a row that is
+    so treating one as the current session would key the memo onto a row that is
     not the session the human is talking to.
     """
     if not directory.is_dir():
@@ -303,7 +303,7 @@ def current_session_id(
     It must be that agent's OWN variable, and nothing else. These are ordinary
     environment variables, so they are inherited: a codex or a kimi launched
     from inside a Claude session carries `CLAUDE_CODE_SESSION_ID` with it, and
-    reading it would file the note into the codex shard under a Claude
+    reading it would file the memo into the codex shard under a Claude
     session's id — a wrong answer that looks exactly like a right one. So a
     missing variable is an error, never a reason to consult a different one or
     to go looking through another agent's transcripts.
@@ -311,7 +311,7 @@ def current_session_id(
     Only claude has a fallback, and only for its own directory: encoded
     directory first, `cwd`-field scan next, newest mtime wins. Where several
     are genuinely live that raises rather than picking one, for the same reason
-    — a note filed against the wrong session is worse than a note not filed,
+    — a memo filed against the wrong session is worse than a memo not filed,
     because nothing downstream can detect the mistake.
     """
     env_var = SESSION_ID_ENV.get(agent)
@@ -361,10 +361,10 @@ def current_session_id(
 
 
 def read_memo_file(path: Path, start_offset: int = 0) -> list[dict]:
-    """Read a note file's records in append order — oldest first, newest last.
+    """Read a memo file's records in append order — oldest first, newest last.
 
     Tolerant like the trace readers: a malformed line is skipped rather than
-    fatal. A note file is the one artifact with no second copy, so refusing to
+    fatal. A memo file is the one artifact with no second copy, so refusing to
     read the whole of it because one line is bad would be the wrong trade.
     """
     if not path.exists():
@@ -385,7 +385,7 @@ def read_memo_file(path: Path, start_offset: int = 0) -> list[dict]:
 
 
 def derived_relation(record: dict, earlier: list[dict]) -> str:
-    """Where this note sits in its thread — computed, never authored.
+    """Where this memo sits in its thread — computed, never authored.
 
     Authoring it asked the writer to recall the thread it is in and to pick a
     word for it, which is the kind of judgment a model gets wrong quietly. The
@@ -397,10 +397,10 @@ def derived_relation(record: dict, earlier: list[dict]) -> str:
         topic already appeared earlier  -> continue
         otherwise                       -> shift
 
-    `parent` wins outright, and deliberately: a note that names a parent is
+    `parent` wins outright, and deliberately: a memo that names a parent is
     hanging off that topic whether or not the topic also appears earlier in
     this file, and a `parent` legitimately points at a topic in a *different*
-    session's notes — which nothing local could ever check.
+    session's memos — which nothing local could ever check.
     """
     if record.get("parent"):
         return "branch"

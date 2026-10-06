@@ -85,7 +85,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   name              TEXT,
   -- The rest come from the harness's state.json alone. `harness_state` is
   -- structural, observed of a live process. `needs` and `needs_detail` are
-  -- MODEL-WRITTEN PROSE — the notes tier, self-report, not trace evidence. Do
+  -- MODEL-WRITTEN PROSE — the memos tier, self-report, not trace evidence. Do
   -- not read them as measurements.
   harness_state     TEXT,
   needs             TEXT,
@@ -243,7 +243,7 @@ def upsert_session(
             -- above cites: cwd `.../scoped-agent-dispatch`, project
             -- `traitful-docs`, and `resolve_project(stored cwd)` disagreeing with
             -- both. Because `project` is the retrieval join key, that session's
-            -- notes fell out of its own project's listing.
+            -- memos fell out of its own project's listing.
             --
             -- Safe to pin: `scad_run_id` is derived from the archive path and is
             -- identical on every pass, so no later pass knows better. The one
@@ -374,16 +374,16 @@ def apply_job_state(conn, job: JobStateRecord) -> bool:
     return True
 
 
-# --- the two notes columns that are computed, not stored ---
+# --- the two memos columns that are computed, not stored ---
 #
-# Both expect the `notes` table to be aliased `n`, and the project one expects
+# Both expect the `memos` table to be aliased `n`, and the project one expects
 # `sessions` aliased `s`. They live here rather than inline so the CLI, the
 # search and the view page cannot drift into three different answers to the
 # same question.
 
-# `relation` in SQL, and the same rule as notes.derived_relation. The EXISTS
+# `relation` in SQL, and the same rule as memos.derived_relation. The EXISTS
 # looks at the whole session's rows rather than at insert order, so an
-# incremental pass that appends one note gets the same answer a rebuild does.
+# incremental pass that appends one memo gets the same answer a rebuild does.
 MEMO_RELATION_SQL = (
     "CASE WHEN COALESCE(n.parent, '') <> '' THEN 'branch' "
     "     WHEN EXISTS (SELECT 1 FROM memos prior "
@@ -393,10 +393,10 @@ MEMO_RELATION_SQL = (
     "     ELSE 'shift' END AS relation"
 )
 
-# A note's project is the writing session's project *unless* the note names one.
+# A memo's project is the writing session's project *unless* the memo names one.
 # That is the cross-capture case: a session working in project A files a bug
 # against project B, and before this it was filed under A because the project
-# only ever arrived through this JOIN. Nothing is lost by letting the note win —
+# only ever arrived through this JOIN. Nothing is lost by letting the memo win —
 # `cwd_at_write` still records where it was actually written.
 MEMO_PROJECT_RESOLVED = "COALESCE(n.project, s.project)"
 MEMO_PROJECT_SQL = f"{MEMO_PROJECT_RESOLVED} AS project"
@@ -406,16 +406,16 @@ MEMO_KIND_SQL = f"COALESCE(n.kind, '{DEFAULT_KIND}')"
 
 
 def append_memos(
-    conn, session_id: str, notes: list[MemoRecord], memo_path: str
+    conn, session_id: str, memos: list[MemoRecord], memo_path: str
 ) -> int:
-    """Append note rows, continuing idx from whatever is already stored.
+    """Append memo rows, continuing idx from whatever is already stored.
 
     The same append-only shape as `append_turns`, and for a stronger reason:
-    turns can be re-extracted while raw survives, but a note is self-report with
+    turns can be re-extracted while raw survives, but a memo is self-report with
     no second copy anywhere. Rewriting a row here would be the one destructive
     act in the whole index.
     """
-    if not notes:
+    if not memos:
         return 0
     start = conn.execute(
         "SELECT COALESCE(MAX(idx) + 1, 0) FROM memos WHERE session_id = ?", (session_id,)
@@ -428,32 +428,32 @@ def append_memos(
         [
             (session_id, start + i, n.ts, n.kind, n.topic, n.parent, n.project, n.title,
              json.dumps(list(n.tags)), json.dumps(list(n.entities)), n.text, memo_path)
-            for i, n in enumerate(notes)
+            for i, n in enumerate(memos)
         ],
     )
     conn.commit()
-    return len(notes)
+    return len(memos)
 
 
 def _ensure_memo_session(conn, session_id: str, agent: str, cwd: str | None) -> None:
-    """Make sure a note has a session row to hang off, without disturbing one.
+    """Make sure a memo has a session row to hang off, without disturbing one.
 
-    A note can arrive for a session the index has never seen: the transcript may
+    A memo can arrive for a session the index has never seen: the transcript may
     have been pruned before the first scan, or may never have been archived.
-    The note is still stored on disk either way — that is the file-is-truth rule
+    The memo is still stored on disk either way — that is the file-is-truth rule
     and it is not negotiable — and the question is only whether it also gets a
     row.
 
     It does. The reasoning is the one this index already accepted twice, for
     history.jsonl and then for job state: a source that outlives transcripts
-    earns a row, because otherwise real work is invisible. Notes outlive
-    transcripts by construction — the spec's own words are that a note "can
+    earns a row, because otherwise real work is invisible. Memos outlive
+    transcripts by construction — the spec's own words are that a memo "can
     arrive when the transcript no longer exists" — and this is the tier that
     can never be re-derived from anything. The tier that is least replaceable
     must not be the tier that is unfindable.
 
-    So: `grade='skeleton'` (no turns were ever extracted), `source='scad-note'`,
-    `cwd` from the note's own `cwd_at_write` so `project` still resolves, and
+    So: `grade='skeleton'` (no turns were ever extracted), `source='scad-memo'`,
+    `cwd` from the memo's own `cwd_at_write` so `project` still resolves, and
     `raw_present=1` — its source file exists, is never pruned, and the row is
     wholly re-derivable from it, so a 0 here would make `--rebuild` refuse
     forever over a row with nothing to lose.
@@ -504,7 +504,7 @@ def ensure_launched_session(
     `name = COALESCE(excluded.name, sessions.name)`, so a later rename wins and
     a quiet append never blanks it.
 
-    `raw_present=1` for the same reason the note row uses it: a 0 makes
+    `raw_present=1` for the same reason the memo row uses it: a 0 makes
     `--rebuild` refuse forever over a row with nothing to lose. On a rebuild
     this row is dropped and re-derived from the trace; if the agent died before
     writing one, it does not come back, which is the honest outcome.
@@ -528,15 +528,15 @@ def ensure_launched_session(
 
 
 def index_memos(conn) -> collections.Counter:
-    """Scan `~/.scad/memos/<agent>/*.jsonl` into the `notes` table.
+    """Scan `~/.scad/memos/<agent>/*.jsonl` into the `memos` table.
 
     `memos_offset` is `parsed_offset` on a different file, and works identically:
-    a note file whose size already equals the offset is skipped without being
+    a memo file whose size already equals the offset is skipped without being
     opened, and a resumed read appends rows whose idx continues from the maximum.
 
     This pass deliberately does NOT read the archive. Every other source obeys
     "nothing enters the index that is not in the archive first", because the
-    archive is what makes those rows rebuildable. The notes store is already the
+    archive is what makes those rows rebuildable. The memos store is already the
     durable home of its own content — copying it into the archive would make a
     second copy of the one thing that has no original elsewhere, and leave two
     files to keep honest instead of one.
@@ -554,13 +554,13 @@ def index_memos(conn) -> collections.Counter:
 
 
 def index_memo_file(conn, path: Path, agent: str) -> collections.Counter:
-    """Index one note file from wherever its offset left off.
+    """Index one memo file from wherever its offset left off.
 
     Split out of the pass above so the WRITE path can index the record it just
     appended without a second implementation of the offset rule. That rule is
     the whole reason this is shared: reading rows in without advancing
     `memos_offset` makes the next pass re-append the same records under fresh
-    `idx` values, which is a duplicate that looks like a real second note.
+    `idx` values, which is a duplicate that looks like a real second memo.
     """
     stats = collections.Counter()
     session_id = path.stem
@@ -571,34 +571,34 @@ def index_memo_file(conn, path: Path, agent: str) -> collections.Counter:
     if row is not None and held >= size and int(stat.st_mtime) <= (row["memos_mtime"] or 0):
         return stats
 
-    # A note file is the one store a person edits by hand: the CLI warns
+    # A memo file is the one store a person edits by hand: the CLI warns
     # about an unknown project and writes anyway, and the fix is to correct
-    # the line. Appending from the offset cannot see that. Notes are small,
+    # the line. Appending from the offset cannot see that. Memos are small,
     # so a file that changed is read whole, and if the lines already indexed
     # no longer say what the rows say, the rows are replaced from the file.
     # The one case the offset rule still serves is the pure append, which
     # stays an append so idx values are stable.
     try:
-        notes, end = read_memos(path, 0)
-    except Exception as exc:          # a note we cannot read must not stop the pass
-        click.echo(f"[scad] skipped note {path.name}: {exc}")
+        memos, end = read_memos(path, 0)
+    except Exception as exc:          # a memo we cannot read must not stop the pass
+        click.echo(f"[scad] skipped memo {path.name}: {exc}")
         stats["skipped_files"] += 1
         return stats
 
     if row is None:
-        cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
+        cwd = next((n.cwd_at_write for n in memos if n.cwd_at_write), None)
         _ensure_memo_session(conn, session_id, agent, cwd)
 
     stored = conn.execute(
         "SELECT ts, topic, title, project, parent FROM memos WHERE session_id = ? "
         "ORDER BY idx", (session_id,)).fetchall()
-    prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in notes[:len(stored)]]
+    prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in memos[:len(stored)]]
     if prefix == [tuple(r) for r in stored]:
-        new = notes[len(stored):]
+        new = memos[len(stored):]
     else:
         conn.execute("DELETE FROM memos WHERE session_id = ?", (session_id,))
         stats["replaced"] += 1
-        new = notes
+        new = memos
     stats["memos"] += append_memos(conn, session_id, new, str(path))
     conn.execute("UPDATE sessions SET memos_offset = ?, memos_mtime = ? WHERE id = ?",
                  (end, int(stat.st_mtime), session_id))
@@ -701,7 +701,7 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
                 f"{missing} session(s) have no raw left in the archive; --rebuild would "
                 "destroy the only copy of their turns. Re-run with --force to override."
             )
-        # Notes rows go too, and safely: the note FILES are truth, are never
+        # Memos rows go too, and safely: the memo FILES are truth, are never
         # deleted, and index_memos below reads every one of them back from
         # offset 0. Leaving them would strand rows whose session no longer
         # exists and break the idx continuation on the next append.
@@ -709,7 +709,7 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
         conn.commit()
 
     if not root.is_dir():
-        stats.update(index_memos(conn))   # a note does not need an archive to exist
+        stats.update(index_memos(conn))   # a memo does not need an archive to exist
         return stats
 
     job_states: list[JobStateRecord] = []
@@ -828,7 +828,7 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
         if apply_job_state(conn, job):
             stats["named"] += 1
 
-    # Last, for the same reason: a note only inserts a session row when the scan
+    # Last, for the same reason: a memo only inserts a session row when the scan
     # has already had its chance to produce a better one.
     stats.update(index_memos(conn))
 
@@ -893,7 +893,7 @@ def _fts_query(raw: str) -> str:
 
 
 def session_memos(conn, session_id: str) -> list[dict]:
-    """A session's notes, oldest first — the order they were written."""
+    """A session's memos, oldest first — the order they were written."""
     rows = conn.execute(
         f"SELECT n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, {MEMO_RELATION_SQL}, "
         f"       n.parent, n.project, n.title, n.tags, n.entities, n.memo_path "
@@ -913,7 +913,7 @@ def search_memos(conn, query: str, *, limit: int = 20) -> list[dict]:
     matched but not returned: a hit says which memo, and `memos read` shows it.
 
     `n.project` is matched, not the resolved one: matching the JOINed project
-    would make every note in a project a hit for that project's name, which
+    would make every memo in a project a hit for that project's name, which
     turns a search for a subject into a listing. The authored value is a
     deliberate label and is worth finding by.
     """
@@ -933,12 +933,12 @@ def search_memos(conn, query: str, *, limit: int = 20) -> list[dict]:
 
 
 def known_projects(conn) -> set[str]:
-    """Every project name the index has seen, from sessions and from notes.
+    """Every project name the index has seen, from sessions and from memos.
 
     The write path uses this to tell a caller its `project` looks unfamiliar.
     Sessions alone would be the wrong set twice over: `scad project ls` counts
     sessions, so a real project nobody has opened a session in yet is missing
-    from it, and a note that already named a project is itself evidence the
+    from it, and a memo that already named a project is itself evidence the
     name is in use.
     """
     rows = conn.execute(

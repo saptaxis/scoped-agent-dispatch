@@ -19,7 +19,7 @@ exception to this codebase's degrade-never-raise rule.
 The launch record lives at `~/.scad/launches/<session-id>.json`. A file, never
 the index: `reindex --rebuild` drops every row and recomputes it from the
 archive, and a launch record is an authored fact about an event with nothing to
-recompute it from. Same reasoning, same tier as notes.
+recompute it from. Same reasoning, same tier as memos.
 
 Nothing here is a precondition for anything. `scad session resume` works off
 the index for every session on the machine — the record only makes it better,

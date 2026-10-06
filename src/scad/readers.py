@@ -362,9 +362,9 @@ def read_job_state(path: Path, start_offset: int = 0) -> tuple[list[JobStateReco
 def _as_list(value) -> list:
     """Coerce a scalar to a one-element list; drop nothing.
 
-    Notes are composed by a model, and `"tags": "notes"` instead of
-    `["notes"]` is a plausible slip. Dropping the value would quietly cost the
-    note its only search key.
+    Memos are composed by a model, and `"tags": "memos"` instead of
+    `["memos"]` is a plausible slip. Dropping the value would quietly cost the
+    memo its only search key.
     """
     if value is None:
         return []
@@ -384,15 +384,15 @@ def read_memos(path: Path, start_offset: int = 0) -> tuple[list[MemoRecord], int
     file.
 
     Tolerant for the usual reason and one extra: these records come straight
-    from a model, so absent fields are ordinary rather than corrupt. A note with
+    from a model, so absent fields are ordinary rather than corrupt. A memo with
     nothing but a title still gets a row.
     """
-    notes: list[MemoRecord] = []
+    memos: list[MemoRecord] = []
 
     for _, rec in _iter_lines(path, start_offset):
         if not isinstance(rec, dict):
             continue                      # None from a malformed line, or a bare scalar
-        notes.append(MemoRecord(
+        memos.append(MemoRecord(
             ts=_epoch_ms(rec.get("ts")),
             # A record written before `kind` existed has one all the same: the
             # default is part of the shape, so absent means `info` rather than
@@ -408,7 +408,7 @@ def read_memos(path: Path, start_offset: int = 0) -> tuple[list[MemoRecord], int
             cwd_at_write=rec.get("cwd_at_write"),
         ))
 
-    return notes, path.stat().st_size
+    return memos, path.stat().st_size
 
 
 def _codex_message_text(content) -> str:
