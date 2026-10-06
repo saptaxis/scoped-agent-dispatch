@@ -78,9 +78,9 @@ scad session launch --agent codex --cwd ~/Desktop/scad-launch-demo
 - [ ] The gates clear without your help, and **without a `curl | sh` running**.
       Watch for it: option 1 on the update gate installs a new codex.
 - [ ] Turn 1 is the priming prompt and the reply is exactly `ready.`
-- [ ] **No note was written.** `scad notes ls --limit 5` shows nothing new.
-      `scad`, `remember` and `recall` are live trigger words inside the session
-      the moment turn 1 names scad, and a fired `remember` writes junk into the
+- [ ] **No memo was written.** `scad memos ls --limit 5` shows nothing new.
+      `scad` and the memo skills are live trigger words inside the session
+      the moment turn 1 names scad, and a fired `memo-write` writes junk into the
       one tier nothing can re-derive. This check is the reason
       `Take no action and read nothing` is in the prompt.
 - [ ] `provenance` reads `tui-native`, and `codex resume` (no flags) lists this

@@ -19,7 +19,7 @@ the container side runs Claude.
 - **Nothing enters the index unarchived.** The archive is what makes a row
   rebuildable, so `reindex` reads it rather than the live directories.
 - **Derived is disposable, authored is not.** Sessions and turns can be dropped
-  and rebuilt. Notes written by `/remember` cannot, so they are plain files and
+  and rebuilt. Memos written by `/memo-write` cannot, so they are plain files and
   the database only indexes them.
 - **A wrong label is worse than no label.** `project` is the retrieval key, so
   `unfiled` is a valid answer and a guess is not.
@@ -108,14 +108,14 @@ scad session resume <id>                            # attach if open, resume if 
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session ls|show|read <id>
 scad session ls --json                              # the export other programs read
-scad session note --current                         # append a /remember capture
+scad session memo --current                         # append a /memo-write capture
 
 # Corpus
 scad archive                                        # copy traces in, append-only
 scad reindex                                        # archive, then index
-scad search <query> [--notes]
+scad search <query> [--memos]
 scad view                                           # render the index and open it
-scad notes ls [--kind handoff] [--about <name>]
+scad memos ls [--kind handoff] [--about <name>]
 scad project ls|show <name>|aliases
 scad where                                          # how this directory resolves
 ```
@@ -127,7 +127,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 | | |
 |---|---|
 | `~/.scad/archive/` | agent traces, append-only, never pruned |
-| `~/.scad/notes/` | `/remember` captures, one file per session |
+| `~/.scad/memos/` | `/memo-write` captures, one file per session |
 | `~/.scad/index.sqlite` | derived from the archive, rebuildable |
 | `~/.scad/runs/` | per-run workspace, clones and job metadata |
 | `~/.scad/configs/` | project configs |
@@ -136,7 +136,7 @@ Every command and flag: [`docs/command-reference.md`](docs/command-reference.md)
 ## Documentation
 
 - [Session state](docs/session-state.md): the archive, the index, `scad view`,
-  interactive launch, and how notes are stored.
+  interactive launch, and how memos are stored.
 - [Containers](docs/containers.md): what a run does, step by step, and the config
   reference.
 - [macOS](docs/macos.md): the Colima VM, sizing, and mount caveats.

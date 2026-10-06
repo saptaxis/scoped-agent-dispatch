@@ -2,6 +2,45 @@
 
 ## [Unreleased]
 
+**Notes are memos.** scad's session records shared a name with the docs tree's `notes.org`,
+and went by three names besides: `/remember` wrote them, `session note` stored them, `notes ls`
+listed them and `/recall` read them. They are memos now, everywhere, with no aliases: the old
+commands and skills are gone.
+
+### Changed
+
+| before | 0.9.0 |
+|---|---|
+| `scad notes ls`, `scad notes read` | `scad memos ls`, `scad memos read` |
+| `scad session note`, `scad session notes` | `scad session memo`, `scad session memos` |
+| `scad search --notes` | `scad search --memos` |
+| `/remember`, `/recall` | `/memo-write`, `/memo-recall` |
+| `~/.scad/notes/` | `~/.scad/memos/` |
+| JSON `note_path`; view rows `notes`, `n_notes` | `memo_path`; `memos`, `n_memos` |
+
+The record format is unchanged. The plain verbs went because `remember` collides with Claude
+Code's own memory, where "remember that I prefer X" means something else.
+
+### Added
+
+- `/memo-handoff`: a handoff memo, written for this session only after checking each repo the
+  work touched (`git status`, `git log`), with its scope from the arguments: empty for the whole
+  context, `brief` for the latest phase, anything else as the focus.
+- `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and
+  project. The index stores the body; listings still never print it.
+
+### Upgrading
+
+On each machine, before any other scad command:
+
+1. `mv ~/.scad/notes ~/.scad/memos`. Until this is done, every command that reads or writes
+   memos stops and prints it.
+2. `scad reindex`. The index gains an empty `memos` table and fills it from the memo files.
+3. Optionally, drop what the old index kept:
+   `sqlite3 ~/.scad/index.sqlite "DROP TABLE notes; ALTER TABLE sessions DROP COLUMN notes_offset; ALTER TABLE sessions DROP COLUMN notes_mtime; UPDATE sessions SET source = 'scad-memo' WHERE source = 'scad-note';"`
+4. Remove the old `remember` and `recall` skills from `~/.agents/skills` and `~/.claude/skills`,
+   and reinstall to get the new ones.
+
 ## [0.8.0] - 2026-10-01
 
 **The release where a directory can move twice.** 0.7.0's aliases carried the docs repository

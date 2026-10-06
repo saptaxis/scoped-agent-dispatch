@@ -2062,6 +2062,15 @@ class TestRenameLeftNoStaleDocs:
                  if "scad status" in p.read_text(errors="ignore")]
         assert stale == []
 
+    def test_no_doc_teaches_a_note_command_or_skill(self):
+        """0.9.0 renamed notes to memos with no aliases, so a doc that still
+        teaches the old names teaches commands that fail."""
+        old = ("scad notes ", "scad session note", "--notes", "/remember", "/recall",
+               "~/.scad/notes", "`remember`", "`recall`")
+        stale = [f"{p.name}: {o}" for p in self._sources()
+                 for o in old if o in p.read_text(errors="ignore")]
+        assert stale == []
+
 
 class TestStoreNotMovedStopsTheCommand:
     """A machine with only the pre-0.9.0 ~/.scad/notes gets one error naming

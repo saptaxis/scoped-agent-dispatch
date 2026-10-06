@@ -1,7 +1,7 @@
 # Session state
 
 scad reads the logs agents already write, copies them somewhere nothing deletes
-them, and indexes the copy. Four stores are involved: the archive and the notes
+them, and indexes the copy. Four stores are involved: the archive and the memos
 are durable, the index and the run dirs are rebuildable.
 
 ## Trace archive
@@ -86,13 +86,13 @@ the path went through a symlink or a move.
 ```bash
 scad session ls --json --kind main --limit 1000     # every main session, one call
 scad session ls --parent <id>                       # a session's subagents
-scad notes ls --about orglens --about scad --json   # notes about things, wherever written
+scad memos ls --about orglens --about scad --json   # memos about things, wherever written
 ```
 
 `--about` matches the name in `tags` or `entities`, as the `topic`, or as the
 project, and can be given several times; each JSON row then carries `about`,
-the names it matched. A note about X is often written in Y's session and
-cross-tagged; by project alone, three of eight such notes were found. Rows also
+the names it matched. A memo about X is often written in Y's session and
+cross-tagged; by project alone, three of eight such memos were found. Rows also
 carry `tags` and `entities` themselves, so a consumer can do the match from one
 plain export instead.
 
@@ -175,10 +175,10 @@ command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.
 
-A session's notes ride on its row, in the same fold as its opening ask and its
+A session's memos ride on its row, in the same fold as its opening ask and its
 last word, so the authored tier is visible where the session is rather than in a
-list of its own. Tags are not on the row; `scad notes ls --about NAME` and
-`scad search --notes` are how a tag is searched.
+list of its own. Tags are not on the row; `scad memos ls --about NAME` and
+`scad search --memos` are how a tag is searched.
 
 All sessions are grouped by when they last ran — Today, Yesterday, This week,
 This month, Older — so the months-old rows fall to the bottom under a heading
@@ -290,35 +290,39 @@ session on the machine.
 A launched session is indexed immediately as a skeleton row. Its turns appear
 after the next index pass, where headless output is immediate.
 
-## Notes
+## Memos
 
 Traces are evidence: derived, rebuildable, and pruned by the agents themselves.
-Notes are self-report: what an agent decided was worth keeping. They cannot be
+Memos are self-report: what an agent decided was worth keeping. They cannot be
 re-derived, so they are stored as plain files and the database only indexes them.
+Until 0.9.0 they were called notes.
 
 ```bash
-/remember                        # from inside any agent session ($remember in Codex)
-/remember focus on the tradeoff  # optional angle
+/memo-write                        # from inside any agent session ($memo-write in Codex)
+/memo-write focus on the tradeoff  # optional angle
+/memo-handoff                      # a handoff memo, checked against the repo first
+/memo-handoff brief                # the latest phase only
+/memo-recall                       # catch up on a project: newest memo, then the repo
 ```
 
-The command writes the record in-session, where the context already is, and pipes
-it to `scad session note --current`, which resolves the session whose trace is
-being written in this cwd. Notes land at
-`~/.scad/notes/<agent>/<session-uuid>.jsonl`, one appending file per session, and
+A skill writes the record in-session, where the context already is, and pipes
+it to `scad session memo --current`, which resolves the session whose trace is
+being written in this cwd. Memos land at
+`~/.scad/memos/<agent>/<session-uuid>.jsonl`, one appending file per session, and
 are indexed as they are written.
 
 ```bash
-scad session notes <id>            # read them back, from the file
-scad session notes --current       # this session's
-scad notes ls --kind handoff       # what a session left for whoever comes next
-scad notes read <id> --last
-scad search "resolver" --notes     # topic, title, tags, entities, project
+scad session memos <id>            # read them back, from the file
+scad session memos --current       # this session's
+scad memos ls --kind handoff       # what a session left for whoever comes next
+scad memos read <id> --last
+scad search "resolver" --memos     # body, topic, title, tags, entities, project
 ```
 
-Notes are session-keyed, never project-keyed. A project is derived and can be
+Memos are session-keyed, never project-keyed. A project is derived and can be
 redefined, and a path containing one would orphan every file the moment it
 changed. Each record carries `cwd_at_write`, so the project stays derivable from
-the note alone.
+the memo alone.
 
 Each record is one JSON line:
 
@@ -327,9 +331,13 @@ Each record is one JSON line:
 | `kind` | `info`, `handoff`, `bug`, `request` or `verification` |
 | `topic` | the subject, as a short label |
 | `parent` | the earlier topic this one hangs off, when it does |
-| `project` | files the note against a project other than the session's |
+| `project` | files the memo against a project other than the session's |
 | `title`, `text` | one line, then the body |
 | `tags`, `entities` | the search index |
 
-`relation` (`continue`, `shift`, `branch`) is derived when the note is read, from
+`relation` (`continue`, `shift`, `branch`) is derived when the memo is read, from
 `parent` and the topics already in the thread, rather than authored.
+
+A machine that still has the pre-0.9.0 store (`notes` in `~/.scad`) and no `memos`
+is refused by every command that reads or writes memos, with the `mv` that fixes
+it.
