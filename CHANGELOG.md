@@ -29,6 +29,9 @@ Code's own memory, where "remember that I prefer X" means something else.
 - `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and
   project. The index stores the body; listings still never print it.
 
+- `scad session ls` and `scad project show` show how many sub-agents and workflow agents each
+  session started, as `scad view` already did, and `session ls --json` carries it as
+  `n_subagents`. A session that fanned out to hundreds looked like a one-question one.
 - `scad index status [--json]`: when a reindex last finished, and how many sessions and memos
   the index holds, without running one. Nothing reindexes on a timer, so a reader that does
   not refresh first can now tell a quiet session from a stale index.

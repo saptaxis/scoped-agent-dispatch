@@ -4449,3 +4449,42 @@ class TestIndexStatus:
         runner.invoke(main, ["reindex", "--no-archive"])
         out = runner.invoke(main, ["index", "status"]).output
         assert "last indexed" in out and "ago" in out and "sessions" in out
+
+
+class TestSubAgentCounts:
+    """A session that fanned out to hundreds of sub-agents looked like a
+    one-question session in `session ls` and `project show`; `scad view`
+    already said "N sub-agents" per row."""
+
+    def _conn(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        rows = [("P", "main", None, 3), ("Q", "main", None, 2)] + \
+               [(f"A{i}", "subagent", "P", 1) for i in range(3)]
+        for sid, kind, parent, started in rows:
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, project, "
+                "parent_session_id, started, n_turns) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sid, kind, "claude", "m", "full", "claude-transcript", "proj", parent,
+                 started, 1))
+        conn.commit()
+        return conn
+
+    def test_the_json_export_carries_the_count(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        rows = json.loads(runner.invoke(main, ["session", "ls", "--kind", "main",
+                                               "--json"]).output)
+        assert {r["id"]: r["n_subagents"] for r in rows} == {"P": 3, "Q": 0}
+
+    def test_session_ls_shows_it(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "ls", "--kind", "main"]).output
+        line = next(l for l in out.splitlines() if l.startswith("P "))
+        assert "3 sub" in line
+        assert "sub" not in next(l for l in out.splitlines() if l.startswith("Q "))
+
+    def test_project_show_shows_it(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["project", "show", "proj"]).output
+        assert "3 sub" in next(l for l in out.splitlines() if l.startswith("P "))

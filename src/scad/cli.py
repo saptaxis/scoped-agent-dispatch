@@ -2130,7 +2130,7 @@ def index_status_cmd(as_json):
 @click.option("--json", "as_json", is_flag=True,
               help="Emit rows as JSON. The export a consumer reads instead of the index "
                    "file: adds cwd (where the directory is now), cwd_recorded, ended, "
-                   "needs, parent_session_id, last_turn and live.")
+                   "needs, parent_session_id, n_subagents, last_turn and live.")
 def session_ls(project, agent, kind, machine, grade, outcome, since, until, parent_id,
                limit, as_json):
     """List indexed sessions, newest first."""
@@ -2149,7 +2149,8 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, pare
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"SELECT id, name, harness_state, kind, agent, project, title, n_turns, "
-        f"grade, outcome, started, ended, cwd, needs, parent_session_id "
+        f"grade, outcome, started, ended, cwd, needs, parent_session_id, "
+        f"{_N_SUBAGENTS_SQL} "
         f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
         (*params, limit),
     ).fetchall()
@@ -2171,7 +2172,21 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, pare
         # it here would dress a guess up as a name.
         name = (r["name"] or "")[:26]     # the longest real one is 26 characters
         click.echo(f"{r['id'][:12]:<14} {name:<27} {when}  {r['agent']:<7} "
-                   f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
+                   f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t "
+                   f"{_subagents_cell(r['n_subagents'])}  {title}")
+
+
+# A session's sub-agents and workflow agents, counted the way `scad view` does.
+# Without it a session that fanned out to hundreds looked like a one-question
+# session in every list that hides them. `parent_session_id` is indexed.
+_N_SUBAGENTS_SQL = ("(SELECT count(*) FROM sessions c "
+                    "WHERE c.parent_session_id = sessions.id) AS n_subagents")
+
+
+def _subagents_cell(n: int) -> str:
+    """`37 sub`, or blank: most sessions have none, and a column of zeros hides
+    the ones that matter."""
+    return f"{f'{n} sub' if n else '':>8}"
 
 
 def _session_export(conn, rows) -> list[dict]:
@@ -3018,8 +3033,8 @@ def project_show(name, limit):
     # cannot be resumed; listing them here while the page hid them made the two
     # disagree about the same project (1309 of 1462 rows are subagents).
     rows = conn.execute(
-        "SELECT id, name, kind, agent, title, n_turns, started FROM sessions "
-        "WHERE project = ? AND kind = 'main' ORDER BY started DESC LIMIT ?",
+        f"SELECT id, name, kind, agent, title, n_turns, started, {_N_SUBAGENTS_SQL} "
+        f"FROM sessions WHERE project = ? AND kind = 'main' ORDER BY started DESC LIMIT ?",
         (name, limit),
     ).fetchall()
     if not rows:
@@ -3031,7 +3046,8 @@ def project_show(name, limit):
         # nobody chose one. `title` is derived and never stands in for a name.
         label = (r["name"] or "")[:26]
         click.echo(f"{r['id'][:12]:<14} {label:<27} {when}  {r['agent']:<7} "
-                   f"{r['kind']:<14} {r['n_turns']:>5}t  {(r['title'] or '')[:52]}")
+                   f"{r['kind']:<14} {r['n_turns']:>5}t {_subagents_cell(r['n_subagents'])}  "
+                   f"{(r['title'] or '')[:52]}")
 
 
 @session.command("read")
