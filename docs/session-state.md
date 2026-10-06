@@ -173,7 +173,6 @@ Renders the index to a self-contained HTML page and opens it.
 
 ```bash
 scad view                 # refresh, then: waiting list, live sessions, everything, then open
-scad view --days 30       # widen the waiting window
 scad view --no-open       # just write ~/.scad/view.html
 scad view --no-refresh    # render the index as it is; the pure reader
 ```
@@ -183,7 +182,10 @@ it is in, and a row for any agent pane that cannot be resolved to a session,
 saying so. It replaced a pair of sections that showed mostly the same rows from
 the registry and from tmux.
 
-It answers who is waiting on you and how to get back to them. Each row carries a
+It answers who is waiting on you and how to get back to them. A session is
+waiting when it asked you something (`outcome = awaiting-question`), however
+long ago; one that merely ended with the agent speaking last is not, which is
+how nearly every finished session ends. Each row carries a
 command: `tmux select-window ... \; select-pane ...` for a live pane, `scad run
 attach` for a container, or `cd <cwd> && claude --resume <id>` for a session that
 has closed. The page is read-only; reply in the session itself.

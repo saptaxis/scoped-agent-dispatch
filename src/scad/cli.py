@@ -3152,7 +3152,9 @@ del _verb
 
 
 @main.command()
-@click.option("--days", default=14, help="How far back the waiting list looks.")
+# A no-op kept for scripts that pass it. It bounded the waiting list to recent
+# sessions, and a question nobody answered does not stop waiting at 14 days.
+@click.option("--days", default=None, type=int, hidden=True)
 @click.option("--output", default=None, type=click.Path(), help="Write the page here.")
 @click.option("--no-open", is_flag=True, help="Write the page without opening a browser.")
 @click.option("--no-refresh", is_flag=True,
@@ -3202,7 +3204,7 @@ def view(days, output, no_open, refresh, no_refresh):
             click.echo(f"[scad] Warning: refresh failed, rendering existing index: {exc}")
 
     conn = index_connect()
-    data = gather(conn, tmux_panes(), running_run_ids(), days=days)
+    data = gather(conn, tmux_panes(), running_run_ids())
     target = _Path(output) if output else get_scad_home() / "view.html"
     write_view(target, render(data))
 

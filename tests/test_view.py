@@ -197,47 +197,34 @@ def _store(conn, sid, outcome, ended_days_ago=0, cwd="/repo", agent="claude", ki
 
 
 class TestGather:
-    def test_waiting_holds_only_sessions_awaiting_input(self, tmp_path):
+    def test_waiting_holds_only_sessions_that_asked_something(self, tmp_path):
+        """`awaiting-user` is how nearly every finished session ends: the agent
+        spoke last. Counted as waiting, it was 183 of 232 sessions in August
+        against one real question, which made the list useless."""
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "W1", "awaiting-user")
         _store(conn, "Q1", "awaiting-question")
         _store(conn, "D1", "tool-result-last")
         data = gather(conn, [], set())
-        assert {r["id"] for r in data["waiting"]} == {"W1", "Q1"}
+        assert [r["id"] for r in data["waiting"]] == ["Q1"]
 
-    def test_questions_sort_before_plain_waiting(self, tmp_path):
-        """An explicit question is a stronger claim on your attention.
-
-        The question is the OLDER of the two here on purpose: rows are newest
-        first, so a question that also happened to be newest would prove
-        nothing about the grouping.
-        """
+    def test_newest_first(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "W1", "awaiting-user", ended_days_ago=1)
-        _store(conn, "Q1", "awaiting-question", ended_days_ago=5)
-        assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["Q1", "W1"]
-
-    def test_newest_first_within_a_group(self, tmp_path):
-        """The page is read top-down, so current work belongs at the top.
-
-        Oldest-first was the earlier rule, on the grounds that nothing should
-        rot at the bottom of the list. Nothing does: the old rows are still
-        there, further down, and the window keeps the list from growing without
-        bound.
-        """
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "NEW", "awaiting-user", ended_days_ago=1)
-        _store(conn, "OLD", "awaiting-user", ended_days_ago=6)
+        _store(conn, "NEW", "awaiting-question", ended_days_ago=1)
+        _store(conn, "OLD", "awaiting-question", ended_days_ago=6)
         assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["NEW", "OLD"]
 
-    def test_window_excludes_ancient_sessions(self, tmp_path):
+    def test_a_question_is_never_too_old_to_be_waiting(self, tmp_path):
+        """An unanswered question is still unanswered after 14 days. The window
+        used to drop it, which is how the only real question on the author's
+        machine disappeared from the page."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "OLD", "awaiting-user", ended_days_ago=90)
-        assert gather(conn, [], set(), days=14)["waiting"] == []
+        _store(conn, "OLD", "awaiting-question", ended_days_ago=90)
+        assert [r["id"] for r in gather(conn, [], set())["waiting"]] == ["OLD"]
 
     def test_subagents_never_appear_in_waiting(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "SUB", "awaiting-user", kind="subagent")
+        _store(conn, "SUB", "awaiting-question", kind="subagent")
         assert gather(conn, [], set())["waiting"] == []
 
     def test_live_lists_sessions_with_a_matching_pane(self, tmp_path):
@@ -249,7 +236,7 @@ class TestGather:
 
     def test_every_row_carries_a_reentry(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "W1", "awaiting-user", cwd=str(tmp_path))
+        _store(conn, "W1", "awaiting-question", cwd=str(tmp_path))
         r = gather(conn, [], set())["waiting"][0]
         assert r["reentry"]["kind"] == "resume"
         assert "claude --resume W1" in r["reentry"]["command"]
@@ -257,7 +244,7 @@ class TestGather:
     def test_waiting_rows_carry_the_last_turn_text(self, tmp_path):
         """So you can remember where the conversation left off."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "W1", "awaiting-user")
+        _store(conn, "W1", "awaiting-question")
         append_turns(conn, "W1", [
             TurnRecord(ts=1, role="assistant", kind="text", text="first"),
             TurnRecord(ts=2, role="assistant", kind="text", text="the last thing said"),
@@ -268,14 +255,14 @@ class TestGather:
         """A subagent is triggered by an agent, cannot be resumed, and was never
         started by you — 1309 of 1462 real rows. It is not a peer."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "A", "awaiting-user")
+        _store(conn, "A", "awaiting-question")
         _store(conn, "B", "tool-result-last", kind="subagent")
         rows = gather(conn, [], set())["all"]
         assert [r["id"] for r in rows] == ["A"]
 
     def test_a_parent_carries_its_agent_count(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "P", "awaiting-user")
+        _store(conn, "P", "awaiting-question")
         for kid in ("K1", "K2"):
             _store(conn, kid, "tool-result-last", kind="subagent")
             conn.execute("UPDATE sessions SET parent_session_id='P' WHERE id=?", (kid,))
@@ -291,7 +278,7 @@ from scad.view import render
 class TestRender:
     def _data(self):
         return {"waiting": [{"id": "S1", "name": None, "project": "proj", "cwd": "/repo",
-                             "title": "a title", "outcome": "awaiting-user", "needs": None,
+                             "title": "a title", "outcome": "awaiting-question", "needs": None,
                              "harness_state": None, "agent": "claude", "kind": "main",
                              "n_turns": 3, "started": 1, "ended": 2, "grade": "full",
                              "scad_run_id": None, "last_text": "where we left off",
@@ -437,7 +424,7 @@ class TestStatus:
     def test_roster_proves_a_session_is_open(self, tmp_path):
         """The only exact signal: the daemon maps sessionId -> a live pid."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         data = gather(conn, [], set(), live_ids={"S1"})
         assert data["waiting"][0]["status"] == "open"
 
@@ -445,18 +432,18 @@ class TestStatus:
         """claude does not hold its transcript open, so a running agent cannot be
         traced to a session. With one project per window, this is the normal case."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
         assert gather(conn, panes, set())["waiting"][0]["status"] == "maybe-open"
 
     def test_no_agent_anywhere_is_closed(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         assert gather(conn, [], set())["waiting"][0]["status"] == "closed"
 
     def test_a_shell_in_the_cwd_does_not_make_it_maybe(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         panes = [TmuxPane("main:1.0", "/repo", "zsh")]
         assert gather(conn, panes, set())["waiting"][0]["status"] == "closed"
 
@@ -465,21 +452,21 @@ class TestStatus:
         now = int(time.time() * 1000)
         rec = SessionRecord(id="C1", kind=KIND_MAIN, agent="claude", source="claude-transcript",
                             cwd="/workspace/x", started=now - 1000, ended=now,
-                            outcome="awaiting-user")
+                            outcome="awaiting-question")
         upsert_session(conn, rec, machine="mac", project="x", archive_path="/a.jsonl",
                        source_size=1, source_mtime=1, parsed_offset=1, scad_run_id="r1")
         assert gather(conn, [], {"r1"})["waiting"][0]["status"] == "open"
 
     def test_roster_beats_a_merely_shared_cwd(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
         assert gather(conn, panes, set(), live_ids={"S1"})["waiting"][0]["status"] == "open"
 
     def test_the_page_shows_the_resume_command_even_when_a_pane_matches(self, tmp_path):
         """A tmux target is ambiguous; the resume command never is."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path))
+        _store(conn, "S1", "awaiting-question", cwd=str(tmp_path))
         panes = [TmuxPane("main:1.0", str(tmp_path), "2.1.219")]
         html = render(gather(conn, panes, set()))
         assert "claude --resume S1" in html
@@ -492,7 +479,7 @@ class TestTheOpenPaneIsMetadata:
 
     def _html(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         return render(gather(conn, [TmuxPane("main:1.0", "/repo", "2.1.219")], set()))
 
     def test_the_row_names_the_pane(self, tmp_path):
@@ -509,17 +496,17 @@ class TestGrouping:
     def test_waiting_splits_into_at_hand_and_closed(self, tmp_path):
         """An open pane means switch windows; nothing open means resume."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "HERE", "awaiting-user", cwd="/open")
-        _store(conn, "GONE", "awaiting-user", cwd="/closed")
+        _store(conn, "HERE", "awaiting-question", cwd="/open")
+        _store(conn, "GONE", "awaiting-question", cwd="/closed")
         data = gather(conn, [TmuxPane("main:1.0", "/open", "2.1.205", window="w")], set())
         assert [r["id"] for r in data["waiting_at_hand"]] == ["HERE"]
         assert [r["id"] for r in data["waiting_closed"]] == ["GONE"]
 
     def test_closed_groups_ordered_by_recency_not_size(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "A1", "awaiting-user", ended_days_ago=9, cwd="/a")
-        _store(conn, "A2", "awaiting-user", ended_days_ago=9, cwd="/a")
-        _store(conn, "B1", "awaiting-user", ended_days_ago=1, cwd="/b")
+        _store(conn, "A1", "awaiting-question", ended_days_ago=9, cwd="/a")
+        _store(conn, "A2", "awaiting-question", ended_days_ago=9, cwd="/a")
+        _store(conn, "B1", "awaiting-question", ended_days_ago=1, cwd="/b")
         conn.execute("UPDATE sessions SET project='big' WHERE id IN ('A1','A2')")
         conn.execute("UPDATE sessions SET project='recent' WHERE id='B1'")
         conn.commit()
@@ -532,7 +519,7 @@ class TestResumeCwd:
         """codex records ChatGPT-project sessions under ~/.codex — cd-ing there
         lands you inside the tool's state, not in a repo."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "C1", "awaiting-user", agent="codex",
+        _store(conn, "C1", "awaiting-question", agent="codex",
                cwd="/Users/vsr/.codex/.chatgpt-projects/g-p-68d7ac")
         cmd = gather(conn, [], set())["waiting"][0]["reentry"]["command"]
         assert cmd == "codex resume C1"
@@ -540,14 +527,14 @@ class TestResumeCwd:
 
     def test_claude_state_dir_is_also_refused(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "C2", "awaiting-user", cwd="/Users/vsr/.claude/projects/x")
+        _store(conn, "C2", "awaiting-question", cwd="/Users/vsr/.claude/projects/x")
         assert gather(conn, [], set())["waiting"][0]["reentry"]["command"] == "claude --resume C2"
 
     def test_an_ordinary_repo_still_gets_its_cd(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
         repo = tmp_path / "code" / "scad"
         repo.mkdir(parents=True)
-        _store(conn, "C3", "awaiting-user", cwd=str(repo))
+        _store(conn, "C3", "awaiting-question", cwd=str(repo))
         cmd = gather(conn, [], set())["waiting"][0]["reentry"]["command"]
         assert cmd == f"cd {repo} && claude --resume C3"
 
@@ -555,7 +542,7 @@ class TestResumeCwd:
         conn = connect(tmp_path / "i.sqlite")
         nvim = tmp_path / ".config" / "nvim"
         nvim.mkdir(parents=True)
-        _store(conn, "C4", "awaiting-user", cwd=str(nvim))
+        _store(conn, "C4", "awaiting-question", cwd=str(nvim))
         assert f"cd {nvim}" in gather(conn, [], set())["waiting"][0]["reentry"]["command"]
 
 
@@ -569,7 +556,7 @@ class TestHumanName:
 
     def _html(self, tmp_path, **columns):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         for column, value in columns.items():
             conn.execute(f"UPDATE sessions SET {column} = ? WHERE id = 'S1'", (value,))
         conn.commit()
@@ -600,7 +587,7 @@ class TestHumanName:
 class TestPresentation:
     def _full(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "W1", "awaiting-user", cwd="/open")
+        _store(conn, "W1", "awaiting-question", cwd="/open")
         _store(conn, "C1", "awaiting-question", cwd="/closed")
         panes = [TmuxPane("main:3.0", "/open", "2.1.205", window="scad")]
         return render(gather(conn, panes, set()))
@@ -653,7 +640,7 @@ class TestHoverTitles:
         conn = connect(tmp_path / "i.sqlite")
         long_cwd = tmp_path / "Library" / "CloudStorage" / "a-very-long-project-name-here"
         long_cwd.mkdir(parents=True)
-        _store(conn, "S1", "awaiting-user", cwd=str(long_cwd))
+        _store(conn, "S1", "awaiting-question", cwd=str(long_cwd))
         html = render(gather(conn, [], set()))
         assert f'title="cd {long_cwd} &amp;&amp; claude --resume S1"' in html
 
@@ -661,7 +648,7 @@ class TestHoverTitles:
         """_clip actually removes characters, so without the title the rest of
         the text would be unrecoverable from the page."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         long_title = "x" * 200
         conn.execute("UPDATE sessions SET title = ? WHERE id = 'S1'", (long_title,))
         conn.commit()
@@ -671,7 +658,7 @@ class TestHoverTitles:
 
     def test_a_short_title_gets_no_needless_tooltip(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         conn.execute("UPDATE sessions SET title = 'short' WHERE id = 'S1'")
         conn.commit()
         assert 'title="short"' not in render(gather(conn, [], set()))
@@ -679,7 +666,7 @@ class TestHoverTitles:
     def test_titles_are_escaped_in_the_attribute(self, tmp_path):
         """A quote in a title would otherwise break out of the attribute."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         conn.execute("""UPDATE sessions SET title = ? WHERE id = 'S1'""",
                      ('a "quoted" <b>x</b> ' + "y" * 100,))
         conn.commit()
@@ -691,7 +678,7 @@ class TestHoverTitles:
 class TestExpandableText:
     def _html_with_long_title(self, tmp_path, title):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         conn.execute("UPDATE sessions SET title = ? WHERE id = 'S1'", (title,))
         conn.commit()
         return render(gather(conn, [], set()))
@@ -731,7 +718,7 @@ class TestExpandableText:
 class TestNotesSection:
     def _with_note(self, tmp_path, **over):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         row = {"session_id": "S1", "idx": 0, "ts": int(time.time() * 1000),
                "kind": "info", "topic": "notes-store", "parent": None, "project": None,
                "title": "Built the notes store", "tags": '["append-only","jsonl"]',
@@ -781,7 +768,7 @@ class TestNotesSection:
         the section gone the hint has to live somewhere, or removing it to make
         notes visible would have made them harder to discover."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         assert "/memo-write" in render(gather(conn, [], set()))
 
 
@@ -803,7 +790,7 @@ class TestOpenNow:
 
     def test_a_live_session_the_index_knows_becomes_a_row(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         data = gather(conn, [], set(),
                       live_sessions=[_session("S1", name="jul29-viewer", status="busy")])
         row = data["open_now"][0]
@@ -817,7 +804,7 @@ class TestOpenNow:
 
     def test_a_waiting_session_carries_what_it_is_blocked_on(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         data = gather(conn, [], set(), live_sessions=[
             _session("S1", status="waiting", waiting_for="permission prompt")])
         assert data["open_now"][0]["status"] == "waiting"
@@ -827,8 +814,8 @@ class TestOpenNow:
         """"Newest" means last message, not when the process was launched — a
         session opened this morning and untouched since is not the live one."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "STALE", "awaiting-user", ended_days_ago=9, cwd="/a")
-        _store(conn, "FRESH", "awaiting-user", ended_days_ago=1, cwd="/b")
+        _store(conn, "STALE", "awaiting-question", ended_days_ago=9, cwd="/a")
+        _store(conn, "FRESH", "awaiting-question", ended_days_ago=1, cwd="/b")
         data = gather(conn, [], set(), live_sessions=[
             _session("STALE", started_at=9_000_000),     # started most recently
             _session("FRESH", started_at=1_000_000),
@@ -839,7 +826,7 @@ class TestOpenNow:
         """A session started minutes ago has not been archived yet. Dropping it
         from a section called "open now" is the worst failure this can have."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "KNOWN", "awaiting-user", cwd="/repo")
+        _store(conn, "KNOWN", "awaiting-question", cwd="/repo")
         data = gather(conn, [], set(), live_sessions=[
             _session("KNOWN"),
             _session("BRAND-NEW", cwd="/elsewhere", name="just-started",
@@ -861,7 +848,7 @@ class TestOpenNow:
     def test_a_live_session_is_open_not_maybe_open(self, tmp_path):
         """The bug: `live_ids` defaulted to empty because nothing passed one."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         panes = [TmuxPane("main:1.0", "/repo", "2.1.219")]
         data = gather(conn, panes, set(), live_sessions=[_session("S1")])
         assert data["waiting"][0]["status"] == "open"
@@ -869,7 +856,7 @@ class TestOpenNow:
 
     def test_gather_reads_the_registry_when_nothing_is_injected(self, tmp_path, monkeypatch):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         monkeypatch.setattr("scad.view.claude_live_sessions",
                             lambda *a, **k: [_session("S1", status="busy")])
         data = gather(conn, [], set())
@@ -879,7 +866,7 @@ class TestOpenNow:
     def test_an_unreadable_registry_leaves_the_page_intact(self, tmp_path, monkeypatch):
         """A machine with no ~/.claude/sessions renders exactly as before."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
 
         def boom(*a, **k):
             raise OSError("no such directory")
@@ -893,7 +880,7 @@ class TestOpenNow:
     def test_an_explicit_live_id_is_still_honoured(self, tmp_path):
         """The daemon roster and the process registry are separate evidence."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         data = gather(conn, [], set(), live_ids={"S1"})
         assert data["waiting"][0]["status"] == "open"
 
@@ -901,7 +888,7 @@ class TestOpenNow:
         """There is no registry for codex or kimi, and guessing one from cwd or
         timing would be inference. A codex pane stays `maybe-open`."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "CX", "awaiting-user", cwd="/repo", agent="codex")
+        _store(conn, "CX", "awaiting-question", cwd="/repo", agent="codex")
         data = gather(conn, [TmuxPane("main:1.0", "/repo", "codex")], set())
         # The pane lists — something is running there — but as a pane, with no
         # session claimed for it. That is the honest half of what is known.
@@ -913,7 +900,7 @@ class TestOpenNow:
 class TestOpenNowSection:
     def _html(self, tmp_path, sessions, **kw):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         return render(gather(conn, [], set(), live_sessions=sessions, **kw))
 
     def test_it_is_the_first_section_on_the_page(self, tmp_path):
@@ -961,7 +948,7 @@ class TestProjectTabs:
         conn = connect(tmp_path / "i.sqlite")
         _store(conn, "OLD1", "tool-result-last", ended_days_ago=9, cwd="/o", project="stale")
         _store(conn, "OLD2", "tool-result-last", ended_days_ago=9, cwd="/o", project="stale")
-        _store(conn, "NEW1", "awaiting-user", ended_days_ago=1, cwd="/n", project="fresh")
+        _store(conn, "NEW1", "awaiting-question", ended_days_ago=1, cwd="/n", project="fresh")
         return conn
 
     def test_a_tab_per_project_ordered_by_recent_activity(self, tmp_path):
@@ -993,8 +980,8 @@ class TestProjectTabs:
 class TestTabsInThePage:
     def _html(self, tmp_path, **kw):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
-        _store(conn, "S2", "awaiting-user", cwd="/b", project="beta")
+        _store(conn, "S1", "awaiting-question", cwd="/a", project="alpha")
+        _store(conn, "S2", "awaiting-question", cwd="/b", project="beta")
         return render(gather(conn, [], set(), **kw))
 
     def test_the_strip_lists_every_project_and_an_all_default(self, tmp_path):
@@ -1022,14 +1009,14 @@ class TestTabsInThePage:
     def test_open_now_rows_declare_their_project_too(self, tmp_path):
         """Scoping that missed a section would be worse than no scoping."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "S1", "awaiting-question", cwd="/a", project="alpha")
         html = render(gather(conn, [], set(), live_sessions=[_session("S1")]))
         section = html[html.index(">Live "):html.index("Waiting")]
         assert 'data-project="alpha"' in section
 
     def test_notes_rows_declare_their_project(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "S1", "awaiting-question", cwd="/a", project="alpha")
         conn.execute("INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                      "VALUES ('S1', 0, 1, 'topic', 'a note', '/n.jsonl')")
         conn.commit()
@@ -1051,7 +1038,7 @@ class TestTabsInThePage:
 
     def test_a_project_name_cannot_break_out_of_the_markup(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project='ev"il<script>')
+        _store(conn, "S1", "awaiting-question", cwd="/a", project='ev"il<script>')
         html = render(gather(conn, [], set()))
         assert '<script>' not in html.replace("<script>\nconst DATA", "")
         assert "&quot;il&lt;script&gt;" in html
@@ -1072,7 +1059,7 @@ class TestStaleness:
 
     def _html(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         return render(gather(conn, [], set()))
 
     def test_the_absolute_time_is_in_the_header(self, tmp_path):
@@ -1113,9 +1100,9 @@ class TestTabCountsMatchTheSections:
         """A count that disagrees with the rows below it is worse than none."""
         conn = connect(tmp_path / "i.sqlite")
         for sid in ("A1", "A2", "A3"):
-            _store(conn, sid, "awaiting-user", cwd="/a", project="alpha")
+            _store(conn, sid, "awaiting-question", cwd="/a", project="alpha")
         _store(conn, "A4", "tool-result-last", cwd="/a", project="alpha")
-        _store(conn, "B1", "awaiting-user", cwd="/b", project="beta")
+        _store(conn, "B1", "awaiting-question", cwd="/b", project="beta")
         data = gather(conn, [], set())
 
         tab = next(t for t in data["tabs"] if t["project"] == "alpha")
@@ -1132,7 +1119,7 @@ class TestTabCountsMatchTheSections:
         axis existed, without anything being wrong.
         """
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "S1", "awaiting-question", cwd="/a", project="alpha")
         html = render(gather(conn, [], set()))
         assert 'r.hidden = !matches(r);' in html
         # Each axis must treat empty as match-all. Asserted per axis rather
@@ -1147,7 +1134,7 @@ class TestTabCountsMatchTheSections:
         sessions` and left every other section showing rows that did not
         match — while the summary line reported the narrowed count."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "S1", "awaiting-question", cwd="/a", project="alpha")
         html = render(gather(conn, [], set()))
         # All three axes are consulted by one predicate, so they compose by AND
         # and every section obeys all of them.
@@ -1159,7 +1146,7 @@ class TestTabCountsMatchTheSections:
         """One selector for the whole page, so a new section cannot forget to
         join the filter — the same reason `data-project` is on every row."""
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/a", project="alpha")
+        _store(conn, "S1", "awaiting-question", cwd="/a", project="alpha")
         html = render(gather(conn, [], set()))
         assert 'data-agent="claude"' in html
 
@@ -1177,7 +1164,7 @@ class TestTheEmbeddedScriptParses:
 
     def _html(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
+        _store(conn, "S1", "awaiting-question", cwd="/repo")
         conn.execute("""UPDATE sessions SET title = ? WHERE id = 'S1'""",
                      ('a "quoted" & <tagged> title',))
         conn.commit()
@@ -1513,7 +1500,7 @@ class TestNotesOnTheRow:
         from scad.index import append_memos, connect
         from scad.records import MemoRecord
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo", project="proj")
+        _store(conn, "S1", "awaiting-question", cwd="/repo", project="proj")
         now = int(_time.time() * 1000)
         append_memos(conn, "S1", [
             MemoRecord(ts=now - 200, kind="handoff", topic="the-topic", title="first note"),
@@ -1536,7 +1523,7 @@ class TestNotesOnTheRow:
         from scad.index import connect
         from scad.view import gather
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S2", "awaiting-user", cwd="/repo")
+        _store(conn, "S2", "awaiting-question", cwd="/repo")
         row = next(r for r in gather(conn, [], set())["all"] if r["id"] == "S2")
         assert row["memos"] == [] and row["n_memos"] == 0
 
@@ -1584,7 +1571,7 @@ class TestRowsServeWhereTheDirectoryIsNow:
     def test_a_moved_row_carries_both_paths(self, tmp_path, monkeypatch):
         old, new = self._moved(tmp_path, monkeypatch)
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd=str(old))
+        _store(conn, "S1", "awaiting-question", cwd=str(old))
         row = gather(conn, [], set())["waiting"][0]
         assert row["cwd"] == str(new)
         assert row["cwd_recorded"] == str(old)
@@ -1592,7 +1579,7 @@ class TestRowsServeWhereTheDirectoryIsNow:
     def test_a_gone_row_with_no_rule_keeps_its_recorded_path(self, tmp_path, monkeypatch):
         _alias_home(tmp_path, monkeypatch)
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "gone"))
+        _store(conn, "S1", "awaiting-question", cwd=str(tmp_path / "gone"))
         row = gather(conn, [], set())["waiting"][0]
         assert row["cwd"] == row["cwd_recorded"] == str(tmp_path / "gone")
 
@@ -1606,7 +1593,7 @@ class TestAGoneDirectory:
         new.mkdir()
         _alias_home(tmp_path, monkeypatch, f"{tmp_path}/old -> {new}\n")
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "old"))
+        _store(conn, "S1", "awaiting-question", cwd=str(tmp_path / "old"))
         row = gather(conn, [], set())["waiting"][0]
         assert row["reentry"]["command"] == f"cd {new} && claude --resume S1"
         assert not row["cwd_gone"]
@@ -1614,7 +1601,7 @@ class TestAGoneDirectory:
     def test_a_gone_row_resumes_without_the_cd_and_says_why(self, tmp_path, monkeypatch):
         _alias_home(tmp_path, monkeypatch)
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd=str(tmp_path / "gone"))
+        _store(conn, "S1", "awaiting-question", cwd=str(tmp_path / "gone"))
         data = gather(conn, [], set())
         row = data["waiting"][0]
         assert row["cwd_gone"]
@@ -1626,7 +1613,7 @@ class TestAGoneDirectory:
     def test_rows_that_never_had_a_host_directory_keep_theirs(self, tmp_path, monkeypatch):
         _alias_home(tmp_path, monkeypatch)
         conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "C1", "awaiting-user", agent="codex", cwd=str(tmp_path / ".codex" / "p"))
+        _store(conn, "C1", "awaiting-question", agent="codex", cwd=str(tmp_path / ".codex" / "p"))
         row = gather(conn, [], set())["waiting"][0]
         assert not row["cwd_gone"]
         assert row["reentry"]["command"] == "codex resume C1"

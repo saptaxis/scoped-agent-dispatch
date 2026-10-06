@@ -21,6 +21,13 @@ commands and skills are gone.
 The record format is unchanged. The plain verbs went because `remember` collides with Claude
 Code's own memory, where "remember that I prefer X" means something else.
 
+- "Waiting on you" in `scad view` means a session asked you something
+  (`awaiting-question`), not that the agent spoke last (`awaiting-user`), which is how nearly
+  every finished session ends: in August that was 183 of 232 sessions against one real
+  question. An unanswered question also no longer drops off after 14 days; on the author's
+  machine the only real one was older than that, and hidden. `scad view --days` is now a
+  no-op, kept so scripts that pass it still run.
+
 ### Added
 
 - `/memo-handoff`: a handoff memo, written for this session only after checking each repo the
@@ -28,7 +35,6 @@ Code's own memory, where "remember that I prefer X" means something else.
   context, `brief` for the latest phase, anything else as the focus.
 - `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and
   project. The index stores the body; listings still never print it.
-
 - `scad session ls` and `scad project show` show how many sub-agents and workflow agents each
   session started, as `scad view` already did, and `session ls --json` carries it as
   `n_subagents`. A session that fanned out to hundreds looked like a one-question one.

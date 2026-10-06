@@ -266,7 +266,11 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
     return Reentry("resume", resume)
 
 
-_WAITING = ("awaiting-question", "awaiting-user")
+# What "waiting on you" means: the session asked you something. Not
+# `awaiting-user`, which is how nearly every finished session ends (the agent
+# spoke last): counted, it was 183 of 232 sessions in August against one
+# real question.
+_WAITING = "awaiting-question"
 _SNIPPET = 400
 
 _COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state, "
@@ -579,7 +583,7 @@ def _last_text(conn, session_id: str) -> str:
     return (row["text"] or "")[:_SNIPPET] if row else ""
 
 
-def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
+def gather(conn, panes: list[TmuxPane], running: set[str],
            live_ids: set[str] | None = None, live_sessions: list | None = None) -> dict:
     """Everything the page needs: what waits, what is live, and the full list.
 
@@ -592,7 +596,6 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     scopes itself in the browser, so a second filter in SQL would be a parallel
     mechanism that could disagree with the tabs about the same project.
     """
-    cutoff = int((time.time() - days * 86400) * 1000)
     sessions = _live_sessions(live_sessions)
     if live_sessions is None:
         # Additive, and never a duplicate: a container session's id cannot also
@@ -606,16 +609,14 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     # session is". That distinction is what status_for reports honestly.
     cwds = {p.path for p in panes if is_agent_command(p.command) and p.path}
 
+    # No age limit: a question nobody answered is still waiting after 14 days,
+    # and the window that used to drop it hid the only real one. Newest first,
+    # because the page is read top-down and current work is what you want at
+    # hand.
     waiting_rows = conn.execute(
         f"SELECT {_COLUMNS} FROM sessions "
-        f"WHERE kind = 'main' AND outcome IN (?, ?) AND ended >= ? "
-        # Questions first — one that actually asked you something outranks one
-        # merely idle — then newest first inside each group. The page is read
-        # top-down and current work is what you want at hand. Oldest-first was
-        # the earlier rule, to keep old rows from rotting unseen at the bottom;
-        # they are still listed, just below the live ones rather than above them.
-        f"ORDER BY CASE outcome WHEN 'awaiting-question' THEN 0 ELSE 1 END, ended DESC",
-        (*_WAITING, cutoff),
+        f"WHERE kind = 'main' AND outcome = ? ORDER BY ended DESC",
+        (_WAITING,),
     ).fetchall()
     waiting = _as_rows(waiting_rows, panes, running, live_ids, cwds)
 

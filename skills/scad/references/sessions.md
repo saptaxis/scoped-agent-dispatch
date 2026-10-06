@@ -42,7 +42,6 @@ a `--rebuild` has dropped every row.
 scad view                            # render and open ~/.scad/view.html
 scad view --no-open                  # render only
 scad view --no-refresh               # skip the index pass
-scad view --days N                   # how far back the waiting list looks
 ```
 
 Refreshes the index by default, because nothing else does — there is no timer,
