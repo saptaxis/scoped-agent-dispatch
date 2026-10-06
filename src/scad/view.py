@@ -28,7 +28,6 @@ from scad.live import (
     is_agent_command,
     newest_by_session,
     other_holders,
-    pane_occupants,
     pid_panes,
 )
 
@@ -75,124 +74,6 @@ def _goto(target: str) -> str:
     return f"tmux select-window -t {window} \\; select-pane -t {target}"
 
 
-def live_pane_rows(conn, panes: list[TmuxPane],
-                   sessions: list[ClaudeSession] | None = None,
-                   records: list[dict] | None = None) -> list[dict]:
-    """One row per live agent pane — the panes themselves, not sessions.
-
-    This is the section that answers "what have I got open right now". It is
-    pane-first because that is what exists: `list-panes -a` spans every tmux
-    session, and a single window routinely holds several agents (three in
-    `main:3` here). A claude pane is matched to its session by process tree
-    and a scad-launched pane by its launch record, both exact; a pane neither
-    can name gets the newest session in its directory, labelled as the guess
-    it is.
-    """
-    # Two proofs before the guess. The registry ties a claude pid to a
-    # session id, and the pane's process tree ties the pid to the pane; a
-    # launch record names the pane outright, for any family. Only a pane
-    # neither can name falls through to "the newest session in this cwd",
-    # which handed one session to two panes when they shared a directory.
-    proven = pane_occupants(panes, sessions or [])
-    if records is None:
-        from scad.launch import launch_records   # launch imports this module
-        records = launch_records()
-    from scad.launch import pane_target
-    # Keyed by where each recorded pane is now, not where it was at launch:
-    # a pane keeps its id and loses its index path when a window is moved.
-    recorded = {}
-    for r in records:
-        if not r.get("session_id"):
-            continue
-        where = pane_target(r)
-        if where:
-            recorded[where] = r["session_id"]
-    rows = []
-    for pane in panes:
-        if not is_agent_command(pane.command):
-            continue
-        # The pane names its own agent, except Claude, which re-execs to its
-        # version string. Anything-else-is-claude was wrong the moment a third
-        # family existed: a kimi pane was labelled claude, and then matched
-        # against claude sessions for its occupant.
-        agent = pane.command if pane.command in ("codex", "kimi") else "claude"
-        exact = (proven[pane.target].session_id if pane.target in proven
-                 else recorded.get(pane.target))
-        if exact:
-            occupant = "proven"
-            guess = conn.execute(
-                "SELECT id, project, name, title, outcome, ended FROM sessions "
-                "WHERE id = ?", (exact,),
-            ).fetchone()
-            if guess is None:
-                # Known to be running here; the index has not caught up. The
-                # id is still the fact, so it is still named.
-                guess = {"id": exact, "project": None, "name": None,
-                         "title": None, "outcome": None, "ended": None}
-        else:
-            occupant = "guessed"
-            # Match the pane's own agent: a codex pane must not be offered a
-            # claude session as its likely occupant, which the unfiltered
-            # query did.
-            guess = conn.execute(
-                "SELECT id, project, name, title, outcome, ended FROM sessions "
-                "WHERE cwd = ? AND kind = 'main' AND agent = ? ORDER BY ended DESC LIMIT 1",
-                (pane.path, agent),
-            ).fetchone()
-        rows.append({
-            "occupant": occupant if guess else None,
-            "target": pane.target,
-            "tmux_session": pane.session,
-            "window": pane.window,
-            "cwd": pane.path,
-            "agent": agent,
-            "version": pane.command,
-            "project": (guess["project"] if guess else None),
-            "likely_id": (guess["id"] if guess else None),
-            "likely_name": (guess["name"] if guess else None),
-            "likely_title": (guess["title"] if guess else None),
-            "likely_outcome": (guess["outcome"] if guess else None),
-            "last_activity": (guess["ended"] if guess else None),
-            "goto": _goto(pane.target),
-        })
-    return rows
-
-
-def group_panes(rows: list[dict]) -> list[dict]:
-    """Nest live panes the way tmux holds them: session -> window -> panes.
-
-    This mirrors how the work is actually laid out — tmuxinator opens a window
-    per project — so the page reads like the screen rather than like a table dump.
-
-    Everything is ordered by **last message time**, most recent first: panes
-    within a window, windows within a session, sessions against each other. What
-    you touched last is what you are most likely coming back to; tmux's own index
-    order says nothing about that. Panes whose directory has no indexed session
-    sort last — unknown is not recent.
-    """
-    sessions: dict[str, dict[str, list[dict]]] = {}
-    for row in rows:
-        windows = sessions.setdefault(row["tmux_session"], {})
-        key = f'{row["target"].split(".")[0]}|{row.get("window") or ""}'
-        windows.setdefault(key, []).append(row)
-    def recency(rows):
-        return max((r.get("last_activity") or 0) for r in rows)
-
-    grouped = []
-    for name, windows in sessions.items():
-        win_rows = [
-            {"label": key.split("|", 1)[1], "target": key.split("|", 1)[0],
-             "panes": sorted(panes, key=lambda r: r.get("last_activity") or 0, reverse=True),
-             "last_activity": recency(panes)}
-            for key, panes in windows.items()
-        ]
-        win_rows.sort(key=lambda w: w["last_activity"], reverse=True)
-        grouped.append({"session": name, "windows": win_rows,
-                        "last_activity": max(w["last_activity"] for w in win_rows)})
-    grouped.sort(key=lambda g: g["last_activity"], reverse=True)
-    return grouped
-
-
 def split_waiting(waiting: list[dict], cwds: set[str]) -> tuple[list[dict], list[dict]]:
     """Split the waiting list into "there is a pane open for it" and "gone".
 
@@ -203,30 +84,6 @@ def split_waiting(waiting: list[dict], cwds: set[str]) -> tuple[list[dict], list
     at_hand = [r for r in waiting if r.get("cwd") and r["cwd"] in cwds]
     closed = [r for r in waiting if not (r.get("cwd") and r["cwd"] in cwds)]
     return at_hand, closed
-
-
-def group_notes(notes: list[dict]) -> list[dict]:
-    """Notes grouped by the session that wrote them, newest session first.
-
-    A note only means something beside its siblings — the `relation` edges
-    (continue / shift / branch / return) describe a session's shape, and a lone
-    note out of order says nothing about it.
-    """
-    sessions: dict[str, list[dict]] = {}
-    for note in notes:
-        sessions.setdefault(note["session_id"], []).append(note)
-    groups = [
-        {"session_id": sid,
-         "label": rows[0].get("name") or sid[:12],
-         "project": rows[0].get("project"),
-         "agent": rows[0].get("agent"),
-         "cwd": rows[0].get("cwd"),
-         "rows": sorted(rows, key=lambda r: r.get("idx") or 0),
-         "last_activity": max((r.get("ts") or 0) for r in rows)}
-        for sid, rows in sessions.items()
-    ]
-    groups.sort(key=lambda g: g["last_activity"], reverse=True)
-    return groups
 
 
 def group_by_project(rows: list[dict]) -> list[dict]:
@@ -833,14 +690,6 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
             row["n_notes"] = note_counts.get(row.get("id"), 0)
             row["notes"] = by_session.get(row.get("id"), [])
 
-    pane_rows = live_pane_rows(conn, panes, sessions)
-    # A pane row is a pane, not a session — but it names the session it most
-    # likely holds, and that is the row a reader is looking at when they ask
-    # "what is this one". Same context, fetched once per distinct session.
-    for row in pane_rows:
-        if row.get("likely_id"):
-            row["first_text"] = _first_text(conn, row["likely_id"])
-            row["last_text"] = _last_text(conn, row["likely_id"])
     at_hand, closed_waiting = split_waiting(waiting, cwds)
 
     return {
@@ -850,21 +699,9 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "waiting_at_hand": at_hand,
         "waiting_closed": closed_waiting,
         "notes": notes,
-        # Unrendered since notes moved onto their rows (0.6.0), like
-        # `grouped_panes` above and for the same reason. Kept so `group_notes`
-        # is not dead code with a test harness attached; the backlog carries
-        # the removal of both.
-        "grouped_notes": group_notes(notes),
         "live_now": open_now,
-        # Unrendered since the two live sections became one (0.6.0): `live_rows`
-        # resolves a pane to its session by process tree and by launch record,
-        # which is what `live_pane_rows` and `group_panes` were for. Kept only
-        # so neither becomes dead code with a test harness attached; the backlog
-        # carries the removal, which cascades to `pane_occupants`.
-        "grouped_panes": group_panes(pane_rows),
         "grouped_closed": group_by_project(closed_waiting),
         "live": live,
-        "panes": pane_rows,
         "all": all_rows,
         "generated": int(time.time() * 1000),
     }

@@ -299,7 +299,7 @@ class TestRender:
                                          "command": "cd /repo && claude --resume S1", "note": ""}}],
                 "live": [], "all": [], "generated": 1785000000000,
                 "waiting_at_hand": [], "waiting_closed": [],
-                "grouped_panes": [], "grouped_closed": []}
+                "grouped_closed": []}
 
     def test_is_one_self_contained_document(self):
         html = render(self._data())
@@ -348,7 +348,7 @@ class TestRender:
     def test_empty_data_still_renders(self):
         html = render({"waiting": [], "live": [], "all": [], "generated": 1,
                        "waiting_at_hand": [], "waiting_closed": [],
-                       "grouped_panes": [], "grouped_closed": []})
+                       "grouped_closed": []})
         assert "</html>" in html
         assert "Nothing waiting" in html
 
@@ -505,133 +505,7 @@ class TestTheOpenPaneIsMetadata:
         assert "select-pane -t main:1.0" in self._html(tmp_path)
 
 
-class TestLivePanes:
-    def test_a_codex_pane_is_not_guessed_a_claude_session(self, tmp_path):
-        """Panes share cwds; without filtering by agent, a codex pane was offered
-        the claude session sitting in the same directory."""
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "CLAUDE1", "awaiting-user", cwd="/repo", agent="claude")
-        _store(conn, "CODEX1", "awaiting-user", cwd="/repo", agent="codex")
-        panes = [TmuxPane("main:3.1", "/repo", "codex", window="scad")]
-        rows = gather(conn, panes, set())["panes"]
-        assert rows[0]["agent"] == "codex"
-        assert rows[0]["likely_id"] == "CODEX1"
-
-    def test_every_agent_pane_gets_a_row_even_sharing_a_cwd(self, tmp_path):
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", cwd="/repo")
-        panes = [TmuxPane("main:3.0", "/repo", "2.1.205", window="scad"),
-                 TmuxPane("main:3.2", "/repo", "2.1.220", window="scad")]
-        assert [r["target"] for r in gather(conn, panes, set())["panes"]] == ["main:3.0", "main:3.2"]
-
-    def test_two_claude_panes_in_one_cwd_are_told_apart_by_process(self, tmp_path, monkeypatch):
-        """Reported 2026-09-15: window main:5 held two claude panes in
-        traitful-docs and the page showed the same session twice, because the
-        occupant was guessed by cwd and both panes got the newest. The
-        registry names each pane's session by pid; that is a proof."""
-        from scad.live import ClaudeSession
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "OLD", "awaiting-user", cwd="/docs", ended_days_ago=1)
-        _store(conn, "NEW", "awaiting-user", cwd="/docs")
-        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=100),
-                 TmuxPane("main:5.1", "/docs", "2.1.270", window="docs", pid=200)]
-        live = [ClaudeSession("OLD", 150, cwd="/docs"), ClaudeSession("NEW", 250, cwd="/docs")]
-        monkeypatch.setattr("scad.live._process_parents", lambda: {150: 100, 250: 200})
-        rows = gather(conn, panes, set(), live_sessions=live)["panes"]
-        by = {r["target"]: r for r in rows}
-        assert by["main:5.0"]["likely_id"] == "OLD"
-        assert by["main:5.1"]["likely_id"] == "NEW"
-        assert {r["occupant"] for r in rows} == {"proven"}
-
-    def test_a_proven_session_the_index_has_not_seen_is_still_named(self, tmp_path, monkeypatch):
-        """A launch is indexed as a skeleton and a hand-started session not at
-        all until a reindex; the registry knows the id regardless."""
-        from scad.live import ClaudeSession
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "NEW", "awaiting-user", cwd="/docs")
-        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=100)]
-        live = [ClaudeSession("UNSEEN", 150, cwd="/docs")]
-        monkeypatch.setattr("scad.live._process_parents", lambda: {150: 100})
-        row = gather(conn, panes, set(), live_sessions=live)["panes"][0]
-        assert row["likely_id"] == "UNSEEN"
-        assert row["likely_name"] is None
-        assert row["occupant"] == "proven"
-
-    def test_without_a_process_match_the_cwd_guess_is_marked_as_one(self, tmp_path, monkeypatch):
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "NEW", "awaiting-user", cwd="/docs")
-        panes = [TmuxPane("main:5.0", "/docs", "2.1.270", window="docs", pid=100)]
-        monkeypatch.setattr("scad.live._process_parents", lambda: {})
-        row = gather(conn, panes, set(), live_sessions=[])["panes"][0]
-        assert row["likely_id"] == "NEW"
-        assert row["occupant"] == "guessed"
-
-    def test_a_launch_record_naming_the_pane_is_a_proof_for_any_family(self, tmp_path, monkeypatch):
-        from scad.launch import write_record
-        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "CX-NEW", "awaiting-user", cwd="/repo", agent="codex")
-        _store(conn, "CX-MINE", "awaiting-user", cwd="/repo", agent="codex", ended_days_ago=2)
-        write_record({"agent": "codex", "session_id": "CX-MINE", "cwd": "/repo",
-                      "tmux": "main:7.0", "started": "2026-09-15T10:00:00Z",
-                      "resume": "cd /repo && codex resume CX-MINE", "provenance": "tui-native"})
-        panes = [TmuxPane("main:7.0", "/repo", "codex", window="w", pid=300)]
-        monkeypatch.setattr("scad.live._process_parents", lambda: {})
-        row = gather(conn, panes, set(), live_sessions=[])["panes"][0]
-        assert row["likely_id"] == "CX-MINE"
-        assert row["occupant"] == "proven"
-
-    def test_non_agent_panes_are_excluded(self, tmp_path):
-        conn = connect(tmp_path / "i.sqlite")
-        panes = [TmuxPane("main:2.0", "/repo", "zsh", window="docs")]
-        assert gather(conn, panes, set())["panes"] == []
-
-    def test_a_pane_with_no_matching_session_still_appears(self, tmp_path):
-        conn = connect(tmp_path / "i.sqlite")
-        panes = [TmuxPane("main:9.0", "/never/indexed", "2.1.219", window="new")]
-        rows = gather(conn, panes, set())["panes"]
-        assert rows[0]["likely_id"] is None
-        assert rows[0]["goto"].startswith("tmux select-window")
-
-    def test_window_name_and_tmux_session_are_carried(self, tmp_path):
-        conn = connect(tmp_path / "i.sqlite")
-        panes = [TmuxPane("main2:1.0", "/repo", "2.1.219", window="orglens")]
-        row = gather(conn, panes, set())["panes"][0]
-        assert row["window"] == "orglens"
-        assert row["tmux_session"] == "main2"
-
-
 class TestGrouping:
-    def test_panes_nest_session_then_window(self, tmp_path):
-        conn = connect(tmp_path / "i.sqlite")
-        panes = [TmuxPane("main:3.0", "/a", "2.1.205", window="scad"),
-                 TmuxPane("main:3.1", "/a", "codex", window="scad"),
-                 TmuxPane("main2:1.0", "/b", "2.1.219", window="other")]
-        groups = gather(conn, panes, set())["grouped_panes"]
-        assert {g["session"] for g in groups} == {"main", "main2"}
-        main = next(g for g in groups if g["session"] == "main")
-        assert len(main["windows"]) == 1
-        assert main["windows"][0]["label"] == "scad"
-        assert len(main["windows"][0]["panes"]) == 2
-
-    def test_ordered_by_last_message_not_tmux_index(self, tmp_path):
-        """What you touched last is what you are coming back to."""
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "OLD", "awaiting-user", ended_days_ago=9, cwd="/old")
-        _store(conn, "NEW", "awaiting-user", ended_days_ago=1, cwd="/new")
-        panes = [TmuxPane("main:1.0", "/old", "2.1.205", window="stale"),
-                 TmuxPane("main:9.0", "/new", "2.1.205", window="fresh")]
-        windows = gather(conn, panes, set())["grouped_panes"][0]["windows"]
-        assert [w["label"] for w in windows] == ["fresh", "stale"]
-
-    def test_a_pane_with_no_known_session_sorts_last(self, tmp_path):
-        conn = connect(tmp_path / "i.sqlite")
-        _store(conn, "S1", "awaiting-user", ended_days_ago=3, cwd="/known")
-        panes = [TmuxPane("main:1.0", "/unknown", "2.1.205", window="new"),
-                 TmuxPane("main:2.0", "/known", "2.1.205", window="known")]
-        windows = gather(conn, panes, set())["grouped_panes"][0]["windows"]
-        assert [w["label"] for w in windows] == ["known", "new"]
-
     def test_waiting_splits_into_at_hand_and_closed(self, tmp_path):
         """An open pane means switch windows; nothing open means resume."""
         conn = connect(tmp_path / "i.sqlite")
@@ -871,11 +745,10 @@ class TestNotesSection:
         conn.commit()
         return conn
 
-    def test_notes_appear_grouped_under_their_session(self, tmp_path):
+    def test_notes_are_gathered(self, tmp_path):
         conn = self._with_note(tmp_path)
         data = gather(conn, [], set())
-        assert len(data["notes"]) == 1
-        assert data["grouped_notes"][0]["session_id"] == "S1"
+        assert [n["session_id"] for n in data["notes"]] == ["S1"]
 
     def test_a_notes_title_and_kind_reach_the_page(self, tmp_path):
         """Notes moved onto their session's row (2026-09-27) and the row carries
@@ -898,15 +771,6 @@ class TestNotesSection:
         conn = self._with_note(tmp_path, parent="earlier-topic")
         html = render(gather(conn, [], set()))
         assert "earlier-topic" in html and "branch" in html
-
-    def test_notes_within_a_session_keep_write_order(self, tmp_path):
-        """relation edges only mean anything in sequence."""
-        conn = self._with_note(tmp_path)
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
-                     "VALUES ('S1', 1, 2, 'later', 'second', '/n/S1.jsonl')")
-        conn.commit()
-        rows = gather(conn, [], set())["grouped_notes"][0]["rows"]
-        assert [r["idx"] for r in rows] == [0, 1]
 
     def test_malformed_tags_json_does_not_break_the_page(self, tmp_path):
         conn = self._with_note(tmp_path, tags="not json")
@@ -1539,7 +1403,7 @@ class TestOneLiveSection:
     """`Open now` and `Agent panes` were mostly the same rows sourced two ways:
     the registry gives exact identity and no location, tmux gives exact location
     and a guessed occupant. Approved in design 2026-08-02, blocked until the
-    pane could be a fact rather than a guess — which `pane_occupants` made true
+    pane could be a fact rather than a guess — which process-tree matching made true
     in 0.6.0. One row per live session, plus any agent pane that cannot be
     resolved to one, saying so."""
 

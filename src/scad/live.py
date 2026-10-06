@@ -589,26 +589,3 @@ def other_holders(sessions: list[ClaudeSession]) -> dict[str, list[ClaudeSession
     return {sid: sorted(held, key=lambda s: s.updated_at)[:-1]
             for sid, held in by_id.items() if len(held) > 1}
 
-
-def pane_occupants(panes: list[TmuxPane], sessions: list[ClaudeSession],
-                   parents: dict[int, int] | None = None) -> dict[str, ClaudeSession]:
-    """Which live claude session is inside which pane: pane target -> session.
-
-    A proof, not a guess. The registry names a session by the pid of the
-    process holding it; tmux names a pane by the pid of its shell; the agent
-    is a descendant of that shell. Matching on cwd instead hands the same
-    session to every agent pane in a directory, which is how one session came
-    to be shown twice.
-
-    One `ps` for the whole machine. A pane without a pid (an older fixture, or
-    a tmux that could not say) or whose tree holds no registered pid is absent
-    from the result rather than guessed at.
-    """
-    if not sessions:
-        return {}
-    agent_panes_ = [p for p in panes if is_agent_command(p.command)]
-    by_pid = {s.pid: s for s in sessions}
-    found: dict[str, ClaudeSession] = {}
-    for pid, target in pid_panes(agent_panes_, by_pid, parents).items():
-        found.setdefault(target, by_pid[pid])
-    return found
