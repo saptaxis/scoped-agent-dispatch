@@ -1,6 +1,7 @@
 """CLI tests."""
 
 import json
+from datetime import datetime
 import os
 import re
 
@@ -4406,3 +4407,45 @@ class TestTheExportFollowsAChain:
         row = {r["id"]: r for r in json.loads(result.stdout)}["S1"]
         assert row["cwd"] == str(dest / "sub")
         assert row["cwd_recorded"] == str(old / "sub")
+
+
+class TestIndexStatus:
+    """`scad index status`: when the index was last refreshed, without
+    refreshing it. For a reader that wants to warn rather than wait."""
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return tmp_path / ".scad"
+
+    def test_json_after_a_reindex(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex", "--no-archive"])
+        result = runner.invoke(main, ["index", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.output)
+        assert set(status) == {"indexed_at", "age_s", "sessions", "memos", "schema_version"}
+        assert status["age_s"] >= 0
+        assert datetime.fromisoformat(status["indexed_at"]).tzinfo is not None
+
+    def test_a_never_indexed_index_says_so(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["index", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.output)
+        assert status["indexed_at"] is None and status["age_s"] is None
+        assert "never" in runner.invoke(main, ["index", "status"]).output
+
+    def test_it_does_not_index(self, runner, tmp_path, monkeypatch):
+        home = self._home(tmp_path, monkeypatch)
+        shard = home / "memos" / "claude"
+        shard.mkdir(parents=True)
+        (shard / "S1.jsonl").write_text('{"title": "t"}\n')
+        status = json.loads(runner.invoke(main, ["index", "status", "--json"]).output)
+        assert status["memos"] == 0 and status["indexed_at"] is None
+
+    def test_the_text_form_says_how_long_ago(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex", "--no-archive"])
+        out = runner.invoke(main, ["index", "status"]).output
+        assert "last indexed" in out and "ago" in out and "sessions" in out

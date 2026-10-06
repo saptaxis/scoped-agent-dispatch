@@ -9,8 +9,11 @@ and `--rebuild` refuses when any raw is missing.
 """
 
 import collections
+import contextlib
+import fcntl
 import json
 import platform
+import time
 import sqlite3
 from pathlib import Path
 
@@ -191,8 +194,12 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     # rollback journal a writer blocks every reader for the whole write, and
     # one external view stalled 600s behind a reindex. WAL lets readers see
     # the last committed state while the write is in progress. Persistent:
-    # set once in the file, honoured by every later connection.
-    conn.execute("PRAGMA journal_mode=WAL")
+    # set once in the file, honoured by every later connection. Switching
+    # needs the file to itself, so it is done only when the mode is not WAL
+    # yet: asked on every connect, it failed "database is locked" whenever a
+    # second process opened the index at the same moment.
+    if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _migrate(conn)
     conn.execute(
@@ -663,6 +670,17 @@ def _fork_of(path: Path, held: str | None) -> int | None:
 
 def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
             archive_first: bool = False) -> dict[str, int]:
+    """Scan the archive into the index, holding `index_lock` throughout.
+
+    With no connection given, the lock is taken before the index is opened, so
+    two first-ever reindexes do not race to create it.
+    """
+    with index_lock(conn if conn is not None else index_path()):
+        conn = conn or connect()
+        return _reindex(conn, rebuild=rebuild, force=force, archive_first=archive_first)
+
+
+def _reindex(conn, *, rebuild: bool, force: bool, archive_first: bool) -> dict[str, int]:
     """Scan the archive into the index.
 
     Incremental by default: a file whose size already equals the session's
@@ -710,6 +728,7 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
 
     if not root.is_dir():
         stats.update(index_memos(conn))   # a memo does not need an archive to exist
+        _stamp_indexed(conn)
         return stats
 
     job_states: list[JobStateRecord] = []
@@ -831,11 +850,88 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
     # Last, for the same reason: a memo only inserts a session row when the scan
     # has already had its chance to produce a better one.
     stats.update(index_memos(conn))
+    _stamp_indexed(conn)
 
     # A Counter, not a plain dict: callers ask for counts that a quiet pass never
     # incremented ("how many sessions?" after a no-op scan), and 0 is the honest
     # answer there rather than a KeyError.
     return stats
+
+
+LOCK_TIMEOUT_S = 300
+
+
+@contextlib.contextmanager
+def index_lock(conn, *, timeout_s: float = LOCK_TIMEOUT_S):
+    """Hold the index exclusively for one writer that appends.
+
+    `conn` is an open index, or the path of one not yet opened.
+
+    Two reindexes at once (`orglens view` and `scad view` both refresh before
+    they render) each read a session's offset as 0 before the other commits,
+    and both append every turn: measured, 21 of 60 sessions doubled. SQLite
+    serialises the writes but not the read-then-append, so the lock is on
+    the whole pass, in a file beside the index. A second holder waits, then
+    finds nothing new. The lock is an flock, so a process that dies drops it.
+    """
+    if isinstance(conn, (str, Path)):
+        path = Path(str(conn) + ".lock")
+    else:
+        db = conn.execute("PRAGMA database_list").fetchone()[2]
+        path = Path(db + ".lock") if db else None
+    if path is None:                 # an in-memory index has no one to share with
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)   # a first reindex has no home yet
+    with open(path, "a") as fh:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise click.ClickException(
+                        f"another reindex has held {path.name} for {timeout_s:.0f}s; "
+                        "if none is running, delete it and try again.") from None
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _stamp_indexed(conn) -> None:
+    """Record that a whole pass finished, and when, in epoch ms.
+
+    Only `reindex` stamps. The write path indexes the one memo file it just
+    appended, which leaves every trace exactly as stale as before, so it must
+    not make the index look fresh.
+    """
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('indexed_at', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(int(time.time() * 1000)),))
+    conn.commit()
+
+
+def index_status(conn) -> dict:
+    """When the index was last refreshed, and what it holds. Reads, never writes.
+
+    Nothing refreshes the index on a timer: `scad view` and `orglens view` run a
+    pass before they render, and everything else reads what is there. So a
+    reader that does not refresh needs this to tell a quiet session from a
+    stale index. `indexed_at` is None for an index no pass has finished on.
+    """
+    meta = dict(conn.execute(
+        "SELECT key, value FROM meta WHERE key IN ('indexed_at', 'schema_version')"
+    ).fetchall())
+    return {
+        "indexed_at": int(meta["indexed_at"]) if meta.get("indexed_at") else None,
+        "sessions": conn.execute("SELECT count(*) FROM sessions").fetchone()[0],
+        "memos": conn.execute("SELECT count(*) FROM memos").fetchone()[0],
+        "schema_version": int(meta.get("schema_version") or SCHEMA_VERSION),
+    }
 
 
 _FTS_SCHEMA = """

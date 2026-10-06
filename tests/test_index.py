@@ -1,6 +1,8 @@
 """Tests for the session index."""
 
+import os
 import sqlite3
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -1675,3 +1677,109 @@ class TestMemoBodySearch:
     def test_hits_do_not_carry_the_body(self, noted):
         conn = self._indexed(noted, text="the cwd drift came from a symlink")
         assert "text" not in search_memos(conn, "cwd drift")[0]
+
+
+# --- when the index was last refreshed ----------------------------------------
+
+from scad.index import index_memo_file, index_status  # noqa: E402
+
+
+class TestIndexedAt:
+    """Nothing refreshes the index on a timer, so a reader cannot tell a quiet
+    session from a stale index unless the index says when it was last read.
+    Asked for by orglens, whose resume once went to a two-month-old session."""
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        return connect(tmp_path / "i.sqlite")
+
+    def test_a_fresh_index_has_never_been_refreshed(self, tmp_path, monkeypatch):
+        assert index_status(self._home(tmp_path, monkeypatch))["indexed_at"] is None
+
+    def test_a_reindex_records_when_it_finished(self, tmp_path, monkeypatch):
+        conn = self._home(tmp_path, monkeypatch)
+        arc_write(tmp_path / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        before = int(time.time() * 1000)
+        reindex(conn)
+        at = index_status(conn)["indexed_at"]
+        assert before <= at <= int(time.time() * 1000)
+
+    def test_a_reindex_with_no_archive_still_records_it(self, tmp_path, monkeypatch):
+        conn = self._home(tmp_path, monkeypatch)
+        reindex(conn)
+        assert index_status(conn)["indexed_at"] is not None
+
+    def test_writing_one_memo_is_not_a_refresh(self, tmp_path, monkeypatch):
+        """`session memo` indexes the file it wrote, and nothing else: the
+        index is no fresher for it, so the time must not move."""
+        conn = self._home(tmp_path, monkeypatch)
+        p = append_memo(NOTE, session_id="S1")
+        index_memo_file(conn, p, "claude")
+        assert index_status(conn)["indexed_at"] is None
+
+    def test_status_counts_sessions_and_memos(self, tmp_path, monkeypatch):
+        conn = self._home(tmp_path, monkeypatch)
+        arc_write(tmp_path / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        append_memo(NOTE, session_id="S1")
+        reindex(conn)
+        status = index_status(conn)
+        assert (status["sessions"], status["memos"]) == (1, 1)
+        assert status["schema_version"] == SCHEMA_VERSION
+
+
+class TestTwoReindexesAtOnce:
+    """`orglens view` and `scad view` both refresh before they render, so two
+    reindexes can run at once against one index. Both must finish, and the
+    index must come out whole: every session and memo once, nothing doubled."""
+
+    def test_both_finish_and_nothing_is_doubled(self, tmp_path):
+        import subprocess
+        import sys
+        arc, home = tmp_path / "arc", tmp_path / ".scad"
+        for i in range(60):
+            sid = f"S{i}"
+            arc_write(arc, f"claude/projects/-repo/{sid}.jsonl", [
+                {**MAIN[0], "sessionId": sid,
+                 "message": {"role": "assistant",
+                             "content": [{"type": "text", "text": f"turn {n}"}]}}
+                for n in range(40)])
+        env = {**os.environ, "SCAD_ARCHIVE": str(arc), "SCAD_HOME": str(home)}
+        for i in range(30):
+            subprocess.run([sys.executable, "-c",
+                            "import json,sys; from scad.memos import append_memo; "
+                            f"append_memo({{'title': 't{i}'}}, session_id='S{i}')"],
+                           env=env, check=True)
+        code = "from scad.index import reindex; reindex()"
+        procs = [subprocess.Popen([sys.executable, "-c", code], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for _ in range(2)]
+        results = [p.communicate(timeout=120) + (p.returncode,) for p in procs]
+        for out, err, rc in results:
+            assert rc == 0, err
+
+        conn = connect(home / "index.sqlite")
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 60
+        assert conn.execute("SELECT count(*) FROM turns").fetchone()[0] == 60 * 40
+        assert conn.execute("SELECT count(*) FROM memos").fetchone()[0] == 30
+        assert index_status(conn)["indexed_at"] is not None
+
+
+class TestTheIndexLock:
+    def test_a_second_holder_waits_and_then_times_out_with_a_message(self, tmp_path):
+        from scad.index import index_lock
+        conn = connect(tmp_path / "i.sqlite")
+        with index_lock(conn):
+            with pytest.raises(click.ClickException) as exc:
+                with index_lock(connect(tmp_path / "i.sqlite"), timeout_s=0.3):
+                    pass
+        assert "another reindex" in str(exc.value.message)
+
+    def test_the_lock_is_released_after_use(self, tmp_path):
+        from scad.index import index_lock
+        conn = connect(tmp_path / "i.sqlite")
+        with index_lock(conn):
+            pass
+        with index_lock(conn, timeout_s=0.3):
+            pass

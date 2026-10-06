@@ -88,6 +88,7 @@ from scad.index import (
     MEMO_RELATION_SQL,
     connect as index_connect,
     ensure_launched_session,
+    index_lock,
     index_memo_file,
     known_projects,
     reindex as run_reindex,
@@ -2071,6 +2072,45 @@ def reindex(rebuild, force, no_archive):
             click.echo(f"[scad]   {key}: {stats[key]}")
 
 
+@main.group("index")
+def index_group():
+    """The session index itself: how fresh it is."""
+    pass
+
+
+@index_group.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
+def index_status_cmd(as_json):
+    """When the index was last refreshed, without refreshing it.
+
+    Nothing refreshes the index on a timer; `scad view` runs a pass before it
+    renders, and everything else reads what is there. This is for a reader
+    that would rather warn about a stale index than pay for a reindex.
+    """
+    from scad.index import index_status
+    from scad.view import _ago
+    status = index_status(index_connect())
+    at = status["indexed_at"]
+    out = {
+        "indexed_at": (datetime.fromtimestamp(at / 1000).astimezone().isoformat(timespec="seconds")
+                       if at else None),
+        "age_s": max(0, int(time.time() - at / 1000)) if at else None,
+        "sessions": status["sessions"],
+        "memos": status["memos"],
+        "schema_version": status["schema_version"],
+    }
+    if as_json:
+        click.echo(json.dumps(out))
+        return
+    if not at:
+        click.echo(f"[scad] never indexed; {out['sessions']} sessions, {out['memos']} memos. "
+                   "Run: scad reindex")
+        return
+    when = datetime.fromtimestamp(at / 1000).strftime("%Y-%m-%d %H:%M")
+    click.echo(f"[scad] last indexed {when} ({_ago(at) or '0m ago'}); "
+               f"{out['sessions']} sessions, {out['memos']} memos")
+
+
 @session.command("ls")
 @click.option("--project", default=None, help="Filter by resolved project.")
 @click.option("--agent", default=None, help="Filter by agent (claude, codex, kimi).")
@@ -2605,7 +2645,11 @@ def session_memo(session_id, current, agent):
     # project, so checking afterwards would find the name known because we had
     # just written it and the warning would never fire.
     try:
-        index_memo_file(index_connect(), path, agent)
+        conn = index_connect()
+        # The same lock as reindex: this appends with the same read-then-insert,
+        # and a reindex running beside it would otherwise append these rows too.
+        with index_lock(conn, timeout_s=10):
+            index_memo_file(conn, path, agent)
     except Exception as exc:
         # Never fatal. The file is truth and `reindex` will pick it up; a locked
         # or absent index must not turn a successful capture into an error.

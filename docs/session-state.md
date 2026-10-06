@@ -53,6 +53,19 @@ second.
 raw file is no longer in the archive, because those turns are then the only
 surviving copy. `--force` overrides that and should be treated as destructive.
 
+Nothing reindexes on a timer. `scad view` runs a pass before it renders; every
+other command reads the index as it is. `scad index status` says when a pass
+last finished, without running one:
+
+```bash
+scad index status          # last indexed 2026-10-06 21:14 (7m ago); 1712 sessions, 94 memos
+scad index status --json   # {"indexed_at": "...", "age_s": 412, "sessions": ..., "memos": ..., "schema_version": 3}
+```
+
+One reindex runs at a time. A second waits on a lock beside the index
+(`index.sqlite.lock`) and then finds nothing new, so two pages refreshing at
+once do not index the same turns twice.
+
 ### Reading and searching
 
 ```bash

@@ -29,6 +29,20 @@ Code's own memory, where "remember that I prefer X" means something else.
 - `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and
   project. The index stores the body; listings still never print it.
 
+- `scad index status [--json]`: when a reindex last finished, and how many sessions and memos
+  the index holds, without running one. Nothing reindexes on a timer, so a reader that does
+  not refresh first can now tell a quiet session from a stale index.
+
+### Fixed
+
+- Two reindexes at once indexed the same turns twice: each read a session's offset before the
+  other committed, and both appended. In a test of 60 sessions, 21 were doubled. A reindex now
+  holds a lock beside the index for the whole pass; a second one waits, then finds nothing new.
+  Writing a memo takes the same lock.
+- Opening the index while another process was creating it failed with "database is locked":
+  every connection switched the journal to WAL, which needs the file to itself. It is switched
+  only when it is not WAL already.
+
 ### Upgrading
 
 On each machine, before any other scad command:
