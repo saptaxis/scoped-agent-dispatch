@@ -1,6 +1,8 @@
 """Tests for the session index."""
 
+import os
 import sqlite3
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -18,7 +20,7 @@ class TestSchema:
         conn = connect(tmp_path / "i.sqlite")
         names = {r[0] for r in conn.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
-        assert {"sessions", "turns", "notes", "meta"} <= names
+        assert {"sessions", "turns", "memos", "meta"} <= names
 
     def test_sessions_columns(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
@@ -28,7 +30,7 @@ class TestSchema:
             "agent", "machine", "scad_run_id", "cwd", "project", "title",
             "git_branch", "started", "ended", "n_turns", "grade", "source",
             "archive_path", "source_mtime", "source_size", "parsed_offset",
-            "notes_offset", "raw_present", "extractor_version",
+            "memos_offset", "raw_present", "extractor_version",
             "outcome", "last_stop_reason", "n_interrupts", "n_tool_denials", "n_errors",
         } <= cols
 
@@ -826,10 +828,10 @@ class TestReindexReadsRenames:
 # --- notes: the tier that is never rederivable --------------------------------
 
 from scad.index import (  # noqa: E402
-    SOURCE_NOTE, append_notes, index_notes, search_notes, session_notes,
+    SOURCE_MEMO, append_memos, index_memos, search_memos, session_memos,
 )
-from scad.notes import append_note  # noqa: E402
-from scad.readers import read_notes  # noqa: E402
+from scad.memos import append_memo  # noqa: E402
+from scad.readers import read_memos  # noqa: E402
 
 
 @pytest.fixture
@@ -849,32 +851,32 @@ class TestAppendNotes:
     def test_rows_land_with_the_note_path(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
-        n = append_notes(conn, "S1", read_notes(p)[0], str(p))
+        p = append_memo(NOTE, session_id="S1")
+        n = append_memos(conn, "S1", read_memos(p)[0], str(p))
         assert n == 1
-        row = conn.execute("SELECT * FROM notes").fetchone()
+        row = conn.execute("SELECT * FROM memos").fetchone()
         assert row["session_id"] == "S1"
         assert row["idx"] == 0
-        assert row["note_path"] == str(p)
+        assert row["memo_path"] == str(p)
 
     def test_tags_and_entities_are_stored_as_json_arrays(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
-        append_notes(conn, "S1", read_notes(p)[0], str(p))
-        row = conn.execute("SELECT tags, entities FROM notes").fetchone()
+        p = append_memo(NOTE, session_id="S1")
+        append_memos(conn, "S1", read_memos(p)[0], str(p))
+        row = conn.execute("SELECT tags, entities FROM memos").fetchone()
         assert json.loads(row["tags"]) == ["notes", "jsonl"]
         assert json.loads(row["entities"]) == ["session-index.md"]
 
     def test_idx_continues_and_existing_rows_are_untouched(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
-        append_notes(conn, "S1", read_notes(p)[0], str(p))
+        p = append_memo(NOTE, session_id="S1")
+        append_memos(conn, "S1", read_memos(p)[0], str(p))
         end = p.stat().st_size
-        append_note({**NOTE, "title": "second"}, session_id="S1")
-        append_notes(conn, "S1", read_notes(p, end)[0], str(p))
-        rows = conn.execute("SELECT idx, title FROM notes ORDER BY idx").fetchall()
+        append_memo({**NOTE, "title": "second"}, session_id="S1")
+        append_memos(conn, "S1", read_memos(p, end)[0], str(p))
+        rows = conn.execute("SELECT idx, title FROM memos ORDER BY idx").fetchall()
         assert [(r["idx"], r["title"]) for r in rows] == [(0, "first"), (1, "second")]
 
 
@@ -882,32 +884,32 @@ class TestIndexNotes:
     def test_a_note_becomes_a_row_and_advances_notes_offset(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
-        stats = index_notes(conn)
-        assert stats["notes"] == 1
-        assert session_row(conn, "S1")["notes_offset"] == p.stat().st_size
+        p = append_memo(NOTE, session_id="S1")
+        stats = index_memos(conn)
+        assert stats["memos"] == 1
+        assert session_row(conn, "S1")["memos_offset"] == p.stat().st_size
 
     def test_a_second_pass_with_no_new_note_writes_nothing(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        append_note(NOTE, session_id="S1")
-        index_notes(conn)
-        assert index_notes(conn)["notes"] == 0
-        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
+        append_memo(NOTE, session_id="S1")
+        index_memos(conn)
+        assert index_memos(conn)["memos"] == 0
+        assert conn.execute("SELECT count(*) FROM memos").fetchone()[0] == 1
 
     def test_a_note_appended_between_two_passes_produces_exactly_one_new_row(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        append_note(NOTE, session_id="S1")
-        index_notes(conn)
-        append_note({**NOTE, "title": "second"}, session_id="S1")
-        assert index_notes(conn)["notes"] == 1
-        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 2
+        append_memo(NOTE, session_id="S1")
+        index_memos(conn)
+        append_memo({**NOTE, "title": "second"}, session_id="S1")
+        assert index_memos(conn)["memos"] == 1
+        assert conn.execute("SELECT count(*) FROM memos").fetchone()[0] == 2
 
     def test_the_agent_shard_names_the_agent_column(self, noted):
         conn = connect(noted / "i.sqlite")
-        append_note(NOTE, session_id="X1", agent="codex")
-        index_notes(conn)
+        append_memo(NOTE, session_id="X1", agent="codex")
+        index_memos(conn)
         assert session_row(conn, "X1")["agent"] == "codex"
 
     def test_a_note_for_an_unindexed_session_creates_a_skeleton_row(self, noted):
@@ -917,28 +919,28 @@ class TestIndexNotes:
         # unfindable. Same standing history.jsonl and job state already have.
         conn = connect(noted / "i.sqlite")
         with patch("scad.index.resolve_project", return_value="repo"):
-            append_note(NOTE, session_id="GHOST")
-            assert index_notes(conn)["notes"] == 1
+            append_memo(NOTE, session_id="GHOST")
+            assert index_memos(conn)["memos"] == 1
         row = session_row(conn, "GHOST")
         assert row["grade"] == "skeleton"
-        assert row["source"] == SOURCE_NOTE
+        assert row["source"] == SOURCE_MEMO
         assert row["kind"] == "main"
 
     def test_that_row_resolves_its_project_from_cwd_at_write(self, noted):
         # The whole reason cwd_at_write exists: nothing else here knows where
         # this happened once the trace is gone.
         conn = connect(noted / "i.sqlite")
-        append_note(NOTE, session_id="GHOST")
+        append_memo(NOTE, session_id="GHOST")
         with patch("scad.index.resolve_project", return_value="from-the-note") as rp:
-            index_notes(conn)
+            index_memos(conn)
         assert rp.call_args[0][0] == "/repo"
         assert session_row(conn, "GHOST")["project"] == "from-the-note"
 
     def test_an_existing_full_row_is_never_downgraded_by_its_note(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1", title="real session"))
-        append_note(NOTE, session_id="S1")
-        index_notes(conn)
+        append_memo(NOTE, session_id="S1")
+        index_memos(conn)
         row = session_row(conn, "S1")
         assert row["grade"] == GRADE_FULL
         assert row["source"] == "claude-transcript"
@@ -949,22 +951,22 @@ class TestIndexNotes:
         store(conn, rec(id="S1"))
         conn.execute("UPDATE sessions SET raw_present = 0 WHERE id = 'S1'")
         conn.commit()
-        append_note(NOTE, session_id="S1")
-        assert index_notes(conn)["notes"] == 1
+        append_memo(NOTE, session_id="S1")
+        assert index_memos(conn)["memos"] == 1
         assert session_row(conn, "S1")["raw_present"] == 0
 
     def test_an_empty_store_is_not_an_error(self, noted):
         conn = connect(noted / "i.sqlite")
-        assert index_notes(conn)["notes"] == 0
+        assert index_memos(conn)["memos"] == 0
 
     def test_reindex_runs_the_notes_pass(self, noted):
         conn = connect(noted / "i.sqlite")
         arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         stats = reindex(conn)
-        assert stats["notes"] == 1
+        assert stats["memos"] == 1
         assert conn.execute(
-            "SELECT count(*) FROM notes n JOIN sessions s ON s.id = n.session_id "
+            "SELECT count(*) FROM memos n JOIN sessions s ON s.id = n.session_id "
             "WHERE s.id = 'S1'").fetchone()[0] == 1
 
     def test_rebuild_reindexes_notes_from_the_files(self, noted):
@@ -972,18 +974,18 @@ class TestIndexNotes:
         # index is always safe — unlike turns, which is what --rebuild guards.
         conn = connect(noted / "i.sqlite")
         arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
-        append_note(NOTE, session_id="S1")
+        append_memo(NOTE, session_id="S1")
         reindex(conn)
         reindex(conn, rebuild=True)
-        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
+        assert conn.execute("SELECT count(*) FROM memos").fetchone()[0] == 1
 
     def test_session_notes_reads_back_in_order(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        append_note(NOTE, session_id="S1")
-        append_note({**NOTE, "title": "second"}, session_id="S1")
-        index_notes(conn)
-        assert [r["title"] for r in session_notes(conn, "S1")] == ["first", "second"]
+        append_memo(NOTE, session_id="S1")
+        append_memo({**NOTE, "title": "second"}, session_id="S1")
+        index_memos(conn)
+        assert [r["title"] for r in session_memos(conn, "S1")] == ["first", "second"]
 
 
 class TestNotesSchemaMoved:
@@ -991,54 +993,31 @@ class TestNotesSchemaMoved:
 
     def test_the_columns_exist_on_a_fresh_index(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(memos)")}
         assert {"kind", "project"} <= cols
         assert "relation" not in cols     # derived per query, never stored
-
-    def test_an_index_built_before_them_gains_them_on_connect(self, tmp_path):
-        """ALTER, via _ADDED_COLUMNS. Without it the columns would exist only on
-        machines that had never indexed anything."""
-        path = tmp_path / "i.sqlite"
-        older = sqlite3.connect(path)
-        older.execute(
-            "CREATE TABLE notes (session_id TEXT NOT NULL, idx INTEGER NOT NULL, "
-            "ts INTEGER, topic TEXT, relation TEXT, parent TEXT, title TEXT, "
-            "tags TEXT, entities TEXT, note_path TEXT NOT NULL, "
-            "PRIMARY KEY (session_id, idx))")
-        older.execute("INSERT INTO notes (session_id, idx, topic, relation, note_path) "
-                      "VALUES ('OLD', 0, 'a-topic', 'continue', '/n')")
-        older.commit()
-        older.close()
-
-        conn = connect(path)
-        cols = {r[1] for r in conn.execute("PRAGMA table_info(notes)")}
-        assert {"kind", "project"} <= cols
-        row = conn.execute("SELECT kind, project FROM notes").fetchone()
-        # ALTER does not backfill, and the notes pass resumes from notes_offset,
-        # so an existing row stays NULL until something re-reads its file.
-        assert (row["kind"], row["project"]) == (None, None)
 
     def test_an_unbackfilled_row_still_answers_as_the_default_kind(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
         store(conn, rec(id="S1"))
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, topic, memo_path) "
                      "VALUES ('S1', 0, 1, 'a-topic', '/n')")
         conn.commit()
-        assert session_notes(conn, "S1")[0]["kind"] == "info"
+        assert session_memos(conn, "S1")[0]["kind"] == "info"
 
     def test_kind_and_project_are_stored_from_the_record(self, noted):
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note({**NOTE, "kind": "bug", "project": "orglens"}, session_id="S1")
-        append_notes(conn, "S1", read_notes(p)[0], str(p))
-        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        p = append_memo({**NOTE, "kind": "bug", "project": "orglens"}, session_id="S1")
+        append_memos(conn, "S1", read_memos(p)[0], str(p))
+        row = conn.execute("SELECT kind, project FROM memos").fetchone()
         assert (row["kind"], row["project"]) == ("bug", "orglens")
 
 
 class TestBackfillingTheNewColumns:
     """What actually populates `kind` / `project` on notes indexed before them.
 
-    ALTER does not backfill and the notes pass resumes from `notes_offset`, so a
+    ALTER does not backfill and the notes pass resumes from `memos_offset`, so a
     row that predates the columns keeps NULL through any number of ordinary
     reindexes. Only re-reading the files fixes it — and the files are truth and
     are never touched, so both routes are safe.
@@ -1048,33 +1027,33 @@ class TestBackfillingTheNewColumns:
         """An index whose note row is there but predates kind/project."""
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note({**NOTE, "kind": "handoff", "project": "orglens"},
+        p = append_memo({**NOTE, "kind": "handoff", "project": "orglens"},
                         session_id="S1")
-        index_notes(conn)
-        conn.execute("UPDATE notes SET kind = NULL, project = NULL")
+        index_memos(conn)
+        conn.execute("UPDATE memos SET kind = NULL, project = NULL")
         conn.commit()
         return conn, p
 
     def test_an_ordinary_reindex_does_not_fix_it(self, noted):
         conn, _ = self._stale(noted)
-        index_notes(conn)
-        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        index_memos(conn)
+        row = conn.execute("SELECT kind, project FROM memos").fetchone()
         assert (row["kind"], row["project"]) == (None, None)
 
     def test_clearing_the_rows_and_the_offset_repopulates_them(self, noted):
         conn, _ = self._stale(noted)
         conn.executescript(
-            "DELETE FROM notes; UPDATE sessions SET notes_offset = 0;")
+            "DELETE FROM memos; UPDATE sessions SET memos_offset = 0;")
         conn.commit()
-        index_notes(conn)
-        rows = conn.execute("SELECT kind, project FROM notes").fetchall()
+        index_memos(conn)
+        rows = conn.execute("SELECT kind, project FROM memos").fetchall()
         assert [(r["kind"], r["project"]) for r in rows] == [("handoff", "orglens")]
 
     def test_a_rebuild_repopulates_them_too(self, noted):
         conn, _ = self._stale(noted)
         arc_write(noted / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
         reindex(conn, rebuild=True)
-        row = conn.execute("SELECT kind, project FROM notes").fetchone()
+        row = conn.execute("SELECT kind, project FROM memos").fetchone()
         assert (row["kind"], row["project"]) == ("handoff", "orglens")
 
     def test_resetting_the_offset_alone_now_repairs_rather_than_duplicates(self, noted):
@@ -1083,10 +1062,10 @@ class TestBackfillingTheNewColumns:
         line by line against its rows (the edited-note fix), a reset offset
         re-reads, sees the rows disagree with the file, and replaces them."""
         conn, _ = self._stale(noted)
-        conn.execute("UPDATE sessions SET notes_offset = 0")
+        conn.execute("UPDATE sessions SET memos_offset = 0")
         conn.commit()
-        index_notes(conn)
-        rows = conn.execute("SELECT kind, project FROM notes").fetchall()
+        index_memos(conn)
+        rows = conn.execute("SELECT kind, project FROM memos").fetchall()
         assert [(r["kind"], r["project"]) for r in rows] == [("handoff", "orglens")]
 
 
@@ -1098,7 +1077,7 @@ class TestRelationIsDerived:
         store(conn, rec(id="S1"))
         for i, r in enumerate(records):
             conn.execute(
-                "INSERT INTO notes (session_id, idx, ts, kind, topic, parent, note_path) "
+                "INSERT INTO memos (session_id, idx, ts, kind, topic, parent, memo_path) "
                 "VALUES ('S1', ?, ?, 'info', ?, ?, '/n')",
                 (i, i, r.get("topic"), r.get("parent")))
         conn.commit()
@@ -1106,46 +1085,46 @@ class TestRelationIsDerived:
 
     def test_a_new_topic_with_no_parent_is_a_shift(self, tmp_path):
         conn = self._thread(tmp_path, [{"topic": "notes-schema"}])
-        assert [r["relation"] for r in session_notes(conn, "S1")] == ["shift"]
+        assert [r["relation"] for r in session_memos(conn, "S1")] == ["shift"]
 
     def test_a_topic_seen_earlier_in_the_thread_is_a_continue(self, tmp_path):
         conn = self._thread(tmp_path, [{"topic": "notes-schema"},
                                        {"topic": "notes-schema"}])
-        assert [r["relation"] for r in session_notes(conn, "S1")] == ["shift", "continue"]
+        assert [r["relation"] for r in session_memos(conn, "S1")] == ["shift", "continue"]
 
     def test_a_parent_makes_it_a_branch(self, tmp_path):
         conn = self._thread(tmp_path, [{"topic": "notes-schema"},
                                        {"topic": "kind-enum", "parent": "notes-schema"}])
-        assert [r["relation"] for r in session_notes(conn, "S1")] == ["shift", "branch"]
+        assert [r["relation"] for r in session_memos(conn, "S1")] == ["shift", "branch"]
 
     def test_a_parent_outside_this_session_is_still_a_branch(self, tmp_path):
         # `parent` legitimately names a topic in ANOTHER session's note file, so
         # the rule must not require the parent to be resolvable here.
         conn = self._thread(tmp_path, [{"topic": "kind-enum",
                                         "parent": "written-in-some-other-session"}])
-        assert [r["relation"] for r in session_notes(conn, "S1")] == ["branch"]
+        assert [r["relation"] for r in session_memos(conn, "S1")] == ["branch"]
 
     def test_parent_beats_a_topic_that_also_appeared_earlier(self, tmp_path):
         conn = self._thread(tmp_path, [{"topic": "notes-schema"},
                                        {"topic": "notes-schema", "parent": "elsewhere"}])
-        assert session_notes(conn, "S1")[1]["relation"] == "branch"
+        assert session_memos(conn, "S1")[1]["relation"] == "branch"
 
     def test_a_later_note_never_changes_an_earlier_one(self, tmp_path):
         # Only rows BEFORE this one count, or every first note would turn into a
         # continue as soon as its topic came up again.
         conn = self._thread(tmp_path, [{"topic": "t"}, {"topic": "t"}, {"topic": "t"}])
-        assert [r["relation"] for r in session_notes(conn, "S1")] == [
+        assert [r["relation"] for r in session_memos(conn, "S1")] == [
             "shift", "continue", "continue"]
 
     def test_the_derivation_is_the_same_one_the_file_reader_uses(self, tmp_path):
         # Two implementations of one rule (SQL over rows, Python over records)
         # must not drift. Same thread, same answers.
-        from scad.notes import hydrate_notes
+        from scad.memos import hydrate_memos
         records = [{"topic": "t"}, {"topic": "t"}, {"topic": "u", "parent": "t"},
                    {"topic": "v"}]
         conn = self._thread(tmp_path, records)
-        assert [r["relation"] for r in session_notes(conn, "S1")] == \
-               [r["relation"] for r in hydrate_notes(records)]
+        assert [r["relation"] for r in session_memos(conn, "S1")] == \
+               [r["relation"] for r in hydrate_memos(records)]
 
 
 class TestNoteProjectOverridesTheSessions:
@@ -1154,31 +1133,31 @@ class TestNoteProjectOverridesTheSessions:
     def _cross(self, tmp_path):
         conn = connect(tmp_path / "i.sqlite")
         store(conn, rec(id="S1"), project="alpha")
-        conn.execute("INSERT INTO notes (session_id, idx, ts, kind, topic, project, "
-                     "title, tags, entities, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, kind, topic, project, "
+                     "title, tags, entities, memo_path) "
                      "VALUES ('S1',0,2,'bug','a-bug-in-beta','beta','filed elsewhere',"
                      "'[]','[]','/n')")
-        conn.execute("INSERT INTO notes (session_id, idx, ts, kind, topic, project, "
-                     "title, tags, entities, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, kind, topic, project, "
+                     "title, tags, entities, memo_path) "
                      "VALUES ('S1',1,1,'info','ordinary',NULL,'stays home',"
                      "'[]','[]','/n')")
         conn.commit()
         return conn
 
     def test_search_reports_the_notes_project_not_the_sessions(self, tmp_path):
-        hits = {h["topic"]: h["project"] for h in search_notes(self._cross(tmp_path), "a")}
+        hits = {h["topic"]: h["project"] for h in search_memos(self._cross(tmp_path), "a")}
         assert hits["a-bug-in-beta"] == "beta"
         assert hits["ordinary"] == "alpha"
 
     def test_search_matches_the_authored_project_name(self, tmp_path):
         # "beta" appears in no topic, title, tag or entity — only in `project`.
-        hits = search_notes(self._cross(tmp_path), "beta")
+        hits = search_memos(self._cross(tmp_path), "beta")
         assert [h["topic"] for h in hits] == ["a-bug-in-beta"]
 
     def test_search_does_not_turn_a_projects_name_into_a_listing(self, tmp_path):
         # Matching the RESOLVED project would make every note in alpha a hit for
         # "alpha", which answers a different question than search asks.
-        assert search_notes(self._cross(tmp_path), "alpha") == []
+        assert search_memos(self._cross(tmp_path), "alpha") == []
 
 
 class TestReindexArchivesFirst:
@@ -1515,40 +1494,40 @@ class TestAnEditedNoteLineReachesTheIndex:
         path.write_text("".join(json.dumps(r) + "\n" for r in rows))
 
     def test_a_corrected_project_is_picked_up_by_the_next_pass(self, noted):
-        from scad.index import index_note_file, reindex
+        from scad.index import index_memo_file, reindex
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(dict(NOTE, project="scad"), session_id="S1")
-        index_note_file(conn, p, "claude")
-        assert conn.execute("SELECT project FROM notes").fetchone()[0] == "scad"
+        p = append_memo(dict(NOTE, project="scad"), session_id="S1")
+        index_memo_file(conn, p, "claude")
+        assert conn.execute("SELECT project FROM memos").fetchone()[0] == "scad"
 
         self._rewrite(p, 0, project="scoped-agent-dispatch")
-        stats = index_note_file(conn, p, "claude")
-        rows = conn.execute("SELECT idx, project FROM notes ORDER BY idx").fetchall()
+        stats = index_memo_file(conn, p, "claude")
+        rows = conn.execute("SELECT idx, project FROM memos ORDER BY idx").fetchall()
         assert [tuple(r) for r in rows] == [(0, "scoped-agent-dispatch")]
         assert stats["replaced"] == 1
 
     def test_an_unchanged_file_is_not_re_read(self, noted):
-        from scad.index import index_note_file
+        from scad.index import index_memo_file
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
-        index_note_file(conn, p, "claude")
-        with patch("scad.index.read_notes") as rn:
-            stats = index_note_file(conn, p, "claude")
+        p = append_memo(NOTE, session_id="S1")
+        index_memo_file(conn, p, "claude")
+        with patch("scad.index.read_memos") as rn:
+            stats = index_memo_file(conn, p, "claude")
         rn.assert_not_called()
-        assert stats["notes"] == 0
+        assert stats["memos"] == 0
 
     def test_an_append_after_an_edit_keeps_one_row_per_line(self, noted):
-        from scad.index import index_note_file
+        from scad.index import index_memo_file
         conn = connect(noted / "i.sqlite")
         store(conn, rec(id="S1"))
-        p = append_note(NOTE, session_id="S1")
-        index_note_file(conn, p, "claude")
+        p = append_memo(NOTE, session_id="S1")
+        index_memo_file(conn, p, "claude")
         self._rewrite(p, 0, title="edited")
-        append_note(dict(NOTE, title="second"), session_id="S1")
-        index_note_file(conn, p, "claude")
-        titles = [r[0] for r in conn.execute("SELECT title FROM notes ORDER BY idx")]
+        append_memo(dict(NOTE, title="second"), session_id="S1")
+        index_memo_file(conn, p, "claude")
+        titles = [r[0] for r in conn.execute("SELECT title FROM memos ORDER BY idx")]
         assert titles == ["edited", "second"]
 
 
@@ -1573,8 +1552,8 @@ class TestAMovedDirectory:
         # No `project` on either note: one that names its project survives any
         # rebuild, and this would pass without testing anything.
         note = {"topic": "move", "title": "t", "text": "b", "cwd_at_write": str(old)}
-        append_note(note, session_id="S1")
-        append_note(note, session_id="N1")        # a session with no transcript
+        append_memo(note, session_id="S1")
+        append_memo(note, session_id="N1")        # a session with no transcript
         conn = connect(root / ".scad" / "index.sqlite")
         reindex(conn)
         assert [session_row(conn, s)["project"] for s in ("S1", "N1")] == ["myproj"] * 2
@@ -1585,12 +1564,12 @@ class TestAMovedDirectory:
         return conn, old, new, transcript
 
     def _projects(self, conn):
-        from scad.index import NOTE_PROJECT_SQL
+        from scad.index import MEMO_PROJECT_SQL
 
         sessions = [r["project"] for r in conn.execute(
             "SELECT project FROM sessions WHERE id IN ('S1', 'N1') ORDER BY id")]
         notes = [r["project"] for r in conn.execute(
-            f"SELECT {NOTE_PROJECT_SQL} FROM notes n "
+            f"SELECT {MEMO_PROJECT_SQL} FROM memos n "
             f"LEFT JOIN sessions s ON s.id = n.session_id ORDER BY n.session_id")]
         return sessions, notes
 
@@ -1601,7 +1580,7 @@ class TestAMovedDirectory:
 
         from scad.cli import main
 
-        result = CliRunner().invoke(main, ["notes", "ls", "--project", "myproj", "--json"])
+        result = CliRunner().invoke(main, ["memos", "ls", "--project", "myproj", "--json"])
         assert result.exit_code == 0, result.output
         return json.loads(result.stdout)
 
@@ -1630,3 +1609,198 @@ class TestAMovedDirectory:
         reindex(conn, rebuild=True)
         assert self._projects(conn) == (["unfiled"] * 2, ["unfiled"] * 2)
         assert self._notes_ls() == []
+
+
+# --- schema 3: memos, with their bodies ----------------------------------------
+
+class TestAnIndexFromBeforeMemos:
+    """0.9.0 adds a `memos` table and leaves the old `notes` one alone.
+
+    Memo rows are re-derivable from the memo files alone, so an existing index
+    needs no migration: it gains an empty table and two zeroed offsets, and the
+    next pass reads every memo file from the start. The old table and columns
+    are dropped by hand at release."""
+
+    def _v2(self, path):
+        conn = connect(path)
+        conn.executescript(
+            "DROP TABLE memos;"
+            "ALTER TABLE sessions DROP COLUMN memos_offset;"
+            "ALTER TABLE sessions DROP COLUMN memos_mtime;"
+            "ALTER TABLE sessions ADD COLUMN notes_offset INTEGER NOT NULL DEFAULT 0;"
+            "ALTER TABLE sessions ADD COLUMN notes_mtime INTEGER;"
+            "CREATE TABLE notes (session_id TEXT NOT NULL, idx INTEGER NOT NULL, ts INTEGER,"
+            " kind TEXT, topic TEXT, parent TEXT, project TEXT, title TEXT, tags TEXT,"
+            " entities TEXT, note_path TEXT NOT NULL, PRIMARY KEY (session_id, idx));"
+            "UPDATE meta SET value = '2' WHERE key = 'schema_version';")
+        store(conn, rec(id="S1"))
+        conn.execute("UPDATE sessions SET notes_offset = 999, notes_mtime = 1 WHERE id = 'S1'")
+        conn.execute("INSERT INTO notes (session_id, idx, title, note_path) "
+                     "VALUES ('S1', 0, 'old row', '/old/S1.jsonl')")
+        conn.commit()
+        conn.close()
+
+    def test_it_opens_with_an_empty_memos_table_and_zeroed_offsets(self, noted):
+        self._v2(noted / "i.sqlite")
+        conn = connect(noted / "i.sqlite")
+        assert conn.execute("SELECT count(*) FROM memos").fetchone()[0] == 0
+        row = session_row(conn, "S1")
+        assert row["memos_offset"] == 0 and row["memos_mtime"] is None
+        assert conn.execute("SELECT value FROM meta WHERE key='schema_version'"
+                            ).fetchone()[0] == "3"
+        assert conn.execute("SELECT count(*) FROM notes").fetchone()[0] == 1
+
+    def test_the_next_pass_reads_every_memo_file_with_its_body(self, noted):
+        self._v2(noted / "i.sqlite")
+        append_memo({**NOTE, "text": "the whole body"}, session_id="S1")
+        conn = connect(noted / "i.sqlite")
+        index_memos(conn)
+        rows = conn.execute("SELECT title, text FROM memos").fetchall()
+        assert [(r["title"], r["text"]) for r in rows] == [("first", "the whole body")]
+
+
+class TestMemoBodySearch:
+    def _indexed(self, noted, **memo):
+        conn = connect(noted / "i.sqlite")
+        append_memo({**NOTE, **memo}, session_id="S1")
+        index_memos(conn)
+        return conn
+
+    def test_a_phrase_only_in_the_body_is_found(self, noted):
+        conn = self._indexed(noted, text="the cwd drift came from a symlink")
+        assert [h["title"] for h in search_memos(conn, "cwd drift")] == ["first"]
+
+    def test_a_tag_is_still_found(self, noted):
+        conn = self._indexed(noted, tags=["cwd-drift"])
+        assert [h["title"] for h in search_memos(conn, "cwd-drift")] == ["first"]
+
+    def test_hits_do_not_carry_the_body(self, noted):
+        conn = self._indexed(noted, text="the cwd drift came from a symlink")
+        assert "text" not in search_memos(conn, "cwd drift")[0]
+
+
+# --- when the index was last refreshed ----------------------------------------
+
+from scad.index import index_memo_file, index_status  # noqa: E402
+
+
+class TestIndexedAt:
+    """Nothing refreshes the index on a timer, so a reader cannot tell a quiet
+    session from a stale index unless the index says when it was last read.
+    Asked for by orglens, whose resume once went to a two-month-old session."""
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        return connect(tmp_path / "i.sqlite")
+
+    def test_a_fresh_index_has_never_been_refreshed(self, tmp_path, monkeypatch):
+        assert index_status(self._home(tmp_path, monkeypatch))["indexed_at"] is None
+
+    def test_a_reindex_records_when_it_finished(self, tmp_path, monkeypatch):
+        conn = self._home(tmp_path, monkeypatch)
+        arc_write(tmp_path / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        before = int(time.time() * 1000)
+        reindex(conn)
+        at = index_status(conn)["indexed_at"]
+        assert before <= at <= int(time.time() * 1000)
+
+    def test_a_reindex_with_no_archive_still_records_it(self, tmp_path, monkeypatch):
+        conn = self._home(tmp_path, monkeypatch)
+        reindex(conn)
+        assert index_status(conn)["indexed_at"] is not None
+
+    def test_writing_one_memo_is_not_a_refresh(self, tmp_path, monkeypatch):
+        """`session memo` indexes the file it wrote, and nothing else: the
+        index is no fresher for it, so the time must not move."""
+        conn = self._home(tmp_path, monkeypatch)
+        p = append_memo(NOTE, session_id="S1")
+        index_memo_file(conn, p, "claude")
+        assert index_status(conn)["indexed_at"] is None
+
+    def test_status_counts_sessions_and_memos(self, tmp_path, monkeypatch):
+        conn = self._home(tmp_path, monkeypatch)
+        arc_write(tmp_path / "arc", "claude/projects/-repo/S1.jsonl", MAIN)
+        append_memo(NOTE, session_id="S1")
+        reindex(conn)
+        status = index_status(conn)
+        assert (status["sessions"], status["memos"]) == (1, 1)
+        assert status["schema_version"] == SCHEMA_VERSION
+
+
+class TestTwoReindexesAtOnce:
+    """`orglens view` and `scad view` both refresh before they render, so two
+    reindexes can run at once against one index. Both must finish, and the
+    index must come out whole: every session and memo once, nothing doubled."""
+
+    def test_both_finish_and_nothing_is_doubled(self, tmp_path):
+        import subprocess
+        import sys
+        arc, home = tmp_path / "arc", tmp_path / ".scad"
+        for i in range(60):
+            sid = f"S{i}"
+            arc_write(arc, f"claude/projects/-repo/{sid}.jsonl", [
+                {**MAIN[0], "sessionId": sid,
+                 "message": {"role": "assistant",
+                             "content": [{"type": "text", "text": f"turn {n}"}]}}
+                for n in range(40)])
+        env = {**os.environ, "SCAD_ARCHIVE": str(arc), "SCAD_HOME": str(home)}
+        for i in range(30):
+            subprocess.run([sys.executable, "-c",
+                            "import json,sys; from scad.memos import append_memo; "
+                            f"append_memo({{'title': 't{i}'}}, session_id='S{i}')"],
+                           env=env, check=True)
+        code = "from scad.index import reindex; reindex()"
+        procs = [subprocess.Popen([sys.executable, "-c", code], env=env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                 for _ in range(2)]
+        results = [p.communicate(timeout=120) + (p.returncode,) for p in procs]
+        for out, err, rc in results:
+            assert rc == 0, err
+
+        conn = connect(home / "index.sqlite")
+        assert conn.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert conn.execute("SELECT count(*) FROM sessions").fetchone()[0] == 60
+        assert conn.execute("SELECT count(*) FROM turns").fetchone()[0] == 60 * 40
+        assert conn.execute("SELECT count(*) FROM memos").fetchone()[0] == 30
+        assert index_status(conn)["indexed_at"] is not None
+
+
+class TestTheIndexLock:
+    def test_a_second_holder_waits_and_then_times_out_with_a_message(self, tmp_path):
+        from scad.index import index_lock
+        conn = connect(tmp_path / "i.sqlite")
+        with index_lock(conn):
+            with pytest.raises(click.ClickException) as exc:
+                with index_lock(connect(tmp_path / "i.sqlite"), timeout_s=0.3):
+                    pass
+        assert "another reindex" in str(exc.value.message)
+
+    def test_the_lock_is_released_after_use(self, tmp_path):
+        from scad.index import index_lock
+        conn = connect(tmp_path / "i.sqlite")
+        with index_lock(conn):
+            pass
+        with index_lock(conn, timeout_s=0.3):
+            pass
+
+
+class TestContextColumns:
+    """An incremental pass parses only a file's tail, so a tail with no usage
+    in it must not blank the figure an earlier pass found."""
+
+    def _upsert(self, conn, **ctx):
+        upsert_session(conn, rec(id="S1", **ctx), machine="m", project="p",
+                       archive_path="/a", source_size=1, source_mtime=1, parsed_offset=1)
+        return session_row(conn, "S1")
+
+    def test_a_new_figure_replaces_the_old(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        self._upsert(conn, context_tokens=100)
+        assert self._upsert(conn, context_tokens=250)["context_tokens"] == 250
+
+    def test_a_tail_without_usage_keeps_the_old(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        self._upsert(conn, context_tokens=100, context_window=258_400)
+        row = self._upsert(conn)
+        assert (row["context_tokens"], row["context_window"]) == (100, 258_400)

@@ -29,7 +29,7 @@ from pathlib import Path
 
 import pytest
 
-from scad.notes import SESSION_ID_ENV
+from scad.memos import SESSION_ID_ENV
 
 # Written into the throwaway global config. `.invalid` is reserved by RFC 2606
 # and can never resolve, so a leaked commit is traceable to the test suite.
@@ -64,9 +64,16 @@ def pytest_configure(config):
         "\tgpgsign = false\n"
     )
 
+    # scad's own home and archive, for the same reason: a test that sets
+    # neither read the developer's real launch records and memo store, and
+    # passed or failed by what happened to be on the machine. A test that
+    # wants its own sets it with monkeypatch, which overrides this.
+    scad_home = Path(_git_config_dir.name) / "scad-home"
     for key, value in (
         ("GIT_CONFIG_GLOBAL", str(config_file)),
         ("GIT_CONFIG_SYSTEM", os.devnull),
+        ("SCAD_HOME", str(scad_home)),
+        ("SCAD_ARCHIVE", str(scad_home / "archive")),
     ):
         _saved_env[key] = os.environ.get(key)
         os.environ[key] = value
@@ -84,6 +91,51 @@ def _no_inherited_session_ids(monkeypatch):
     """
     for var in SESSION_ID_ENV.values():
         monkeypatch.delenv(var, raising=False)
+
+
+def pytest_addoption(parser):
+    parser.addoption("--run-vm", action="store_true", default=False,
+                     help="Also run tests marked `vm`, which use the real scad VM.")
+
+
+def pytest_collection_modifyitems(config, items):
+    """The real VM is its own suite, run on purpose: `pytest --run-vm -m vm`.
+
+    It restarts the VM and stops every container in it, so it is never part of
+    an ordinary run.
+    """
+    if config.getoption("--run-vm"):
+        return
+    skip = pytest.mark.skip(reason="uses the real scad VM; run with --run-vm")
+    for item in items:
+        if "vm" in item.keywords:
+            item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_vm(request, monkeypatch):
+    """No test may run colima or reach the Docker daemon, unless it is marked
+    `vm` (and so runs only with --run-vm). A test that needs a fake patches
+    `scad.vm._colima` or the Docker client itself, which overrides this.
+
+    Without it, a test that left `reconcile_vm_mounts` unmocked restarted the
+    developer's real scad VM on every run once SCAD_HOME pointed outside
+    $HOME, and wrote each run's temporary directory into its colima.yaml.
+    """
+    if request.node.get_closest_marker("vm"):
+        return
+
+    def refuse(*args):
+        raise AssertionError(f"a test tried to run the real `colima {' '.join(args)}`")
+    monkeypatch.setattr("scad.vm._colima", refuse)
+
+    # And no test may reach the real Docker daemon: the same unmocked path
+    # listed the developer's running scad containers and restarted them after
+    # the VM came back. Tests that want a client patch these themselves.
+    def no_daemon(*args, **kwargs):
+        raise AssertionError("a test tried to reach the real Docker daemon")
+    monkeypatch.setattr("docker.DockerClient", no_daemon)
+    monkeypatch.setattr("docker.from_env", no_daemon)
 
 
 @pytest.fixture(autouse=True)

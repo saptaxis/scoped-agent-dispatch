@@ -693,7 +693,7 @@ class TestJobState:
 
 # --- notes: the authored tier -------------------------------------------------
 
-from scad.readers import read_notes  # noqa: E402
+from scad.readers import read_memos  # noqa: E402
 
 NOTE = {
     "ts": "2026-07-29T11:00:00+05:30",
@@ -714,18 +714,18 @@ NOTE = {
 class TestReadNotes:
     def test_one_record_per_line_in_order(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE, {**NOTE, "title": "second"}])
-        notes, end = read_notes(p)
+        notes, end = read_memos(p)
         assert [n.title for n in notes] == ["Built the notes store", "second"]
         assert end == p.stat().st_size
 
     def test_ts_becomes_epoch_ms(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
-        notes, _ = read_notes(p)
+        notes, _ = read_memos(p)
         assert notes[0].ts == 1785303000000   # 2026-07-29T05:30:00Z
 
     def test_indexed_fields_are_carried(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
-        n = read_notes(p)[0][0]
+        n = read_memos(p)[0][0]
         assert (n.kind, n.topic, n.parent) == ("info", "notes-store", None)
         assert n.tags == ["notes", "jsonl", "append-only"]
         assert n.entities == ["session-index.md"]
@@ -734,42 +734,42 @@ class TestReadNotes:
         # NULL is not "no project" — it means "the writing session's project",
         # which only the index can resolve. A value here overrides that.
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE, {**NOTE, "project": "orglens"}])
-        assert [n.project for n in read_notes(p)[0]] == [None, "orglens"]
+        assert [n.project for n in read_memos(p)[0]] == [None, "orglens"]
 
     def test_a_record_written_before_kind_existed_reads_as_the_default(self, tmp_path):
         older = {k: v for k, v in NOTE.items() if k != "kind"}
         p = write_jsonl(tmp_path / "S1.jsonl", [older])
-        assert read_notes(p)[0][0].kind == "info"
+        assert read_memos(p)[0][0].kind == "info"
 
     def test_cwd_at_write_is_carried_so_the_project_survives_the_trace(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
-        assert read_notes(p)[0][0].cwd_at_write == "/Users/vsr/code/scad"
+        assert read_memos(p)[0][0].cwd_at_write == "/Users/vsr/code/scad"
 
     def test_resume_reads_only_what_was_appended(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [NOTE])
         first_end = p.stat().st_size
         with p.open("a") as fh:
             fh.write(json.dumps({**NOTE, "title": "later"}) + "\n")
-        notes, end = read_notes(p, first_end)
+        notes, end = read_memos(p, first_end)
         assert [n.title for n in notes] == ["later"]
         assert end == p.stat().st_size
 
     def test_a_malformed_line_is_skipped_not_fatal(self, tmp_path):
         p = tmp_path / "S1.jsonl"
         p.write_text("{not json\n" + json.dumps(NOTE) + "\n")
-        notes, _ = read_notes(p)
+        notes, _ = read_memos(p)
         assert [n.title for n in notes] == ["Built the notes store"]
 
     def test_a_sparse_record_survives(self, tmp_path):
         # The record is written by a model; missing optional fields are normal
         # and must never cost the note.
         p = write_jsonl(tmp_path / "S1.jsonl", [{"title": "bare"}])
-        n = read_notes(p)[0][0]
+        n = read_memos(p)[0][0]
         assert (n.title, n.ts, n.topic, n.tags) == ("bare", None, None, [])
 
     def test_non_list_tags_are_coerced_rather_than_dropped(self, tmp_path):
         p = write_jsonl(tmp_path / "S1.jsonl", [{**NOTE, "tags": "notes"}])
-        assert read_notes(p)[0][0].tags == ["notes"]
+        assert read_memos(p)[0][0].tags == ["notes"]
 
 
 # --- kimi: one session directory, one wire per agent --------------------------
@@ -1036,3 +1036,74 @@ class TestKimiOutcome:
         sess = kimi_tree(tmp_path, agents={"main": lines})
         session, _, _ = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")
         assert session.outcome == OUTCOME_AWAITING_QUESTION
+
+
+# --- how full the context is --------------------------------------------------
+
+CLAUDE_1M = 1_000_000
+
+
+def claude_usage(tokens: dict, ts="2026-07-28T10:00:10.000Z") -> dict:
+    return {"type": "assistant", "sessionId": "S1", "timestamp": ts, "cwd": "/repo",
+            "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}],
+                        "usage": tokens}}
+
+
+class TestContextFill:
+    """The newest turn's input is the context in use. Each agent writes it in
+    its own shape, and only some write the window."""
+
+    def test_claude_sums_the_three_input_figures_of_the_newest_turn(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", CLAUDE_LINES + [
+            claude_usage({"input_tokens": 1, "cache_creation_input_tokens": 10,
+                          "cache_read_input_tokens": 100, "output_tokens": 999}),
+            claude_usage({"input_tokens": 2, "cache_creation_input_tokens": 20,
+                          "cache_read_input_tokens": 200, "output_tokens": 5}),
+        ])
+        session, _, _ = read_claude_transcript(p)
+        assert session.context_tokens == 222
+
+    def test_claude_under_200k_has_no_known_window(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", CLAUDE_LINES + [
+            claude_usage({"input_tokens": 150_000})])
+        assert read_claude_transcript(p)[0].context_window is None
+
+    def test_claude_past_200k_proves_the_1m_window(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", CLAUDE_LINES + [
+            claude_usage({"input_tokens": 1, "cache_read_input_tokens": 653_161})])
+        session = read_claude_transcript(p)[0]
+        assert (session.context_tokens, session.context_window) == (653_162, CLAUDE_1M)
+
+    def test_claude_without_usage_says_nothing(self, tmp_path):
+        p = write_jsonl(tmp_path / "S1.jsonl", CLAUDE_LINES)
+        session = read_claude_transcript(p)[0]
+        assert (session.context_tokens, session.context_window) == (None, None)
+
+    def test_codex_reads_token_count_events_and_states_its_window(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES + [
+            {"timestamp": "2026-07-25T11:31:40.000Z", "type": "event_msg",
+             "payload": {"type": "token_count", "info": {
+                 "last_token_usage": {"input_tokens": 215_227, "cached_input_tokens": 214_912,
+                                      "output_tokens": 99},
+                 "model_context_window": 258_400}}},
+        ])
+        session = read_codex_rollout(p)[0]
+        assert (session.context_tokens, session.context_window) == (215_227, 258_400)
+
+    def test_codex_token_count_without_info_is_ignored(self, tmp_path):
+        p = write_jsonl(tmp_path / "rollout.jsonl", CODEX_LINES + [
+            {"timestamp": "2026-07-25T11:31:40.000Z", "type": "event_msg",
+             "payload": {"type": "token_count", "info": None}}])
+        assert read_codex_rollout(p)[0].context_tokens is None
+
+    def test_kimi_sums_its_input_figures_and_takes_the_request_window(self, tmp_path):
+        lines = KIMI_MAIN + [
+            {"type": "llm.request", "kind": "loop", "model": "k3", "maxTokens": 262_144,
+             "time": 1785232800020},
+            {"type": "usage.record", "model": "kimi-code/k3",
+             "usage": {"inputOther": 3362, "output": 60, "inputCacheRead": 18944,
+                       "inputCacheCreation": 0}, "time": 1785232800021},
+        ]
+        sess = kimi_tree(tmp_path, agents={"main": lines})
+        session = read_kimi_wire(sess / "agents" / "main" / "wire.jsonl")[0]
+        assert (session.context_tokens, session.context_window) == (22_306, 262_144)

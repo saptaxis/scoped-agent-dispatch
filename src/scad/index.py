@@ -9,8 +9,11 @@ and `--rebuild` refuses when any raw is missing.
 """
 
 import collections
+import contextlib
+import fcntl
 import json
 import platform
+import time
 import sqlite3
 from pathlib import Path
 
@@ -18,7 +21,7 @@ import click
 
 from scad.archive import STATE_HISTORY_NAME, archive_all, archive_root
 from scad.config import get_scad_home
-from scad.notes import DEFAULT_KIND, notes_root
+from scad.memos import DEFAULT_KIND, memos_root
 from scad.project import resolve_project
 from scad.readers import (
     read_claude_any,
@@ -26,19 +29,19 @@ from scad.readers import (
     read_codex_rollout,
     read_job_state,
     read_kimi_wire,
-    read_notes,
+    read_memos,
 )
 from scad.records import (
     GRADE_FULL,
     GRADE_SKELETON,
     KIND_MAIN,
     JobStateRecord,
-    NoteRecord,
+    MemoRecord,
     SessionRecord,
     TurnRecord,
 )
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 EXTRACTOR_VERSION = 1
 
 # A real `source` value, alongside claude-transcript / claude-subagent /
@@ -46,8 +49,8 @@ EXTRACTOR_VERSION = 1
 # state.
 SOURCE_JOBSTATE = "claude-jobstate"
 
-# ...and some exist only as a note. See index_notes for why that is a row.
-SOURCE_NOTE = "scad-note"
+# ...and some exist only as a memo. See index_memos for why that is a row.
+SOURCE_MEMO = "scad-memo"
 
 # ...and some exist only because scad started them and nothing has been
 # archived yet. See ensure_launched_session.
@@ -85,7 +88,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   name              TEXT,
   -- The rest come from the harness's state.json alone. `harness_state` is
   -- structural, observed of a live process. `needs` and `needs_detail` are
-  -- MODEL-WRITTEN PROSE — the notes tier, self-report, not trace evidence. Do
+  -- MODEL-WRITTEN PROSE — the memos tier, self-report, not trace evidence. Do
   -- not read them as measurements.
   harness_state     TEXT,
   needs             TEXT,
@@ -94,8 +97,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   source_mtime      INTEGER,
   source_size       INTEGER,
   parsed_offset     INTEGER NOT NULL DEFAULT 0,
-  notes_offset      INTEGER NOT NULL DEFAULT 0,
-  notes_mtime       INTEGER,
+  memos_offset      INTEGER NOT NULL DEFAULT 0,
+  context_tokens    INTEGER,           -- the newest turn's input: the context in use
+  context_window    INTEGER,           -- its size, when the trace states or proves it
+  memos_mtime       INTEGER,
   raw_present       INTEGER NOT NULL DEFAULT 1,
   extractor_version INTEGER NOT NULL DEFAULT 1
 );
@@ -114,10 +119,10 @@ CREATE TABLE IF NOT EXISTS turns (
 );
 
 -- No `relation` column: it is derived per query from `parent` and the topics
--- already in the thread (NOTE_RELATION_SQL). Older indexes still carry the
--- column with its authored values in it — nothing reads it, and dropping it
--- would be the one destructive act this file otherwise refuses.
-CREATE TABLE IF NOT EXISTS notes (
+-- already in the thread (MEMO_RELATION_SQL). Until 0.9.0 these rows were
+-- `notes`; an index from before then keeps that table, read by nothing, until
+-- it is dropped by hand. Every row here is re-derivable from the memo files.
+CREATE TABLE IF NOT EXISTS memos (
   session_id TEXT NOT NULL,
   idx        INTEGER NOT NULL,
   ts         INTEGER,
@@ -128,7 +133,8 @@ CREATE TABLE IF NOT EXISTS notes (
   title      TEXT,
   tags       TEXT,
   entities   TEXT,
-  note_path  TEXT NOT NULL,
+  text       TEXT,               -- the body, so a search can find what a memo says
+  memo_path  TEXT NOT NULL,
   PRIMARY KEY (session_id, idx)
 );
 
@@ -158,21 +164,18 @@ def index_path() -> Path:
 _ADDED_COLUMNS: dict[str, dict[str, str]] = {
     "sessions": {
         "name": "TEXT", "harness_state": "TEXT", "needs": "TEXT", "needs_detail": "TEXT",
-        # When the note file was last written, so an edit that leaves the size
-        # alone is still seen. NULL on an existing index reads as "never", and
-        # the next pass re-reads every note file once and stamps it.
-        "notes_mtime": "INTEGER",
+        # How far into each memo file the index has read, and when the file
+        # was last written, so an edit that leaves the size alone is still
+        # seen. On an index from before 0.9.0 they arrive at 0 and NULL, beside
+        # the old notes_offset and notes_mtime, and the next pass reads every
+        # memo file from the start into the new, empty `memos` table.
+        "memos_offset": "INTEGER NOT NULL DEFAULT 0",
+        "memos_mtime": "INTEGER",
+        # Filled as files are next parsed. An incremental pass reads only a
+        # file's tail, so a session nobody touches again keeps NULL until a
+        # rebuild; the ones still in use fill on their next turn.
+        "context_tokens": "INTEGER", "context_window": "INTEGER",
     },
-    # ALTER TABLE ADD COLUMN does not backfill, and the notes pass skips a
-    # file whose size and mtime it has seen — so on an index that already has
-    # rows, these stay NULL through any number of ordinary reindexes. Only
-    # re-reading the note files fills them: `scad reindex --rebuild`, or
-    # `UPDATE sessions SET notes_mtime = NULL;` followed by `scad reindex`,
-    # which re-reads every note file, finds the rows disagree with the lines,
-    # and replaces them. Meanwhile queries read `kind` through
-    # COALESCE(kind,'info'), so an un-backfilled row answers as the default
-    # rather than as nothing.
-    "notes": {"kind": "TEXT", "project": "TEXT"},
 }
 
 
@@ -197,8 +200,12 @@ def connect(path: Path | None = None) -> sqlite3.Connection:
     # rollback journal a writer blocks every reader for the whole write, and
     # one external view stalled 600s behind a reindex. WAL lets readers see
     # the last committed state while the write is in progress. Persistent:
-    # set once in the file, honoured by every later connection.
-    conn.execute("PRAGMA journal_mode=WAL")
+    # set once in the file, honoured by every later connection. Switching
+    # needs the file to itself, so it is done only when the mode is not WAL
+    # yet: asked on every connect, it failed "database is locked" whenever a
+    # second process opened the index at the same moment.
+    if conn.execute("PRAGMA journal_mode").fetchone()[0].lower() != "wal":
+        conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(_SCHEMA)
     _migrate(conn)
     conn.execute(
@@ -227,8 +234,8 @@ def upsert_session(
             scad_run_id, cwd, project, title, name, git_branch, started, ended,
             grade, source, outcome, last_stop_reason, n_interrupts,
             n_tool_denials, n_errors, archive_path, source_mtime, source_size,
-            parsed_offset, raw_present, extractor_version
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+            parsed_offset, raw_present, extractor_version, context_tokens, context_window
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             -- First cwd wins, and later passes may only FILL it, never move it.
             -- Claude Code stamps `cwd` on every record, so a tool call made in
@@ -249,7 +256,7 @@ def upsert_session(
             -- above cites: cwd `.../scoped-agent-dispatch`, project
             -- `traitful-docs`, and `resolve_project(stored cwd)` disagreeing with
             -- both. Because `project` is the retrieval join key, that session's
-            -- notes fell out of its own project's listing.
+            -- memos fell out of its own project's listing.
             --
             -- Safe to pin: `scad_run_id` is derived from the archive path and is
             -- identical on every pass, so no later pass knows better. The one
@@ -283,7 +290,10 @@ def upsert_session(
             source_mtime     = excluded.source_mtime,
             source_size      = excluded.source_size,
             parsed_offset    = excluded.parsed_offset,
-            raw_present      = 1
+            raw_present      = 1,
+            -- The newest figure wins; a tail that carried none keeps the last.
+            context_tokens   = COALESCE(excluded.context_tokens, sessions.context_tokens),
+            context_window   = COALESCE(excluded.context_window, sessions.context_window)
         """,
         (
             session.id, session.kind, session.parent_session_id, session.agent_id,
@@ -293,7 +303,7 @@ def upsert_session(
             session.grade, session.source, session.outcome, session.last_stop_reason,
             session.n_interrupts, session.n_tool_denials, session.n_errors,
             archive_path, source_mtime, source_size,
-            parsed_offset, EXTRACTOR_VERSION,
+            parsed_offset, EXTRACTOR_VERSION, session.context_tokens, session.context_window,
             GRADE_FULL, GRADE_FULL, GRADE_FULL,
         ),
     )
@@ -380,86 +390,86 @@ def apply_job_state(conn, job: JobStateRecord) -> bool:
     return True
 
 
-# --- the two notes columns that are computed, not stored ---
+# --- the two memos columns that are computed, not stored ---
 #
-# Both expect the `notes` table to be aliased `n`, and the project one expects
+# Both expect the `memos` table to be aliased `n`, and the project one expects
 # `sessions` aliased `s`. They live here rather than inline so the CLI, the
 # search and the view page cannot drift into three different answers to the
 # same question.
 
-# `relation` in SQL, and the same rule as notes.derived_relation. The EXISTS
+# `relation` in SQL, and the same rule as memos.derived_relation. The EXISTS
 # looks at the whole session's rows rather than at insert order, so an
-# incremental pass that appends one note gets the same answer a rebuild does.
-NOTE_RELATION_SQL = (
+# incremental pass that appends one memo gets the same answer a rebuild does.
+MEMO_RELATION_SQL = (
     "CASE WHEN COALESCE(n.parent, '') <> '' THEN 'branch' "
-    "     WHEN EXISTS (SELECT 1 FROM notes prior "
+    "     WHEN EXISTS (SELECT 1 FROM memos prior "
     "                  WHERE prior.session_id = n.session_id AND prior.idx < n.idx "
     "                    AND prior.topic IS NOT NULL AND prior.topic = n.topic) "
     "     THEN 'continue' "
     "     ELSE 'shift' END AS relation"
 )
 
-# A note's project is the writing session's project *unless* the note names one.
+# A memo's project is the writing session's project *unless* the memo names one.
 # That is the cross-capture case: a session working in project A files a bug
 # against project B, and before this it was filed under A because the project
-# only ever arrived through this JOIN. Nothing is lost by letting the note win —
+# only ever arrived through this JOIN. Nothing is lost by letting the memo win —
 # `cwd_at_write` still records where it was actually written.
-NOTE_PROJECT_RESOLVED = "COALESCE(n.project, s.project)"
-NOTE_PROJECT_SQL = f"{NOTE_PROJECT_RESOLVED} AS project"
+MEMO_PROJECT_RESOLVED = "COALESCE(n.project, s.project)"
+MEMO_PROJECT_SQL = f"{MEMO_PROJECT_RESOLVED} AS project"
 
 # An index row written before `kind` existed reads as the default, not as NULL.
-NOTE_KIND_SQL = f"COALESCE(n.kind, '{DEFAULT_KIND}')"
+MEMO_KIND_SQL = f"COALESCE(n.kind, '{DEFAULT_KIND}')"
 
 
-def append_notes(
-    conn, session_id: str, notes: list[NoteRecord], note_path: str
+def append_memos(
+    conn, session_id: str, memos: list[MemoRecord], memo_path: str
 ) -> int:
-    """Append note rows, continuing idx from whatever is already stored.
+    """Append memo rows, continuing idx from whatever is already stored.
 
     The same append-only shape as `append_turns`, and for a stronger reason:
-    turns can be re-extracted while raw survives, but a note is self-report with
+    turns can be re-extracted while raw survives, but a memo is self-report with
     no second copy anywhere. Rewriting a row here would be the one destructive
     act in the whole index.
     """
-    if not notes:
+    if not memos:
         return 0
     start = conn.execute(
-        "SELECT COALESCE(MAX(idx) + 1, 0) FROM notes WHERE session_id = ?", (session_id,)
+        "SELECT COALESCE(MAX(idx) + 1, 0) FROM memos WHERE session_id = ?", (session_id,)
     ).fetchone()[0]
     conn.executemany(
-        "INSERT OR IGNORE INTO notes "
+        "INSERT OR IGNORE INTO memos "
         "(session_id, idx, ts, kind, topic, parent, project, title, tags, entities, "
-        " note_path) "
-        "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        " text, memo_path) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
         [
             (session_id, start + i, n.ts, n.kind, n.topic, n.parent, n.project, n.title,
-             json.dumps(list(n.tags)), json.dumps(list(n.entities)), note_path)
-            for i, n in enumerate(notes)
+             json.dumps(list(n.tags)), json.dumps(list(n.entities)), n.text, memo_path)
+            for i, n in enumerate(memos)
         ],
     )
     conn.commit()
-    return len(notes)
+    return len(memos)
 
 
-def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> None:
-    """Make sure a note has a session row to hang off, without disturbing one.
+def _ensure_memo_session(conn, session_id: str, agent: str, cwd: str | None) -> None:
+    """Make sure a memo has a session row to hang off, without disturbing one.
 
-    A note can arrive for a session the index has never seen: the transcript may
+    A memo can arrive for a session the index has never seen: the transcript may
     have been pruned before the first scan, or may never have been archived.
-    The note is still stored on disk either way — that is the file-is-truth rule
+    The memo is still stored on disk either way — that is the file-is-truth rule
     and it is not negotiable — and the question is only whether it also gets a
     row.
 
     It does. The reasoning is the one this index already accepted twice, for
     history.jsonl and then for job state: a source that outlives transcripts
-    earns a row, because otherwise real work is invisible. Notes outlive
-    transcripts by construction — the spec's own words are that a note "can
+    earns a row, because otherwise real work is invisible. Memos outlive
+    transcripts by construction — the spec's own words are that a memo "can
     arrive when the transcript no longer exists" — and this is the tier that
     can never be re-derived from anything. The tier that is least replaceable
     must not be the tier that is unfindable.
 
-    So: `grade='skeleton'` (no turns were ever extracted), `source='scad-note'`,
-    `cwd` from the note's own `cwd_at_write` so `project` still resolves, and
+    So: `grade='skeleton'` (no turns were ever extracted), `source='scad-memo'`,
+    `cwd` from the memo's own `cwd_at_write` so `project` still resolves, and
     `raw_present=1` — its source file exists, is never pruned, and the row is
     wholly re-derivable from it, so a 0 here would make `--rebuild` refuse
     forever over a row with nothing to lose.
@@ -474,7 +484,7 @@ def _ensure_note_session(conn, session_id: str, agent: str, cwd: str | None) -> 
         ) VALUES (?,?,?,?,?,?,?,?,0,1,?)
         """,
         (session_id, KIND_MAIN, agent, platform.node(), cwd,
-         resolve_project(cwd), GRADE_SKELETON, SOURCE_NOTE, EXTRACTOR_VERSION),
+         resolve_project(cwd), GRADE_SKELETON, SOURCE_MEMO, EXTRACTOR_VERSION),
     )
 
 
@@ -510,7 +520,7 @@ def ensure_launched_session(
     `name = COALESCE(excluded.name, sessions.name)`, so a later rename wins and
     a quiet append never blanks it.
 
-    `raw_present=1` for the same reason the note row uses it: a 0 makes
+    `raw_present=1` for the same reason the memo row uses it: a 0 makes
     `--rebuild` refuse forever over a row with nothing to lose. On a rebuild
     this row is dropped and re-derived from the trace; if the agent died before
     writing one, it does not come back, which is the honest outcome.
@@ -533,80 +543,80 @@ def ensure_launched_session(
     conn.commit()
 
 
-def index_notes(conn) -> collections.Counter:
-    """Scan `~/.scad/notes/<agent>/*.jsonl` into the `notes` table.
+def index_memos(conn) -> collections.Counter:
+    """Scan `~/.scad/memos/<agent>/*.jsonl` into the `memos` table.
 
-    `notes_offset` is `parsed_offset` on a different file, and works identically:
-    a note file whose size already equals the offset is skipped without being
+    `memos_offset` is `parsed_offset` on a different file, and works identically:
+    a memo file whose size already equals the offset is skipped without being
     opened, and a resumed read appends rows whose idx continues from the maximum.
 
     This pass deliberately does NOT read the archive. Every other source obeys
     "nothing enters the index that is not in the archive first", because the
-    archive is what makes those rows rebuildable. The notes store is already the
+    archive is what makes those rows rebuildable. The memos store is already the
     durable home of its own content — copying it into the archive would make a
     second copy of the one thing that has no original elsewhere, and leave two
     files to keep honest instead of one.
     """
     stats = collections.Counter()
-    root = notes_root()
+    root = memos_root()
     if not root.is_dir():
         return stats
 
     for shard in sorted(p for p in root.iterdir() if p.is_dir()):
         for path in sorted(shard.glob("*.jsonl")):
-            stats += index_note_file(conn, path, shard.name)
+            stats += index_memo_file(conn, path, shard.name)
 
     return stats
 
 
-def index_note_file(conn, path: Path, agent: str) -> collections.Counter:
-    """Index one note file from wherever its offset left off.
+def index_memo_file(conn, path: Path, agent: str) -> collections.Counter:
+    """Index one memo file from wherever its offset left off.
 
     Split out of the pass above so the WRITE path can index the record it just
     appended without a second implementation of the offset rule. That rule is
     the whole reason this is shared: reading rows in without advancing
-    `notes_offset` makes the next pass re-append the same records under fresh
-    `idx` values, which is a duplicate that looks like a real second note.
+    `memos_offset` makes the next pass re-append the same records under fresh
+    `idx` values, which is a duplicate that looks like a real second memo.
     """
     stats = collections.Counter()
     session_id = path.stem
     row = session_row(conn, session_id)
     stat = path.stat()
     size = stat.st_size
-    held = row["notes_offset"] if row is not None else 0
-    if row is not None and held >= size and int(stat.st_mtime) <= (row["notes_mtime"] or 0):
+    held = row["memos_offset"] if row is not None else 0
+    if row is not None and held >= size and int(stat.st_mtime) <= (row["memos_mtime"] or 0):
         return stats
 
-    # A note file is the one store a person edits by hand: the CLI warns
+    # A memo file is the one store a person edits by hand: the CLI warns
     # about an unknown project and writes anyway, and the fix is to correct
-    # the line. Appending from the offset cannot see that. Notes are small,
+    # the line. Appending from the offset cannot see that. Memos are small,
     # so a file that changed is read whole, and if the lines already indexed
     # no longer say what the rows say, the rows are replaced from the file.
     # The one case the offset rule still serves is the pure append, which
     # stays an append so idx values are stable.
     try:
-        notes, end = read_notes(path, 0)
-    except Exception as exc:          # a note we cannot read must not stop the pass
-        click.echo(f"[scad] skipped note {path.name}: {exc}")
+        memos, end = read_memos(path, 0)
+    except Exception as exc:          # a memo we cannot read must not stop the pass
+        click.echo(f"[scad] skipped memo {path.name}: {exc}")
         stats["skipped_files"] += 1
         return stats
 
     if row is None:
-        cwd = next((n.cwd_at_write for n in notes if n.cwd_at_write), None)
-        _ensure_note_session(conn, session_id, agent, cwd)
+        cwd = next((n.cwd_at_write for n in memos if n.cwd_at_write), None)
+        _ensure_memo_session(conn, session_id, agent, cwd)
 
     stored = conn.execute(
-        "SELECT ts, topic, title, project, parent FROM notes WHERE session_id = ? "
+        "SELECT ts, topic, title, project, parent FROM memos WHERE session_id = ? "
         "ORDER BY idx", (session_id,)).fetchall()
-    prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in notes[:len(stored)]]
+    prefix = [(n.ts, n.topic, n.title, n.project, n.parent) for n in memos[:len(stored)]]
     if prefix == [tuple(r) for r in stored]:
-        new = notes[len(stored):]
+        new = memos[len(stored):]
     else:
-        conn.execute("DELETE FROM notes WHERE session_id = ?", (session_id,))
+        conn.execute("DELETE FROM memos WHERE session_id = ?", (session_id,))
         stats["replaced"] += 1
-        new = notes
-    stats["notes"] += append_notes(conn, session_id, new, str(path))
-    conn.execute("UPDATE sessions SET notes_offset = ?, notes_mtime = ? WHERE id = ?",
+        new = memos
+    stats["memos"] += append_memos(conn, session_id, new, str(path))
+    conn.execute("UPDATE sessions SET memos_offset = ?, memos_mtime = ? WHERE id = ?",
                  (end, int(stat.st_mtime), session_id))
     conn.commit()
     return stats
@@ -669,6 +679,17 @@ def _fork_of(path: Path, held: str | None) -> int | None:
 
 def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
             archive_first: bool = False) -> dict[str, int]:
+    """Scan the archive into the index, holding `index_lock` throughout.
+
+    With no connection given, the lock is taken before the index is opened, so
+    two first-ever reindexes do not race to create it.
+    """
+    with index_lock(conn if conn is not None else index_path()):
+        conn = conn or connect()
+        return _reindex(conn, rebuild=rebuild, force=force, archive_first=archive_first)
+
+
+def _reindex(conn, *, rebuild: bool, force: bool, archive_first: bool) -> dict[str, int]:
     """Scan the archive into the index.
 
     Incremental by default: a file whose size already equals the session's
@@ -707,15 +728,16 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
                 f"{missing} session(s) have no raw left in the archive; --rebuild would "
                 "destroy the only copy of their turns. Re-run with --force to override."
             )
-        # Notes rows go too, and safely: the note FILES are truth, are never
-        # deleted, and index_notes below reads every one of them back from
+        # Memos rows go too, and safely: the memo FILES are truth, are never
+        # deleted, and index_memos below reads every one of them back from
         # offset 0. Leaving them would strand rows whose session no longer
         # exists and break the idx continuation on the next append.
-        conn.executescript("DELETE FROM notes; DELETE FROM turns; DELETE FROM sessions;")
+        conn.executescript("DELETE FROM memos; DELETE FROM turns; DELETE FROM sessions;")
         conn.commit()
 
     if not root.is_dir():
-        stats.update(index_notes(conn))   # a note does not need an archive to exist
+        stats.update(index_memos(conn))   # a memo does not need an archive to exist
+        _stamp_indexed(conn)
         return stats
 
     job_states: list[JobStateRecord] = []
@@ -834,14 +856,91 @@ def reindex(conn=None, *, rebuild: bool = False, force: bool = False,
         if apply_job_state(conn, job):
             stats["named"] += 1
 
-    # Last, for the same reason: a note only inserts a session row when the scan
+    # Last, for the same reason: a memo only inserts a session row when the scan
     # has already had its chance to produce a better one.
-    stats.update(index_notes(conn))
+    stats.update(index_memos(conn))
+    _stamp_indexed(conn)
 
     # A Counter, not a plain dict: callers ask for counts that a quiet pass never
     # incremented ("how many sessions?" after a no-op scan), and 0 is the honest
     # answer there rather than a KeyError.
     return stats
+
+
+LOCK_TIMEOUT_S = 300
+
+
+@contextlib.contextmanager
+def index_lock(conn, *, timeout_s: float = LOCK_TIMEOUT_S):
+    """Hold the index exclusively for one writer that appends.
+
+    `conn` is an open index, or the path of one not yet opened.
+
+    Two reindexes at once (`orglens view` and `scad view` both refresh before
+    they render) each read a session's offset as 0 before the other commits,
+    and both append every turn: measured, 21 of 60 sessions doubled. SQLite
+    serialises the writes but not the read-then-append, so the lock is on
+    the whole pass, in a file beside the index. A second holder waits, then
+    finds nothing new. The lock is an flock, so a process that dies drops it.
+    """
+    if isinstance(conn, (str, Path)):
+        path = Path(str(conn) + ".lock")
+    else:
+        db = conn.execute("PRAGMA database_list").fetchone()[2]
+        path = Path(db + ".lock") if db else None
+    if path is None:                 # an in-memory index has no one to share with
+        yield
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)   # a first reindex has no home yet
+    with open(path, "a") as fh:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise click.ClickException(
+                        f"another reindex has held {path.name} for {timeout_s:.0f}s; "
+                        "if none is running, delete it and try again.") from None
+                time.sleep(0.1)
+        try:
+            yield
+        finally:
+            fcntl.flock(fh, fcntl.LOCK_UN)
+
+
+def _stamp_indexed(conn) -> None:
+    """Record that a whole pass finished, and when, in epoch ms.
+
+    Only `reindex` stamps. The write path indexes the one memo file it just
+    appended, which leaves every trace exactly as stale as before, so it must
+    not make the index look fresh.
+    """
+    conn.execute(
+        "INSERT INTO meta(key, value) VALUES('indexed_at', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        (str(int(time.time() * 1000)),))
+    conn.commit()
+
+
+def index_status(conn) -> dict:
+    """When the index was last refreshed, and what it holds. Reads, never writes.
+
+    Nothing refreshes the index on a timer: `scad view` and `orglens view` run a
+    pass before they render, and everything else reads what is there. So a
+    reader that does not refresh needs this to tell a quiet session from a
+    stale index. `indexed_at` is None for an index no pass has finished on.
+    """
+    meta = dict(conn.execute(
+        "SELECT key, value FROM meta WHERE key IN ('indexed_at', 'schema_version')"
+    ).fetchall())
+    return {
+        "indexed_at": int(meta["indexed_at"]) if meta.get("indexed_at") else None,
+        "sessions": conn.execute("SELECT count(*) FROM sessions").fetchone()[0],
+        "memos": conn.execute("SELECT count(*) FROM memos").fetchone()[0],
+        "schema_version": int(meta.get("schema_version") or SCHEMA_VERSION),
+    }
 
 
 _FTS_SCHEMA = """
@@ -898,58 +997,59 @@ def _fts_query(raw: str) -> str:
     return " ".join(f'"{w}"' for w in words if w)
 
 
-def session_notes(conn, session_id: str) -> list[dict]:
-    """A session's notes, oldest first — the order they were written."""
+def session_memos(conn, session_id: str) -> list[dict]:
+    """A session's memos, oldest first — the order they were written."""
     rows = conn.execute(
-        f"SELECT n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, {NOTE_RELATION_SQL}, "
-        f"       n.parent, n.project, n.title, n.tags, n.entities, n.note_path "
-        f"FROM notes n WHERE n.session_id = ? ORDER BY n.idx",
+        f"SELECT n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, {MEMO_RELATION_SQL}, "
+        f"       n.parent, n.project, n.title, n.tags, n.entities, n.memo_path "
+        f"FROM memos n WHERE n.session_id = ? ORDER BY n.idx",
         (session_id,),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
-def search_notes(conn, query: str, *, limit: int = 20) -> list[dict]:
-    """Search notes by topic, title, tags, entities and the note's own project.
+def search_memos(conn, query: str, *, limit: int = 20) -> list[dict]:
+    """Search memos by body, topic, title, tags, entities and the memo's own project.
 
-    Deliberately not FTS. Notes are the authored tier and there are few of them;
-    a LIKE over five short columns is exact enough and needs no second index to
-    keep in sync with `turns_fts`. If the note count ever reaches the thousands
-    this becomes an FTS table over `notes.title`.
+    Deliberately not FTS. Memos are the authored tier and there are few of them
+    (94 on the author's machine in October 2026); a LIKE over six columns is
+    exact enough and needs no second index to keep in sync with `turns_fts`. If
+    the count ever reaches the thousands this becomes an FTS table. The body is
+    matched but not returned: a hit says which memo, and `memos read` shows it.
 
     `n.project` is matched, not the resolved one: matching the JOINed project
-    would make every note in a project a hit for that project's name, which
+    would make every memo in a project a hit for that project's name, which
     turns a search for a subject into a listing. The authored value is a
     deliberate label and is worth finding by.
     """
     like = f"%{query.lower()}%"
     rows = conn.execute(
-        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
-        f"       n.note_path, {NOTE_PROJECT_SQL}, s.name, s.agent "
-        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"SELECT n.session_id, n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, "
+        f"       {MEMO_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       n.memo_path, {MEMO_PROJECT_SQL}, s.name, s.agent "
+        f"FROM memos n LEFT JOIN sessions s ON s.id = n.session_id "
         f"WHERE lower(COALESCE(n.topic,'')) LIKE ? OR lower(COALESCE(n.title,'')) LIKE ? "
         f"   OR lower(COALESCE(n.tags,'')) LIKE ? OR lower(COALESCE(n.entities,'')) LIKE ? "
-        f"   OR lower(COALESCE(n.project,'')) LIKE ? "
+        f"   OR lower(COALESCE(n.project,'')) LIKE ? OR lower(COALESCE(n.text,'')) LIKE ? "
         f"ORDER BY n.ts DESC LIMIT ?",
-        (like, like, like, like, like, limit),
+        (like, like, like, like, like, like, limit),
     ).fetchall()
     return [dict(r) for r in rows]
 
 
 def known_projects(conn) -> set[str]:
-    """Every project name the index has seen, from sessions and from notes.
+    """Every project name the index has seen, from sessions and from memos.
 
     The write path uses this to tell a caller its `project` looks unfamiliar.
     Sessions alone would be the wrong set twice over: `scad project ls` counts
     sessions, so a real project nobody has opened a session in yet is missing
-    from it, and a note that already named a project is itself evidence the
+    from it, and a memo that already named a project is itself evidence the
     name is in use.
     """
     rows = conn.execute(
         "SELECT DISTINCT project FROM sessions WHERE COALESCE(project,'') <> '' "
         "UNION "
-        "SELECT DISTINCT project FROM notes WHERE COALESCE(project,'') <> ''"
+        "SELECT DISTINCT project FROM memos WHERE COALESCE(project,'') <> ''"
     ).fetchall()
     return {r[0] for r in rows}
 

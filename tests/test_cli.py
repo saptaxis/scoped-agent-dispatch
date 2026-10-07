@@ -1,6 +1,7 @@
 """CLI tests."""
 
 import json
+from datetime import datetime
 import os
 import re
 
@@ -456,6 +457,12 @@ class TestSessionStart:
 
 class TestRunAgentInjectIntegration:
     """Test that run_agent() uses inject_job() when prompt is given."""
+
+    @pytest.fixture(autouse=True)
+    def _no_vm_reconcile(self, monkeypatch):
+        # run_agent reconciles the VM's mounts before it starts a container;
+        # left real, that restarted the developer's VM on every test run.
+        monkeypatch.setattr("scad.cli.reconcile_vm_mounts", lambda config: False)
 
     @patch("scad.cli.ensure_vm_running")
     @patch("scad.cli.ensure_gpu_supported")
@@ -926,8 +933,9 @@ class TestSessionInfo:
         assert "12,450 input" in result.output
         assert "Usage:" in result.output
 
+    @patch("scad.container._container_exists", return_value=False)
     @patch("scad.cli.get_session_info")
-    def test_info_not_found(self, mock_info, runner):
+    def test_info_not_found(self, mock_info, _exists, runner):
         mock_info.side_effect = FileNotFoundError("No session found for bad-id")
         result = runner.invoke(main, ["session", "info", "bad-id"])
         assert result.exit_code != 0
@@ -1954,7 +1962,7 @@ class TestRunSessionSplit:
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "note", "notes")
+    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -2015,7 +2023,12 @@ class TestRunSessionSplit:
 
     @patch("scad.cli.get_session_usage", return_value=None)
     @patch("scad.cli.get_session_info")
-    def test_session_info_alias_still_resolves_a_run_id(self, mock_info, _usage, runner):
+    def test_session_info_alias_still_resolves_a_run_id(self, mock_info, _usage, runner,
+                                                         tmp_path, monkeypatch):
+        # The run must exist for either name to resolve it; this passed only
+        # where a real ~/.scad/runs/demo-test-Mar03-1200 was left over.
+        (tmp_path / "demo-test-Mar03-1200").mkdir()
+        monkeypatch.setattr("scad.container.RUNS_DIR", tmp_path)
         mock_info.return_value = {"run_id": "demo-test-Mar03-1200", "config": "demo",
                                   "branch": "b", "container": "running",
                                   "clones_path": None, "clones": [],
@@ -2057,6 +2070,71 @@ class TestRenameLeftNoStaleDocs:
                  if "scad status" in p.read_text(errors="ignore")]
         assert stale == []
 
+    def test_no_doc_teaches_a_note_command_or_skill(self):
+        """0.9.0 renamed notes to memos with no aliases, so a doc that still
+        teaches the old names teaches commands that fail."""
+        old = ("scad notes ", "scad session note", "--notes", "/remember", "/recall",
+               "~/.scad/notes", "`remember`", "`recall`")
+        stale = [f"{p.name}: {o}" for p in self._sources()
+                 for o in old if o in p.read_text(errors="ignore")]
+        assert stale == []
+
+
+class TestStoreNotMovedStopsTheCommand:
+    """A machine with only the pre-0.9.0 ~/.scad/notes gets one error naming
+    the move, from every command that reads or writes memos, not a traceback
+    and not an empty listing."""
+
+    def _old_store_only(self, tmp_path, monkeypatch):
+        home = tmp_path / ".scad"
+        (home / "notes" / "claude").mkdir(parents=True)
+        (home / "notes" / "claude" / "S1.jsonl").write_text('{"title": "t"}\n')
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return home
+
+    @pytest.mark.parametrize("argv", [
+        ["session", "memo", "--session", "S1"],
+        ["session", "memos", "S1"],
+        ["memos", "read", "S1"],
+        ["memos", "ls"],
+        ["search", "--memos", "x"],
+        ["reindex"],
+    ])
+    def test_each_memo_command_exits_non_zero_naming_the_move(self, runner, tmp_path,
+                                                              monkeypatch, argv):
+        home = self._old_store_only(tmp_path, monkeypatch)
+        result = runner.invoke(main, argv, input='{"title": "t"}')
+        assert result.exit_code == 1, result.output
+        assert f"mv {home / 'notes'} {home / 'memos'}" in result.output
+        assert "Traceback" not in result.output
+        assert not (home / "memos").exists()
+
+
+class TestTheOldNoteNamesAreGone:
+    """0.9.0 renamed notes to memos with no aliases: the old names are an
+    ordinary usage error, so nothing keeps learning them."""
+
+    @pytest.mark.parametrize("argv", [
+        ["notes", "ls"], ["notes", "read", "S1"],
+        ["session", "note", "--session", "S1"], ["session", "notes", "S1"],
+        ["search", "--notes", "x"],
+    ])
+    def test_each_old_name_is_a_usage_error(self, runner, argv):
+        result = runner.invoke(main, argv)
+        assert result.exit_code == 2, result.output
+        assert "No such command" in result.output or "No such option" in result.output
+
+    @pytest.mark.parametrize("argv", [
+        ["memos", "ls", "--help"], ["memos", "read", "--help"],
+        ["session", "memo", "--help"], ["session", "memos", "--help"],
+    ])
+    def test_each_new_name_exists(self, runner, argv):
+        assert runner.invoke(main, argv).exit_code == 0
+
+    def test_search_takes_memos(self, runner):
+        assert "--memos" in runner.invoke(main, ["search", "--help"]).output
+
 
 class TestSessionNote:
     """`scad session note` — the write CLI for the one tier with no second copy."""
@@ -2072,7 +2150,7 @@ class TestSessionNote:
 
     def _projects(self, tmp_path, monkeypatch, cwd, session_id="S1"):
         """A fake ~/.claude/projects holding one live transcript for `cwd`."""
-        from scad.notes import encode_cwd
+        from scad.memos import encode_cwd
         home = tmp_path / "home"
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
         d = home / ".claude" / "projects" / encode_cwd(str(Path(cwd).resolve()))
@@ -2083,26 +2161,26 @@ class TestSessionNote:
 
     def test_explicit_session_appends_the_record(self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        path = scad_home / "notes" / "claude" / "S1.jsonl"
+        path = scad_home / "memos" / "claude" / "S1.jsonl"
         assert json.loads(path.read_text())["title"] == "built it"
 
     def test_the_file_lands_agent_sharded_and_session_keyed(self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "X9", "--agent", "codex"],
+        runner.invoke(main, ["session", "memo", "--session", "X9", "--agent", "codex"],
                       input=json.dumps(self.NOTE))
-        assert (scad_home / "notes" / "codex" / "X9.jsonl").is_file()
+        assert (scad_home / "memos" / "codex" / "X9.jsonl").is_file()
 
     def test_a_second_note_appends_leaving_the_first_byte_identical(
             self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        path = scad_home / "notes" / "claude" / "S1.jsonl"
+        path = scad_home / "memos" / "claude" / "S1.jsonl"
         first = path.read_bytes()
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps({**self.NOTE, "title": "and again"}))
         assert path.read_bytes().startswith(first)
         assert len(path.read_text().splitlines()) == 2
@@ -2113,10 +2191,10 @@ class TestSessionNote:
         work.mkdir()
         self._projects(tmp_path, monkeypatch, work, session_id="LIVE")
         monkeypatch.chdir(work)
-        result = runner.invoke(main, ["session", "note", "--current"],
+        result = runner.invoke(main, ["session", "memo", "--current"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        assert (scad_home / "notes" / "claude" / "LIVE.jsonl").is_file()
+        assert (scad_home / "memos" / "claude" / "LIVE.jsonl").is_file()
 
     def test_current_records_the_cwd_it_resolved_from(self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
@@ -2124,8 +2202,8 @@ class TestSessionNote:
         work.mkdir()
         self._projects(tmp_path, monkeypatch, work, session_id="LIVE")
         monkeypatch.chdir(work)
-        runner.invoke(main, ["session", "note", "--current"], input=json.dumps(self.NOTE))
-        rec = json.loads((scad_home / "notes" / "claude" / "LIVE.jsonl").read_text())
+        runner.invoke(main, ["session", "memo", "--current"], input=json.dumps(self.NOTE))
+        rec = json.loads((scad_home / "memos" / "claude" / "LIVE.jsonl").read_text())
         assert rec["cwd_at_write"] == str(work.resolve())
 
     def test_two_live_sessions_refuse_and_name_the_flag(self, runner, tmp_path, monkeypatch):
@@ -2133,11 +2211,11 @@ class TestSessionNote:
         work = tmp_path / "work"
         work.mkdir()
         home = self._projects(tmp_path, monkeypatch, work, session_id="alpha")
-        from scad.notes import encode_cwd
+        from scad.memos import encode_cwd
         d = home / ".claude" / "projects" / encode_cwd(str(work.resolve()))
         (d / "beta.jsonl").write_text(json.dumps({"cwd": str(work.resolve())}) + "\n")
         monkeypatch.chdir(work)
-        result = runner.invoke(main, ["session", "note", "--current"],
+        result = runner.invoke(main, ["session", "memo", "--current"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code != 0
         assert "--session" in result.output
@@ -2149,7 +2227,7 @@ class TestSessionNote:
         work = tmp_path / "work"
         work.mkdir()
         monkeypatch.chdir(work)
-        result = runner.invoke(main, ["session", "note", "--current"],
+        result = runner.invoke(main, ["session", "memo", "--current"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code != 0
         assert "--session" in result.output
@@ -2159,10 +2237,10 @@ class TestSessionNote:
         scad_home = self._home(tmp_path, monkeypatch)
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "EXPORTED")
-        result = runner.invoke(main, ["session", "note", "--current"],
+        result = runner.invoke(main, ["session", "memo", "--current"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        assert (scad_home / "notes" / "claude" / "EXPORTED.jsonl").is_file()
+        assert (scad_home / "memos" / "claude" / "EXPORTED.jsonl").is_file()
 
     def test_current_resolves_against_the_agent_that_was_asked_for(
             self, runner, tmp_path, monkeypatch):
@@ -2170,11 +2248,11 @@ class TestSessionNote:
         monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
         monkeypatch.setenv("CODEX_THREAD_ID", "CX7")
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "CLAUDE-PARENT")
-        result = runner.invoke(main, ["session", "note", "--current", "--agent", "codex"],
+        result = runner.invoke(main, ["session", "memo", "--current", "--agent", "codex"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code == 0, result.output
-        assert (scad_home / "notes" / "codex" / "CX7.jsonl").is_file()
-        assert not (scad_home / "notes" / "codex" / "CLAUDE-PARENT.jsonl").exists()
+        assert (scad_home / "memos" / "codex" / "CX7.jsonl").is_file()
+        assert not (scad_home / "memos" / "codex" / "CLAUDE-PARENT.jsonl").exists()
 
     def test_current_for_codex_refuses_rather_than_using_an_inherited_claude_id(
             self, runner, tmp_path, monkeypatch):
@@ -2184,29 +2262,29 @@ class TestSessionNote:
         self._projects(tmp_path, monkeypatch, work, session_id="CLAUDE-PARENT")
         monkeypatch.chdir(work)
         monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "CLAUDE-PARENT")
-        result = runner.invoke(main, ["session", "note", "--current", "--agent", "codex"],
+        result = runner.invoke(main, ["session", "memo", "--current", "--agent", "codex"],
                                input=json.dumps(self.NOTE))
         assert result.exit_code != 0
         assert "CODEX_THREAD_ID" in result.output
-        assert not (scad_home / "notes" / "codex").exists()
+        assert not (scad_home / "memos" / "codex").exists()
 
     def test_neither_target_is_refused(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note"], input=json.dumps(self.NOTE))
+        result = runner.invoke(main, ["session", "memo"], input=json.dumps(self.NOTE))
         assert result.exit_code != 0
 
     def test_malformed_stdin_is_refused_without_writing_anything(
             self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input="not json at all")
         assert result.exit_code != 0
-        assert not (scad_home / "notes" / "claude" / "S1.jsonl").exists()
+        assert not (scad_home / "memos" / "claude" / "S1.jsonl").exists()
 
     def test_it_confirms_briefly_without_echoing_the_record(
             self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps(self.NOTE))
         assert "notes-store" in result.output          # the topic
         assert "**Frame**" not in result.output        # not the whole text
@@ -2222,19 +2300,19 @@ class TestSessionNotes:
 
     def test_reads_back_newest_last(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps({**self.NOTE, "title": "second"}))
-        result = runner.invoke(main, ["session", "notes", "S1"])
+        result = runner.invoke(main, ["session", "memos", "S1"])
         assert result.exit_code == 0
         assert result.output.index("first") < result.output.index("second")
 
     def test_json_round_trips_the_records_as_written(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        result = runner.invoke(main, ["session", "notes", "S1", "--json"])
+        result = runner.invoke(main, ["session", "memos", "S1", "--json"])
         payload = json.loads(result.stdout)
         assert payload[0]["title"] == "first"
         assert payload[0]["cwd_at_write"]
@@ -2243,31 +2321,31 @@ class TestSessionNotes:
         # The file is truth. A note must be readable before any reindex has run,
         # and after a rebuild has dropped every row.
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        result = runner.invoke(main, ["session", "notes", "S1"])
+        result = runner.invoke(main, ["session", "memos", "S1"])
         assert result.exit_code == 0 and "first" in result.output
 
     def test_a_session_with_no_notes_says_so(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "notes", "NOPE"])
+        result = runner.invoke(main, ["session", "memos", "NOPE"])
         assert result.exit_code == 0
-        assert "no notes" in result.output.lower()
+        assert "no memos" in result.output.lower()
 
     def test_session_show_counts_the_notes(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
         runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "show", "S1"])
         assert result.exit_code == 0
-        assert "notes" in result.output
+        assert "memos" in result.output
 
     def test_session_show_lists_each_note_kind(self, runner, tmp_path, monkeypatch):
         # A handoff among a session's notes is the one you want first, and the
         # listing used to show only topic and title -- so nothing said which.
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps({**self.NOTE, "kind": "handoff",
                                         "topic": "where-this-stands"}))
         runner.invoke(main, ["reindex", "--no-archive"])
@@ -2279,9 +2357,9 @@ class TestSessionNotes:
         # The raw ISO string is in the file; a reader wants to know how old it
         # is without doing the subtraction.
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        result = runner.invoke(main, ["notes", "read", "S1", "--last"])
+        result = runner.invoke(main, ["memos", "read", "S1", "--last"])
         assert result.exit_code == 0
         assert "ago)" in result.output
 
@@ -2296,25 +2374,25 @@ class TestSessionNotes:
         # a note that arrived some other way: another machine, a restored
         # backup, a shard synced in.
         home = self._home(tmp_path, monkeypatch)
-        shard = home / "notes" / "claude"
+        shard = home / "memos" / "claude"
         shard.mkdir(parents=True)
         (shard / "S9.jsonl").write_text(
             json.dumps({**self.NOTE, "ts": "2026-08-05T10:00:00+05:30"}) + "\n")
         result = runner.invoke(main, ["reindex", "--no-archive"])
-        assert "notes: 1" in result.output
+        assert "memos: 1" in result.output
 
     def test_a_note_written_here_is_not_news_to_the_next_pass(
             self, runner, tmp_path, monkeypatch):
         # The other half of the same rule: indexing at write must advance the
         # offset, so the pass has nothing left to do.
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
         result = runner.invoke(main, ["reindex", "--no-archive"])
         assert "notes: 1" not in result.output
 
 
-class TestRememberSkillIsAThinCaller:
+class TestMemoWriteSkillIsAThinCaller:
     """`/remember` produces the record; `scad session note` decides where it goes.
 
     The split is the point. The old command reimplemented project resolution in
@@ -2331,7 +2409,7 @@ class TestRememberSkillIsAThinCaller:
 
     @property
     def text(self):
-        return (self.ROOT / "skills" / "remember" / "SKILL.md").read_text()
+        return (self.ROOT / "skills" / "memo-write" / "SKILL.md").read_text()
 
     def test_the_claude_only_command_is_gone(self):
         # Leaving it would re-create the duplication the migration removes: the
@@ -2339,11 +2417,11 @@ class TestRememberSkillIsAThinCaller:
         assert not (self.ROOT / "commands" / "remember.md").exists()
 
     def test_its_name_preserves_the_slash_verb(self):
-        # A skill's frontmatter `name` IS its invocation — `/remember` in Claude,
-        # `$remember` in codex. Renaming the directory or the field changes what
-        # the human types, so both are pinned.
-        assert (self.ROOT / "skills" / "remember" / "SKILL.md").exists()
-        assert re.search(r"^name:\s*remember\s*$", self.text, re.M)
+        # A skill's frontmatter `name` IS its invocation — `/memo-write` in
+        # Claude, `$memo-write` in codex. Renaming the directory or the field
+        # changes what the human types, so both are pinned.
+        assert (self.ROOT / "skills" / "memo-write" / "SKILL.md").exists()
+        assert re.search(r"^name:\s*memo-write\s*$", self.text, re.M)
 
     def test_it_carries_no_command_only_syntax(self):
         # $ARGUMENTS and argument-hint are slash-command features with no meaning
@@ -2359,7 +2437,7 @@ class TestRememberSkillIsAThinCaller:
         assert "../" not in self.text
 
     def test_it_pipes_to_the_cli(self):
-        assert "scad session note --current" in self.text
+        assert "scad session memo --current" in self.text
 
     def test_the_dead_store_path_is_gone(self):
         # ~/.capture/<project>/ was never created on any machine, and a project
@@ -2385,13 +2463,62 @@ class TestRememberSkillIsAThinCaller:
         assert "reverse it" in self.text
 
     def test_the_record_fields_still_match_the_capture_format(self):
-        from scad.notes import NOTE_FIELDS
-        authored = set(NOTE_FIELDS) - {"ts", "cwd_at_write"}   # filled by the CLI
+        from scad.memos import MEMO_FIELDS
+        authored = set(MEMO_FIELDS) - {"ts", "cwd_at_write"}   # filled by the CLI
         for field in authored:
-            assert f"`{field}`" in self.text, f"{field} undocumented in /remember"
+            assert f"`{field}`" in self.text, f"{field} undocumented in /memo-write"
 
     def test_the_fields_the_cli_fills_are_marked_as_not_the_callers_job(self):
         assert "Do not set them." in self.text
+
+
+class TestTheMemoSkills:
+    """0.9.0: /remember and /recall became /memo-write and /memo-recall, and
+    /memo-handoff is new. The prefix is what routes "write a memo" and "write a
+    handoff memo"; the plain verbs collided with Claude Code's own memory."""
+
+    ROOT = Path(__file__).resolve().parent.parent
+
+    def _text(self, name):
+        return (self.ROOT / "skills" / name / "SKILL.md").read_text()
+
+    @pytest.mark.parametrize("name", ["memo-write", "memo-handoff", "memo-recall"])
+    def test_each_ships_under_its_name(self, name):
+        assert re.search(rf"^name:\s*{name}\s*$", self._text(name), re.M)
+
+    @pytest.mark.parametrize("name", ["remember", "recall"])
+    def test_the_old_skills_are_gone(self, name):
+        assert not (self.ROOT / "skills" / name).exists()
+
+    def test_recall_reads_memos_then_checks_the_repo(self):
+        text = self._text("memo-recall")
+        assert "scad memos ls" in text and "scad memos read" in text
+        assert "git log" in text
+
+    def test_handoff_writes_a_handoff_memo_for_its_own_session(self):
+        text = self._text("memo-handoff")
+        assert "scad session memo --current --agent" in text
+        assert '"kind": "handoff"' in text
+
+    def test_handoff_checks_the_repo_before_it_writes(self):
+        text = self._text("memo-handoff")
+        assert "git status" in text and "git log" in text
+
+    def test_handoff_takes_its_scope_from_the_arguments(self):
+        text = self._text("memo-handoff")
+        assert "brief" in text and "focus" in text
+
+    def test_write_points_handoffs_at_memo_handoff(self):
+        assert "/memo-handoff" in self._text("memo-write")
+
+    def test_no_skill_teaches_an_old_name(self):
+        old = ("scad notes ", "scad session note ", "scad session notes ", "--notes",
+               "/remember", "/recall", "~/.scad/notes")
+        stale = []
+        for path in (self.ROOT / "skills").glob("**/*.md"):
+            text = path.read_text()
+            stale += [f"{path.relative_to(self.ROOT)}: {o}" for o in old if o in text]
+        assert stale == []
 
 
 @pytest.mark.usefixtures("offline_view")
@@ -2601,16 +2728,16 @@ class TestNotesForHandoff:
                 "INSERT INTO sessions (id, kind, agent, machine, grade, source, "
                 "project, name, ended) VALUES (?,?,?,?,?,?,?,?,?)",
                 (sid, "main", "claude", "m", "full", "claude-transcript", proj, name, ended))
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                      "VALUES ('S1',0,200,'registry','What the registry solved','/n')")
-        conn.execute("INSERT INTO notes (session_id, idx, ts, topic, title, note_path) "
+        conn.execute("INSERT INTO memos (session_id, idx, ts, topic, title, memo_path) "
                      "VALUES ('S2',0,150,'other-thing','Unrelated','/n')")
         conn.commit()
         conn.close()
 
     def test_ls_scoped_to_a_project_shows_only_that_project(self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--project", "scad"])
+        result = runner.invoke(main, ["memos", "ls", "--project", "scad"])
         assert result.exit_code == 0
         assert "What the registry solved" in result.output
         assert "Unrelated" not in result.output
@@ -2618,29 +2745,29 @@ class TestNotesForHandoff:
     def test_ls_gives_the_session_id_to_read_with(self, runner, tmp_path, monkeypatch):
         # The listing is only useful if it hands over the key to the next command.
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--project", "scad"])
+        result = runner.invoke(main, ["memos", "ls", "--project", "scad"])
         assert "S1" in result.output
 
     def test_ls_json_is_machine_readable(self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--json"])
+        result = runner.invoke(main, ["memos", "ls", "--json"])
         rows = json.loads(result.output)
         assert {r["session_id"] for r in rows} == {"S1", "S2"}
         assert rows[0]["ts"] >= rows[-1]["ts"]      # newest first
 
     def test_ls_says_so_when_a_project_has_none(self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--project", "nothing-here"])
+        result = runner.invoke(main, ["memos", "ls", "--project", "nothing-here"])
         assert result.exit_code == 0
-        assert "No notes" in result.output
+        assert "No memos" in result.output
 
     def test_read_prints_the_full_record(self, runner, tmp_path, monkeypatch):
         """Reads the FILE, not the index — the index holds no body text at all."""
         self._index(tmp_path, monkeypatch)
-        from scad.notes import append_note
-        append_note({"topic": "registry", "title": "What the registry solved",
+        from scad.memos import append_memo
+        append_memo({"topic": "registry", "title": "What the registry solved",
                      "text": "THE FULL BODY GOES HERE"}, session_id="S1", agent="claude")
-        result = runner.invoke(main, ["notes", "read", "S1"])
+        result = runner.invoke(main, ["memos", "read", "S1"])
         assert "THE FULL BODY GOES HERE" in result.output
 
 
@@ -2659,12 +2786,12 @@ class TestNotesCrossCapture:
             "INSERT INTO sessions (id, kind, agent, machine, grade, source, project) "
             "VALUES ('S1','main','claude','m','full','claude-transcript','alpha')")
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, kind, topic, project, title, "
-            "tags, entities, note_path) VALUES "
+            "INSERT INTO memos (session_id, idx, ts, kind, topic, project, title, "
+            "tags, entities, memo_path) VALUES "
             "('S1',0,300,'bug','beta-crash','beta','BETA IS BROKEN','[]','[]','/n')")
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, kind, topic, project, title, "
-            "tags, entities, note_path) VALUES "
+            "INSERT INTO memos (session_id, idx, ts, kind, topic, project, title, "
+            "tags, entities, memo_path) VALUES "
             "('S1',1,200,'info','alpha-work',NULL,'ORDINARY ALPHA NOTE','[]','[]','/n')")
         conn.commit()
         conn.close()
@@ -2672,7 +2799,7 @@ class TestNotesCrossCapture:
     def test_a_note_filed_against_another_project_lists_under_it(
             self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--project", "beta"])
+        result = runner.invoke(main, ["memos", "ls", "--project", "beta"])
         assert result.exit_code == 0, result.output
         assert "BETA IS BROKEN" in result.output
         assert "ORDINARY ALPHA NOTE" not in result.output
@@ -2682,7 +2809,7 @@ class TestNotesCrossCapture:
         # The override is an override, not an addition: two projects claiming
         # one note is the ambiguity the field exists to remove.
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--project", "alpha"])
+        result = runner.invoke(main, ["memos", "ls", "--project", "alpha"])
         assert "ORDINARY ALPHA NOTE" in result.output
         assert "BETA IS BROKEN" not in result.output
 
@@ -2690,13 +2817,13 @@ class TestNotesCrossCapture:
             self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
         rows = json.loads(runner.invoke(
-            main, ["notes", "ls", "--project", "alpha", "--json"]).output)
+            main, ["memos", "ls", "--project", "alpha", "--json"]).output)
         assert [r["project"] for r in rows] == ["alpha"]
 
     def test_search_finds_the_cross_captured_note_under_its_own_project(
             self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["search", "beta", "--notes"])
+        result = runner.invoke(main, ["search", "beta", "--memos"])
         assert result.exit_code == 0, result.output
         assert "BETA IS BROKEN" in result.output
 
@@ -2713,19 +2840,19 @@ class TestNotesKindFilter:
                 ("handoff", "WHERE WE STOPPED"), ("bug", "SOMETHING BROKE"),
                 ("info", "AN ORDINARY NOTE"))):
             conn.execute(
-                "INSERT INTO notes (session_id, idx, ts, kind, topic, title, tags, "
-                "entities, note_path) VALUES ('S1',?,?,?,'t',?,'[]','[]','/n')",
+                "INSERT INTO memos (session_id, idx, ts, kind, topic, title, tags, "
+                "entities, memo_path) VALUES ('S1',?,?,?,'t',?,'[]','[]','/n')",
                 (idx, 100 - idx, kind, title))
         # Written before `kind` existed: NULL in the column, `info` by default.
         conn.execute(
-            "INSERT INTO notes (session_id, idx, ts, topic, title, tags, entities, "
-            "note_path) VALUES ('S1',9,50,'t','A LEGACY NOTE','[]','[]','/n')")
+            "INSERT INTO memos (session_id, idx, ts, topic, title, tags, entities, "
+            "memo_path) VALUES ('S1',9,50,'t','A LEGACY NOTE','[]','[]','/n')")
         conn.commit()
         conn.close()
 
     def test_kind_handoff_is_the_catch_up_query(self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--kind", "handoff"])
+        result = runner.invoke(main, ["memos", "ls", "--kind", "handoff"])
         assert result.exit_code == 0, result.output
         assert "WHERE WE STOPPED" in result.output
         assert "SOMETHING BROKE" not in result.output
@@ -2734,21 +2861,21 @@ class TestNotesKindFilter:
     def test_kind_combines_with_project(self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
         result = runner.invoke(
-            main, ["notes", "ls", "--project", "alpha", "--kind", "bug"])
+            main, ["memos", "ls", "--project", "alpha", "--kind", "bug"])
         assert "SOMETHING BROKE" in result.output
         assert "WHERE WE STOPPED" not in result.output
 
     def test_a_note_written_before_kind_existed_answers_as_info(
             self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--kind", "info"])
+        result = runner.invoke(main, ["memos", "ls", "--kind", "info"])
         assert "A LEGACY NOTE" in result.output
         assert "AN ORDINARY NOTE" in result.output
 
     def test_a_kind_outside_the_five_is_refused_by_the_flag(
             self, runner, tmp_path, monkeypatch):
         self._index(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--kind", "decision"])
+        result = runner.invoke(main, ["memos", "ls", "--kind", "decision"])
         assert result.exit_code != 0
         assert "decision" in result.output
 
@@ -2772,36 +2899,36 @@ class TestSessionNoteValidatesKindAndProject:
         conn.close()
 
     def _note(self, scad_home, session="S1"):
-        return scad_home / "notes" / "claude" / f"{session}.jsonl"
+        return scad_home / "memos" / "claude" / f"{session}.jsonl"
 
     def test_an_unknown_kind_is_refused_and_nothing_is_written(
             self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"kind": "decision", "title": "t"}))
         assert result.exit_code != 0
         assert "decision" in result.output
         assert not self._note(scad_home).exists()
 
     def test_each_of_the_five_kinds_is_accepted(self, runner, tmp_path, monkeypatch):
-        from scad.notes import KINDS
+        from scad.memos import KINDS
         scad_home = self._home(tmp_path, monkeypatch)
         for kind in KINDS:
-            result = runner.invoke(main, ["session", "note", "--session", kind],
+            result = runner.invoke(main, ["session", "memo", "--session", kind],
                                    input=json.dumps({"kind": kind, "title": "t"}))
             assert result.exit_code == 0, result.output
             assert json.loads(self._note(scad_home, kind).read_text())["kind"] == kind
 
     def test_omitting_kind_is_fine_and_lands_as_info(self, runner, tmp_path, monkeypatch):
         scad_home = self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t"}))
         assert result.exit_code == 0, result.output
         assert json.loads(self._note(scad_home).read_text())["kind"] == "info"
 
     def test_the_confirmation_line_shows_the_kind(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"kind": "handoff", "topic": "x",
                                                  "title": "t", "text": "**Frame**"}))
         assert "handoff" in result.output
@@ -2814,7 +2941,7 @@ class TestSessionNoteValidatesKindAndProject:
         # would lose notes over a name the index has merely not met yet.
         scad_home = self._home(tmp_path, monkeypatch)
         self._known(tmp_path, project="alpha")
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t", "project": "nowhere"}))
         assert result.exit_code == 0, result.output
         assert "nowhere" in result.output
@@ -2824,7 +2951,7 @@ class TestSessionNoteValidatesKindAndProject:
     def test_a_known_project_does_not_warn(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         self._known(tmp_path, project="alpha")
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t", "project": "alpha"}))
         assert result.exit_code == 0, result.output
         assert "warning" not in result.output.lower()
@@ -2835,16 +2962,16 @@ class TestSessionNoteValidatesKindAndProject:
         # not, or the warning becomes noise on deliberate, established use.
         self._home(tmp_path, monkeypatch)
         self._known(tmp_path, project="alpha")
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps({"title": "t", "project": "beta"}))
         runner.invoke(main, ["reindex", "--no-archive"])
-        result = runner.invoke(main, ["session", "note", "--session", "S2"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S2"],
                                input=json.dumps({"title": "t", "project": "beta"}))
         assert "warning" not in result.output.lower()
 
     def test_omitting_project_never_warns(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["session", "note", "--session", "S1"],
+        result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t"}))
         assert "warning" not in result.output.lower()
 
@@ -2854,19 +2981,19 @@ class TestNotesReadDerivesRelation:
 
     def _store(self, tmp_path, monkeypatch, records):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
-        from scad.notes import append_note
+        from scad.memos import append_memo
         for r in records:
-            append_note(r, session_id="S1", agent="claude")
+            append_memo(r, session_id="S1", agent="claude")
 
     def test_the_json_output_carries_a_relation_the_file_does_not(
             self, runner, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch, [
             {"topic": "a", "title": "one"}, {"topic": "a", "title": "two"},
             {"topic": "b", "parent": "a", "title": "three"}])
-        raw = (tmp_path / ".scad" / "notes" / "claude" / "S1.jsonl").read_text()
+        raw = (tmp_path / ".scad" / "memos" / "claude" / "S1.jsonl").read_text()
         assert "relation" not in raw
 
-        rows = json.loads(runner.invoke(main, ["session", "notes", "S1", "--json"]).output)
+        rows = json.loads(runner.invoke(main, ["session", "memos", "S1", "--json"]).output)
         assert [r["relation"] for r in rows] == ["shift", "continue", "branch"]
 
     def test_reading_one_note_still_places_it_in_its_thread(
@@ -2874,7 +3001,7 @@ class TestNotesReadDerivesRelation:
         self._store(tmp_path, monkeypatch, [
             {"topic": "a", "title": "one"}, {"topic": "a", "title": "two"}])
         row = json.loads(runner.invoke(
-            main, ["notes", "read", "S1", "--last", "--json"]).output)
+            main, ["memos", "read", "S1", "--last", "--json"]).output)
         assert row["relation"] == "continue"
 
 
@@ -2889,37 +3016,37 @@ class TestNotesReadIsProgressive:
 
     def _store(self, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
-        from scad.notes import append_note
+        from scad.memos import append_memo
         for i, (topic, body) in enumerate((
             ("older", "OLDEST BODY"), ("middle", "MIDDLE BODY"), ("newest", "NEWEST BODY"))):
-            append_note({"topic": topic, "title": f"t{i}", "text": body},
+            append_memo({"topic": topic, "title": f"t{i}", "text": body},
                         session_id="S1", agent="claude")
 
     def test_last_reads_only_the_newest(self, runner, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "read", "S1", "--last"])
+        result = runner.invoke(main, ["memos", "read", "S1", "--last"])
         assert "NEWEST BODY" in result.output
         assert "MIDDLE BODY" not in result.output
         assert "OLDEST BODY" not in result.output
 
     def test_idx_reads_exactly_that_one(self, runner, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "read", "S1", "--idx", "1"])
+        result = runner.invoke(main, ["memos", "read", "S1", "--idx", "1"])
         assert "MIDDLE BODY" in result.output
         assert "NEWEST BODY" not in result.output
 
     def test_no_flag_still_reads_everything(self, runner, tmp_path, monkeypatch):
         # The whole-session read stays the default; progressive is opt-in.
         self._store(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "read", "S1"])
+        result = runner.invoke(main, ["memos", "read", "S1"])
         for body in ("OLDEST BODY", "MIDDLE BODY", "NEWEST BODY"):
             assert body in result.output
 
     def test_an_idx_that_does_not_exist_says_so(self, runner, tmp_path, monkeypatch):
         self._store(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "read", "S1", "--idx", "99"])
+        result = runner.invoke(main, ["memos", "read", "S1", "--idx", "99"])
         assert result.exit_code == 0
-        assert "no note" in result.output.lower()
+        assert "no memo" in result.output.lower()
 
 
 class TestSessionResume:
@@ -3597,22 +3724,22 @@ class TestNoteWriteIndexesImmediately:
             self, runner, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
-        result = runner.invoke(main, ["notes", "ls"])
+        result = runner.invoke(main, ["memos", "ls"])
         assert result.exit_code == 0
         assert "S1" in result.output
 
     def test_write_then_reindex_does_not_duplicate(self, runner, tmp_path, monkeypatch):
-        # Indexing at write must ALSO advance notes_offset -- otherwise the next
+        # Indexing at write must ALSO advance memos_offset -- otherwise the next
         # pass re-appends the same record under a fresh idx, a duplicate that
         # reads as a real second note.
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
-        runner.invoke(main, ["session", "note", "--session", "S1"],
+        runner.invoke(main, ["session", "memo", "--session", "S1"],
                       input=json.dumps(self.NOTE))
         runner.invoke(main, ["reindex", "--no-archive"])
-        result = runner.invoke(main, ["notes", "ls", "--json"])
+        result = runner.invoke(main, ["memos", "ls", "--json"])
         rows = json.loads(result.output)
         assert len([r for r in rows if r["session_id"] == "S1"]) == 1
 
@@ -3629,30 +3756,30 @@ class TestNoteReadFindsTheRightShard:
     def test_read_falls_back_to_the_shard_that_has_it(
             self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "K1", "--agent", "kimi"],
+        runner.invoke(main, ["session", "memo", "--session", "K1", "--agent", "kimi"],
                       input=json.dumps(self.NOTE))
         # No --agent: the default shard is claude and the note is under kimi.
-        result = runner.invoke(main, ["notes", "read", "K1"])
+        result = runner.invoke(main, ["memos", "read", "K1"])
         assert result.exit_code == 0
         assert "from another agent" in result.output
 
     def test_named_agent_still_wins_when_it_has_the_file(
             self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "D1", "--agent", "kimi"],
+        runner.invoke(main, ["session", "memo", "--session", "D1", "--agent", "kimi"],
                       input=json.dumps({**self.NOTE, "title": "kimi one"}))
-        runner.invoke(main, ["session", "note", "--session", "D1", "--agent", "claude"],
+        runner.invoke(main, ["session", "memo", "--session", "D1", "--agent", "claude"],
                       input=json.dumps({**self.NOTE, "title": "claude one"}))
-        result = runner.invoke(main, ["notes", "read", "D1", "--agent", "kimi"])
+        result = runner.invoke(main, ["memos", "read", "D1", "--agent", "kimi"])
         assert "kimi one" in result.output
         assert "claude one" not in result.output
 
     def test_listing_shows_which_agent_wrote_each_note(
             self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
-        runner.invoke(main, ["session", "note", "--session", "K2", "--agent", "kimi"],
+        runner.invoke(main, ["session", "memo", "--session", "K2", "--agent", "kimi"],
                       input=json.dumps(self.NOTE))
-        result = runner.invoke(main, ["notes", "ls"])
+        result = runner.invoke(main, ["memos", "ls"])
         assert "kimi" in result.output
 
 
@@ -3826,8 +3953,8 @@ class TestNotesAbout:
 
     def _seed(self, tmp_path, monkeypatch):
         import time as _time
-        from scad.index import append_notes, connect, upsert_session
-        from scad.records import KIND_MAIN, NoteRecord, SessionRecord
+        from scad.index import append_memos, connect, upsert_session
+        from scad.records import KIND_MAIN, MemoRecord, SessionRecord
 
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
@@ -3839,20 +3966,20 @@ class TestNotesAbout:
             upsert_session(conn, rec, machine="mac", project=project,
                            archive_path=f"/arc/{sid}.jsonl", source_size=1,
                            source_mtime=1, parsed_offset=1)
-        append_notes(conn, "SA", [
-            NoteRecord(ts=now - 500, title="by tag", tags=["orglens", "x"]),
-            NoteRecord(ts=now - 400, title="by entity", entities=["orglens"]),
-            NoteRecord(ts=now - 300, title="by topic", topic="orglens"),
-            NoteRecord(ts=now - 200, title="by authored project", project="orglens"),
-            NoteRecord(ts=now - 100, title="unrelated", tags=["scad"]),
+        append_memos(conn, "SA", [
+            MemoRecord(ts=now - 500, title="by tag", tags=["orglens", "x"]),
+            MemoRecord(ts=now - 400, title="by entity", entities=["orglens"]),
+            MemoRecord(ts=now - 300, title="by topic", topic="orglens"),
+            MemoRecord(ts=now - 200, title="by authored project", project="orglens"),
+            MemoRecord(ts=now - 100, title="unrelated", tags=["scad"]),
         ], "/notes/SA.jsonl")
-        append_notes(conn, "SO", [NoteRecord(ts=now - 50, title="by session project")],
+        append_memos(conn, "SO", [MemoRecord(ts=now - 50, title="by session project")],
                      "/notes/SO.jsonl")
         conn.commit()
 
     def test_about_matches_tags_entities_topic_and_project(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
+        result = runner.invoke(main, ["memos", "ls", "--about", "orglens", "--json"])
         assert result.exit_code == 0, result.output
         titles = {r["title"] for r in json.loads(result.stdout)}
         assert titles == {"by tag", "by entity", "by topic", "by authored project",
@@ -3862,14 +3989,14 @@ class TestNotesAbout:
         """Without them a consumer cannot do the about-match from one export
         and calls --about once per unit: 23 subprocesses (orglens, 2026-09-15)."""
         self._seed(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--json", "--limit", "100"])
+        result = runner.invoke(main, ["memos", "ls", "--json", "--limit", "100"])
         by = {r["title"]: r for r in json.loads(result.stdout)}
         assert json.loads(by["by entity"]["entities"]) == ["orglens"]
         assert json.loads(by["by tag"]["tags"]) == ["orglens", "x"]
 
     def test_about_takes_several_names_and_says_which_matched(self, runner, tmp_path, monkeypatch):
         self._seed(tmp_path, monkeypatch)
-        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--about", "scad",
+        result = runner.invoke(main, ["memos", "ls", "--about", "orglens", "--about", "scad",
                                       "--json", "--limit", "100"])
         assert result.exit_code == 0, result.output
         by = {r["title"]: r["about"] for r in json.loads(result.stdout)}
@@ -3880,14 +4007,14 @@ class TestNotesAbout:
 
     def test_about_is_a_whole_word_in_the_json_arrays(self, runner, tmp_path, monkeypatch):
         """`orglens` must not match a tag `orglens-extras`."""
-        from scad.index import append_notes, connect
-        from scad.records import NoteRecord
+        from scad.index import append_memos, connect
+        from scad.records import MemoRecord
         self._seed(tmp_path, monkeypatch)
         conn = connect()
-        append_notes(conn, "SA", [NoteRecord(ts=1, title="near miss", tags=["orglens-extras"])],
+        append_memos(conn, "SA", [MemoRecord(ts=1, title="near miss", tags=["orglens-extras"])],
                      "/notes/SA.jsonl")
         conn.commit()
-        result = runner.invoke(main, ["notes", "ls", "--about", "orglens", "--json"])
+        result = runner.invoke(main, ["memos", "ls", "--about", "orglens", "--json"])
         assert "near miss" not in {r["title"] for r in json.loads(result.stdout)}
 
 
@@ -3896,17 +4023,17 @@ class TestSessionNotesCurrent:
     resolved the same way `session note --current` writes them."""
 
     def test_current_resolves_like_note_current(self, runner, tmp_path, monkeypatch):
-        from scad.notes import append_note
+        from scad.memos import append_memo
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         monkeypatch.setattr("scad.cli.current_session_id", lambda agent="claude": "S9")
-        append_note({"title": "mine", "text": "b"}, session_id="S9")
-        result = runner.invoke(main, ["session", "notes", "--current"])
+        append_memo({"title": "mine", "text": "b"}, session_id="S9")
+        result = runner.invoke(main, ["session", "memos", "--current"])
         assert result.exit_code == 0, result.output
         assert "mine" in result.output
 
     def test_exactly_one_of_id_or_current(self, runner, tmp_path, monkeypatch):
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
-        result = runner.invoke(main, ["session", "notes"])
+        result = runner.invoke(main, ["session", "memos"])
         assert result.exit_code != 0
         assert "--current" in result.output
 
@@ -4289,3 +4416,203 @@ class TestTheExportFollowsAChain:
         row = {r["id"]: r for r in json.loads(result.stdout)}["S1"]
         assert row["cwd"] == str(dest / "sub")
         assert row["cwd_recorded"] == str(old / "sub")
+
+
+class TestIndexStatus:
+    """`scad index status`: when the index was last refreshed, without
+    refreshing it. For a reader that wants to warn rather than wait."""
+
+    def _home(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setenv("SCAD_ARCHIVE", str(tmp_path / "arc"))
+        return tmp_path / ".scad"
+
+    def test_json_after_a_reindex(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex", "--no-archive"])
+        result = runner.invoke(main, ["index", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.output)
+        assert set(status) == {"indexed_at", "age_s", "sessions", "memos", "schema_version"}
+        assert status["age_s"] >= 0
+        assert datetime.fromisoformat(status["indexed_at"]).tzinfo is not None
+
+    def test_a_never_indexed_index_says_so(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["index", "status", "--json"])
+        assert result.exit_code == 0, result.output
+        status = json.loads(result.output)
+        assert status["indexed_at"] is None and status["age_s"] is None
+        assert "never" in runner.invoke(main, ["index", "status"]).output
+
+    def test_it_does_not_index(self, runner, tmp_path, monkeypatch):
+        home = self._home(tmp_path, monkeypatch)
+        shard = home / "memos" / "claude"
+        shard.mkdir(parents=True)
+        (shard / "S1.jsonl").write_text('{"title": "t"}\n')
+        status = json.loads(runner.invoke(main, ["index", "status", "--json"]).output)
+        assert status["memos"] == 0 and status["indexed_at"] is None
+
+    def test_the_text_form_says_how_long_ago(self, runner, tmp_path, monkeypatch):
+        self._home(tmp_path, monkeypatch)
+        runner.invoke(main, ["reindex", "--no-archive"])
+        out = runner.invoke(main, ["index", "status"]).output
+        assert "last indexed" in out and "ago" in out and "sessions" in out
+
+
+class TestSubAgentCounts:
+    """A session that fanned out to hundreds of sub-agents looked like a
+    one-question session in `session ls` and `project show`; `scad view`
+    already said "N sub-agents" per row."""
+
+    def _conn(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        rows = [("P", "main", None, 3), ("Q", "main", None, 2)] + \
+               [(f"A{i}", "subagent", "P", 1) for i in range(3)]
+        for sid, kind, parent, started in rows:
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, project, "
+                "parent_session_id, started, n_turns) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sid, kind, "claude", "m", "full", "claude-transcript", "proj", parent,
+                 started, 1))
+        conn.commit()
+        return conn
+
+    def test_the_json_export_carries_the_count(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        rows = json.loads(runner.invoke(main, ["session", "ls", "--kind", "main",
+                                               "--json"]).output)
+        assert {r["id"]: r["n_subagents"] for r in rows} == {"P": 3, "Q": 0}
+
+    def test_session_ls_shows_it(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "ls", "--kind", "main"]).output
+        line = next(l for l in out.splitlines() if l.startswith("P "))
+        assert "3 sub" in line
+        assert "sub" not in next(l for l in out.splitlines() if l.startswith("Q "))
+
+    def test_project_show_shows_it(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["project", "show", "proj"]).output
+        assert "3 sub" in next(l for l in out.splitlines() if l.startswith("P "))
+
+
+class TestContextFillInTheCli:
+    def _conn(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        for sid, tokens, window in (("P", 215_227, 258_400), ("Q", 150_000, None),
+                                    ("R", None, None)):
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, project, "
+                "started, n_turns, context_tokens, context_window) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, "main", "claude", "m", "full", "claude-transcript", "proj", 1, 1,
+                 tokens, window))
+        conn.commit()
+
+    def test_the_json_export_carries_tokens_window_and_percent(self, runner, tmp_path,
+                                                               monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        rows = {r["id"]: r for r in json.loads(
+            runner.invoke(main, ["session", "ls", "--json"]).output)}
+        assert (rows["P"]["context_tokens"], rows["P"]["context_window"],
+                rows["P"]["context_pct"]) == (215_227, 258_400, 83)
+        assert rows["Q"]["context_pct"] is None and rows["R"]["context_tokens"] is None
+
+    def test_session_ls_shows_it(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "ls"]).output
+        assert "83%" in next(l for l in out.splitlines() if l.startswith("P "))
+        assert "150k" in next(l for l in out.splitlines() if l.startswith("Q "))
+
+    def test_session_show_says_it_in_full(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "show", "P"]).output
+        assert "215,227 of 258,400 tokens (83%)" in out
+
+
+class TestTabCompletion:
+    """`scad memos read 3f<tab>` completes. Sessions are the ones you started
+    (kind = main), memo ids only the sessions that have memos, and each
+    candidate carries its name and project as help, which zsh and fish show."""
+
+    def _index(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        for sid, kind, name, project, ended in (
+                ("3f11", "main", "scad-backlog", "scad", 3),
+                ("3f22", "main", None, "orglens", 2),
+                ("3f33", "subagent", None, "scad", 1),
+                ("9a00", "main", None, "inwit", 1)):
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, name, "
+                "project, title, ended) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sid, kind, "claude", "m", "full", "claude-transcript", name, project,
+                 f"title of {sid}", ended))
+        conn.execute("INSERT INTO memos (session_id, idx, title, memo_path) "
+                     "VALUES ('3f22', 0, 'the handoff', '/m')")
+        conn.commit()
+        conn.close()
+
+    def test_sessions_complete_mains_by_prefix_with_their_label(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_sessions
+        self._index(tmp_path, monkeypatch)
+        items = _complete_sessions(None, None, "3f")
+        assert [i.value for i in items] == ["3f11", "3f22"]
+        assert "scad-backlog" in items[0].help and "scad" in items[0].help
+
+    def test_memo_ids_offer_only_sessions_with_memos(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_memo_sessions
+        self._index(tmp_path, monkeypatch)
+        items = _complete_memo_sessions(None, None, "3f")
+        assert [i.value for i in items] == ["3f22"]
+        assert "the handoff" in items[0].help
+
+    def test_projects_complete_from_the_index(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_projects
+        self._index(tmp_path, monkeypatch)
+        assert [i.value for i in _complete_projects(None, None, "s")] == ["scad"]
+
+    def test_no_index_completes_nothing_and_creates_none(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_projects, _complete_sessions
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        assert _complete_sessions(None, None, "") == []
+        assert _complete_projects(None, None, "") == []
+        assert not (tmp_path / ".scad" / "index.sqlite").exists()
+
+    @pytest.mark.parametrize("argv,param,completer", [
+        (["session", "show"], "session_id", "_complete_sessions"),
+        (["session", "read"], "session_id", "_complete_sessions"),
+        (["session", "resume"], "session_id", "_complete_sessions"),
+        (["session", "send"], "session_id", "_complete_sessions"),
+        (["session", "memos"], "session_id", "_complete_memo_sessions"),
+        (["memos", "read"], "session_id", "_complete_memo_sessions"),
+        (["memos", "ls"], "session_id", "_complete_memo_sessions"),
+        (["memos", "ls"], "project_name", "_complete_projects"),
+        (["session", "ls"], "project", "_complete_projects"),
+        (["project", "show"], "name", "_complete_projects"),
+        (["search"], "project", "_complete_projects"),
+    ])
+    def test_each_argument_has_its_completer(self, argv, param, completer):
+        cmd = main
+        for word in argv:
+            cmd = cmd.commands[word]
+        p = next(p for p in cmd.params if p.name == param)
+        assert p._custom_shell_complete.__name__ == completer
+
+
+class TestSplitTakesAWindow:
+    @patch("scad.cli.launch_agent")
+    def test_bare_split_is_the_callers_pane_and_a_value_names_a_window(self, mock_launch,
+                                                                        runner, tmp_path):
+        mock_launch.return_value = {"session_id": "S", "tmux": "box:1.1", "agent": "claude"}
+        base = ["session", "launch", "--agent", "claude", "--cwd", str(tmp_path)]
+        runner.invoke(main, base + ["--split"])
+        assert mock_launch.call_args.kwargs["split"] is True
+        runner.invoke(main, base + ["--split", "orglens"])
+        assert mock_launch.call_args.kwargs["split"] == "orglens"

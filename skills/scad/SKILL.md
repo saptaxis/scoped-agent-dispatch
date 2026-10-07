@@ -17,26 +17,17 @@ compatibility: Requires tmux. Container features additionally require Docker.
 
 **Announce at start:** "I'm using the scad skill."
 
-scad does two things that share one vocabulary: it **runs** agents, and it
-**finds** them afterwards. Most confusion comes from mixing the two, so the
-model below is worth reading before any command.
+scad does two things that share one vocabulary: it **runs** agents, and it **finds** them afterwards. Most confusion comes from mixing the two, so the model below is worth reading before any command.
 
 ## Model
 
-**Run = environment.** A Docker container with repos, venv, credentials and
-skills set up, identified by a run id. Nothing happens in it until work is
-injected.
+**Run = environment.** A Docker container with repos, venv, credentials and skills set up, identified by a run id. Nothing happens in it until work is injected.
 
-**Job = work.** One agent process inside a run. A run hosts many jobs, so `run`
-and `session` are never interchangeable.
+**Job = work.** One agent process inside a run. A run hosts many jobs, so `run` and `session` are never interchangeable.
 
-**Session = the trace.** What an agent actually did, identified by that agent's
-own session id. Every session on the machine is indexed — container or host,
-claude or codex or kimi, whether scad started it or merely observed it.
+**Session = the trace.** What an agent actually did, identified by that agent's own session id. Every session on the machine is indexed — container or host, claude or codex or kimi, whether scad started it or merely observed it.
 
-The asymmetry that matters: **scad launches only what you ask it to, but sees
-everything.** A session you started by hand in a terminal is in the index
-beside one a container produced.
+The asymmetry that matters: **scad launches only what you ask it to, but sees everything.** A session you started by hand in a terminal is in the index beside one a container produced.
 
 ## Which page do you need
 
@@ -70,27 +61,20 @@ scad session send <id> "text" | --file f        # a later turn into the open pan
 scad session ls                                 # every indexed session
 scad search "phrase"                            # full text across turns
 scad view                                       # the browsable page
-scad notes ls                                   # the authored tier
+scad memos ls                                   # the authored tier
+scad index status                               # how fresh the index is
 scad where                                      # what project resolves here
 ```
 
 ## When NOT to use scad
 
 - A local edit that needs no isolation and no record.
-- Writing or catching up on notes — that is the `remember` and `recall` skills.
-- Reaching another model family for a one-off opinion — that is the `codex`
-  skill, which needs no scad at all.
+- Writing memos or catching up from them: that is the `memo-write`, `memo-handoff` and `memo-recall` skills.
+- Reaching another model family for a one-off opinion — that is the `codex` skill, which needs no scad at all.
 
 ## Rules that hold everywhere
 
-- **Never construct Docker commands by hand** when scad has one. Use
-  `scad run inject`, not `docker exec`; `scad code fetch`, not manual git. If a
-  scad command fails, report the error rather than bypassing it.
-- **`scad run clean` is destructive** and has no undo. Fetch first, or use
-  `scad finish`, which fetches for you.
-- **`reindex --rebuild` is for derivation-rule changes, never for new data.**
-  The incremental pass handles new sessions and growth. After a directory
-  moves, write its rule in `~/.scad/aliases` first, or the rebuild files its
-  sessions as `unfiled`.
-- **Measure, never cite.** Trace and skill locations have contradicted their
-  own documentation repeatedly. Check the machine before trusting a path.
+- **Never construct Docker commands by hand** when scad has one. Use `scad run inject`, not `docker exec`; `scad code fetch`, not manual git. If a scad command fails, report the error rather than bypassing it.
+- **`scad run clean` is destructive** and has no undo. Fetch first, or use `scad finish`, which fetches for you.
+- **`reindex --rebuild` is for derivation-rule changes, never for new data.** The incremental pass handles new sessions and growth. After a directory moves, write its rule in `~/.scad/aliases` first, or the rebuild files its sessions as `unfiled`.
+- **Measure, never cite.** Trace and skill locations have contradicted their own documentation repeatedly. Check the machine before trusting a path.

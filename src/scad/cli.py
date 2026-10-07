@@ -1,6 +1,7 @@
 """CLI entry point."""
 
 import copy
+import contextlib
 import json
 import os
 import shlex
@@ -82,18 +83,19 @@ from scad.archive import archive_all, archive_root, archive_run, summarize
 from scad import aliases
 from scad.project import UNFILED, project_resolution, resolve_project
 from scad.index import (
-    NOTE_KIND_SQL,
-    NOTE_PROJECT_RESOLVED,
-    NOTE_PROJECT_SQL,
-    NOTE_RELATION_SQL,
+    MEMO_KIND_SQL,
+    MEMO_PROJECT_RESOLVED,
+    MEMO_PROJECT_SQL,
+    MEMO_RELATION_SQL,
     connect as index_connect,
     ensure_launched_session,
-    index_note_file,
+    index_lock,
+    index_memo_file,
     known_projects,
     reindex as run_reindex,
-    search_notes,
+    search_memos,
     search_turns,
-    session_notes as index_session_notes,
+    session_memos as index_session_memos,
     session_row,
     session_turns,
 )
@@ -116,19 +118,21 @@ from scad.live import (
     running_run_ids,
     tmux_panes,
 )
-from scad.notes import (
+from scad.memos import (
     DEFAULT_KIND,
     KINDS,
-    NoteTargetError,
-    append_note,
+    MemoTargetError,
+    append_memo,
     current_session_id,
-    hydrate_notes,
-    note_path,
-    notes_root,
-    read_note_file,
+    hydrate_memos,
+    memo_path,
+    memos_root,
+    read_memo_file,
+    StoreNotMoved,
 )
 from scad.view import (
-    _is_agent_state_dir, gather, render, resume_argv, resume_command, write_view,
+    _is_agent_state_dir, context_long, context_pct, context_short, gather, render,
+    resume_argv, resume_command, write_view,
 )
 
 
@@ -196,7 +200,7 @@ def _fmt_span(start_ms, end_ms) -> str | None:
 def _fmt_ago(ts: str | None) -> str:
     """An ISO stamp as written, plus how long ago it was.
 
-    Notes carry an ISO string rather than epoch ms — a different tier with a
+    Memos carry an ISO string rather than epoch ms — a different tier with a
     different format — so this is deliberately not `_fmt_ms`.
     """
     if not ts:
@@ -263,6 +267,73 @@ def _complete_cleanable_sessions(ctx, param, incomplete):
         if d.is_dir() and d.name.startswith(incomplete)
         and any(d.iterdir())  # not empty = not fully cleaned
     )
+
+
+def _index_read_only():
+    """The index for a completer: read-only, and None when there is none.
+
+    A Tab press must not write. `index_connect` creates the file and its schema,
+    which a completer has no business doing on a machine that never indexed.
+    """
+    import sqlite3
+    from scad.index import index_path
+    path = index_path()
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _completions(sql: str, params: tuple, help_of) -> list:
+    """Run one completion query; any failure completes nothing rather than
+    printing a traceback into the shell."""
+    from click.shell_completion import CompletionItem
+    try:
+        conn = _index_read_only()
+        if conn is None:
+            return []
+        with contextlib.closing(conn):
+            return [CompletionItem(r[0], help=help_of(r)) for r in conn.execute(sql, params)]
+    except Exception:
+        return []
+
+
+def _like_prefix(incomplete: str) -> str:
+    return incomplete.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _complete_sessions(ctx, param, incomplete):
+    """Session ids you started (kind = main), newest first. The other ~85% are
+    sub-agents and workflow agents, which cannot be resumed and are almost
+    never the argument wanted. Help is the name, else the title, and project."""
+    return _completions(
+        "SELECT id, name, title, project FROM sessions "
+        "WHERE kind = 'main' AND id LIKE ? ESCAPE '\\' ORDER BY ended DESC LIMIT 60",
+        (_like_prefix(incomplete),),
+        lambda r: " · ".join(x for x in ((r["name"] or (r["title"] or "")[:40]),
+                                          r["project"] or "") if x))
+
+
+def _complete_memo_sessions(ctx, param, incomplete):
+    """Session ids that have memos, newest memo first, helped by its title."""
+    return _completions(
+        "SELECT m.session_id, m.title, s.project FROM memos m "
+        "LEFT JOIN sessions s ON s.id = m.session_id "
+        "WHERE m.session_id LIKE ? ESCAPE '\\' "
+        "AND m.idx = (SELECT MAX(idx) FROM memos WHERE session_id = m.session_id) "
+        "ORDER BY m.ts DESC LIMIT 60",
+        (_like_prefix(incomplete),),
+        lambda r: " · ".join(x for x in ((r["title"] or "")[:50], r["project"] or "") if x))
+
+
+def _complete_projects(ctx, param, incomplete):
+    """Every project the index knows, from sessions and from memos."""
+    return _completions(
+        "SELECT project FROM sessions WHERE project LIKE ? ESCAPE '\\' "
+        "UNION SELECT project FROM memos WHERE project LIKE ? ESCAPE '\\' "
+        "ORDER BY 1",
+        (_like_prefix(incomplete), _like_prefix(incomplete)), lambda r: None)
 
 
 def _complete_config_names(ctx, param, incomplete):
@@ -332,7 +403,22 @@ def _tail_stream(stream_path: Path, stop_event: threading.Event):
                 click.echo(msg)
 
 
-@click.group()
+class _ScadGroup(click.Group):
+    """Turns a machine whose memo store has not moved into one plain error.
+
+    `memos_root` raises wherever a command first touches the store, which is
+    deep in the index pass for `reindex` and `view`; catching it once here
+    gives every one of them the same message and exit code, not a traceback.
+    """
+
+    def invoke(self, ctx):
+        try:
+            return super().invoke(ctx)
+        except StoreNotMoved as exc:
+            raise click.ClickException(str(exc)) from None
+
+
+@click.group(cls=_ScadGroup)
 def main():
     """scad — dispatch Claude Code agents in isolated Docker containers."""
     pass
@@ -2049,14 +2135,54 @@ def reindex(rebuild, force, no_archive):
     if not stats:
         click.echo("[scad] Nothing indexed — is the archive empty? Run: scad archive")
         return
-    for key in ("files", "sessions", "turns", "replaced", "notes", "named",
+    for key in ("files", "sessions", "turns", "replaced", "memos", "named",
                 "skipped_lines", "skipped_files"):
         if stats.get(key):
             click.echo(f"[scad]   {key}: {stats[key]}")
 
 
+@main.group("index")
+def index_group():
+    """The session index itself: how fresh it is."""
+    pass
+
+
+@index_group.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
+def index_status_cmd(as_json):
+    """When the index was last refreshed, without refreshing it.
+
+    Nothing refreshes the index on a timer; `scad view` runs a pass before it
+    renders, and everything else reads what is there. This is for a reader
+    that would rather warn about a stale index than pay for a reindex.
+    """
+    from scad.index import index_status
+    from scad.view import _ago
+    status = index_status(index_connect())
+    at = status["indexed_at"]
+    out = {
+        "indexed_at": (datetime.fromtimestamp(at / 1000).astimezone().isoformat(timespec="seconds")
+                       if at else None),
+        "age_s": max(0, int(time.time() - at / 1000)) if at else None,
+        "sessions": status["sessions"],
+        "memos": status["memos"],
+        "schema_version": status["schema_version"],
+    }
+    if as_json:
+        click.echo(json.dumps(out))
+        return
+    if not at:
+        click.echo(f"[scad] never indexed; {out['sessions']} sessions, {out['memos']} memos. "
+                   "Run: scad reindex")
+        return
+    when = datetime.fromtimestamp(at / 1000).strftime("%Y-%m-%d %H:%M")
+    click.echo(f"[scad] last indexed {when} ({_ago(at) or '0m ago'}); "
+               f"{out['sessions']} sessions, {out['memos']} memos")
+
+
 @session.command("ls")
-@click.option("--project", default=None, help="Filter by resolved project.")
+@click.option("--project", default=None, help="Filter by resolved project.",
+              shell_complete=_complete_projects)
 @click.option("--agent", default=None, help="Filter by agent (claude, codex, kimi).")
 @click.option("--kind", default=None, help="Filter by kind (main, subagent, workflow-agent).")
 @click.option("--machine", default=None, help="Filter by machine.")
@@ -2074,7 +2200,8 @@ def reindex(rebuild, force, no_archive):
 @click.option("--json", "as_json", is_flag=True,
               help="Emit rows as JSON. The export a consumer reads instead of the index "
                    "file: adds cwd (where the directory is now), cwd_recorded, ended, "
-                   "needs, parent_session_id, last_turn and live.")
+                   "needs, parent_session_id, n_subagents, context_tokens, context_window, "
+                   "context_pct, last_turn and live.")
 def session_ls(project, agent, kind, machine, grade, outcome, since, until, parent_id,
                limit, as_json):
     """List indexed sessions, newest first."""
@@ -2093,7 +2220,8 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, pare
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = conn.execute(
         f"SELECT id, name, harness_state, kind, agent, project, title, n_turns, "
-        f"grade, outcome, started, ended, cwd, needs, parent_session_id "
+        f"grade, outcome, started, ended, cwd, needs, parent_session_id, "
+        f"context_tokens, context_window, {_N_SUBAGENTS_SQL} "
         f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
         (*params, limit),
     ).fetchall()
@@ -2115,7 +2243,22 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, pare
         # it here would dress a guess up as a name.
         name = (r["name"] or "")[:26]     # the longest real one is 26 characters
         click.echo(f"{r['id'][:12]:<14} {name:<27} {when}  {r['agent']:<7} "
-                   f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t  {title}")
+                   f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t "
+                   f"{context_short(r['context_tokens'], r['context_window']):>5} "
+                   f"{_subagents_cell(r['n_subagents'])}  {title}")
+
+
+# A session's sub-agents and workflow agents, counted the way `scad view` does.
+# Without it a session that fanned out to hundreds looked like a one-question
+# session in every list that hides them. `parent_session_id` is indexed.
+_N_SUBAGENTS_SQL = ("(SELECT count(*) FROM sessions c "
+                    "WHERE c.parent_session_id = sessions.id) AS n_subagents")
+
+
+def _subagents_cell(n: int) -> str:
+    """`37 sub`, or blank: most sessions have none, and a column of zeros hides
+    the ones that matter."""
+    return f"{f'{n} sub' if n else '':>8}"
 
 
 def _session_export(conn, rows) -> list[dict]:
@@ -2145,6 +2288,7 @@ def _session_export(conn, rows) -> list[dict]:
     now: dict[str | None, str | None] = {}
     for r in rows:
         row = dict(r)
+        row["context_pct"] = context_pct(row.get("context_tokens"), row.get("context_window"))
         row["cwd_recorded"] = row["cwd"]
         if row["cwd"] not in now:
             now[row["cwd"]] = aliases.current_cwd(row["cwd"])
@@ -2167,7 +2311,7 @@ def _session_export(conn, rows) -> list[dict]:
 
 
 @session.command("show")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 def session_show(session_id):
     """Show one session's metadata and turn breakdown."""
     conn = index_connect()
@@ -2210,14 +2354,16 @@ def session_show(session_id):
     ).fetchone()["n"]
     if kids:
         click.echo(f"{'subagents':<18} {kids}")
+    if row["context_tokens"]:
+        click.echo(f"{'context':<18} {context_long(row['context_tokens'], row['context_window'])}")
 
     # The authored tier. Listed by topic rather than counted alone, because the
-    # question a note answers is "what did I decide here", and a bare count
-    # answers nothing. `scad session notes <id>` prints the text.
-    notes = index_session_notes(conn, session_id)
-    click.echo(f"{'notes':<18} {len(notes)}")
-    for n in notes:
-        # `kind` earns its column here: a handoff among a session's notes is
+    # question a memo answers is "what did I decide here", and a bare count
+    # answers nothing. `scad session memos <id>` prints the text.
+    memos = index_session_memos(conn, session_id)
+    click.echo(f"{'memos':<18} {len(memos)}")
+    for n in memos:
+        # `kind` earns its column here: a handoff among a session's memos is
         # the one you want first, and topic alone never said which was which.
         click.echo(f"  [{n['idx']:>3}] {n['kind'] or DEFAULT_KIND:<12} "
                    f"{n['topic'] or '?':<24} {(n['title'] or '')[:48]}")
@@ -2247,8 +2393,10 @@ def _exec(argv: list[str]) -> None:
 @click.option("--window", default=None, is_flag=False, flag_value="",
               help="Land the agent as a named window in this tmux session instead of a "
                    "detached one. Bare --window names it after the directory.")
-@click.option("--split", is_flag=True,
-              help="Land the agent in a pane beside this one, in the window you are in.")
+@click.option("--split", default=None, is_flag=False, flag_value="",
+              help="Land the agent in a pane beside this one. With a value, split that "
+                   "window's active pane instead: a window name (review) or a target "
+                   "(main:4).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
@@ -2268,6 +2416,8 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as
       kimi     read back from its own index line, confirmed by workDir
       codex    read off the rollout that the first turn creates
     """
+    # Bare --split arrives as "" (the caller's pane); a value names a window.
+    split = True if split == "" else split
     target_cwd = Path(cwd) if cwd else Path.cwd()
 
     # Under --json, stdout is a data channel and nothing else may be on it.
@@ -2392,7 +2542,7 @@ def _open_in(session_id: str, record: dict) -> str | None:
 
 
 @session.command("resume")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 @click.option("--print", "print_only", is_flag=True,
               help="Emit the command instead of running it.")
 def session_resume(session_id, print_only):
@@ -2524,14 +2674,14 @@ def _resume_cwd(session_id: str, recorded, scad_run_id, quiet: bool):
     return None
 
 
-@session.command("note")
+@session.command("memo")
 @click.option("--session", "session_id", default=None,
-              help="Append to this session's note file.")
+              help="Append to this session's memo file.")
 @click.option("--current", is_flag=True,
               help="Append to the session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
-def session_note(session_id, current, agent):
-    """Append one /remember capture, read as JSON on stdin.
+def session_memo(session_id, current, agent):
+    """Append one /memo-write capture, read as JSON on stdin.
 
     The record is composed in-session, where the context already is — this only
     decides where it lands and appends it. That split is the point: judgment
@@ -2544,7 +2694,7 @@ def session_note(session_id, current, agent):
     if current:
         try:
             session_id = current_session_id(agent=agent)
-        except NoteTargetError as exc:
+        except MemoTargetError as exc:
             raise click.ClickException(str(exc)) from exc
 
     raw = sys.stdin.read()
@@ -2561,7 +2711,7 @@ def session_note(session_id, current, agent):
             f"kind {record['kind']!r} is not one of: {', '.join(KINDS)}.")
 
     try:
-        path = append_note(record, session_id=session_id, agent=agent)
+        path = append_memo(record, session_id=session_id, agent=agent)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -2569,38 +2719,42 @@ def session_note(session_id, current, agent):
     if project and project not in _known_projects():
         # WARN, never refuse. `scad project ls` counts sessions, so a genuinely
         # new project — or one whose work has only ever been dispatched — does
-        # not appear in it yet, and a real note would be lost to a name the
+        # not appear in it yet, and a real memo would be lost to a name the
         # index simply has not met. A wrong label costs a listing; a refused
-        # note costs the note, and nothing can rebuild it.
+        # memo costs the memo, and nothing can rebuild it.
         click.echo(f"[scad] warning: no project named {project!r} in the index "
-                   f"— the note is written and filed under it anyway. "
+                   f"— the memo is written and filed under it anyway. "
                    f"Check the name with: scad project ls")
 
     # Index it NOW rather than leaving it for the next `scad reindex`. The write
-    # path is the only moment we know a note exists, and until it is indexed
-    # nothing can find it — `notes ls`, `search` and `view` all read the index.
-    # That gap is worst for a cross-filed note, whose whole purpose is that
+    # path is the only moment we know a memo exists, and until it is indexed
+    # nothing can find it — `memos ls`, `search` and `view` all read the index.
+    # That gap is worst for a cross-filed memo, whose whole purpose is that
     # someone working in the *other* project picks it up, and who has no reason
-    # to know a reindex is owed. Costs one row: the notes tier is ~20 records
+    # to know a reindex is owed. Costs one row: the memos tier is ~20 records
     # against 39,000 turns, nothing like the pass that makes `reindex` a
     # deliberate command.
     #
-    # AFTER the warning above, deliberately: indexing inserts this note's own
+    # AFTER the warning above, deliberately: indexing inserts this memo's own
     # project, so checking afterwards would find the name known because we had
     # just written it and the warning would never fire.
     try:
-        index_note_file(index_connect(), path, agent)
+        conn = index_connect()
+        # The same lock as reindex: this appends with the same read-then-insert,
+        # and a reindex running beside it would otherwise append these rows too.
+        with index_lock(conn, timeout_s=10):
+            index_memo_file(conn, path, agent)
     except Exception as exc:
         # Never fatal. The file is truth and `reindex` will pick it up; a locked
         # or absent index must not turn a successful capture into an error.
-        click.echo(f"[scad] note written but not indexed ({exc}); "
+        click.echo(f"[scad] memo written but not indexed ({exc}); "
                    f"run: scad reindex")
 
     # Confirm, do not echo: the caller just wrote the record and printing it back
     # into the transcript would double its cost in context for no information.
-    # `relation` is absent on purpose — it is derived when the note is read, and
+    # `relation` is absent on purpose — it is derived when the memo is read, and
     # claiming one here would be guessing at the thread from a single record.
-    head = [f"[scad] noted {session_id}", record.get("kind") or DEFAULT_KIND,
+    head = [f"[scad] memo written {session_id}", record.get("kind") or DEFAULT_KIND,
             record.get("topic") or "?"]
     if record.get("parent"):
         head.append(f"<- {record['parent']}")
@@ -2615,7 +2769,7 @@ def _known_projects() -> set[str]:
     """Project names the index knows, or an empty set if it cannot be read.
 
     Swallowing the failure is the point: this only decides whether to print a
-    warning, and a note must never be lost to a database that would not open.
+    warning, and a memo must never be lost to a database that would not open.
     """
     try:
         return known_projects(index_connect())
@@ -2623,20 +2777,20 @@ def _known_projects() -> set[str]:
         return set()
 
 
-def _resolve_note_path(session_id: str, agent: str):
+def _resolve_memo_path(session_id: str, agent: str):
     """The named agent's shard, or whichever shard actually holds this session.
 
     The store is sharded by agent because a session id is only unique within
     one, but a LISTING does not make you type the agent — so following a row
-    from `scad notes ls` with the obvious read command used to answer "No notes
-    for <id>" about a note that plainly exists. The id is unambiguous in
+    from `scad memos ls` with the obvious read command used to answer "No memos
+    for <id>" about a memo that plainly exists. The id is unambiguous in
     practice, so searching the other shards costs one directory scan and
     removes a wrong answer. The named agent still wins when it has the file.
     """
-    path = note_path(session_id, agent)
+    path = memo_path(session_id, agent)
     if path.exists():
         return path
-    root = notes_root()
+    root = memos_root()
     if root.is_dir():
         for shard in sorted(p for p in root.iterdir() if p.is_dir()):
             if shard.name == agent:
@@ -2648,7 +2802,7 @@ def _resolve_note_path(session_id: str, agent: str):
 
 
 @session.command("send")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 @click.argument("text", required=False)
 @click.option("--file", "path", default=None, type=click.Path(exists=True, dir_okay=False),
               help="Read the turn from this file instead of the argument.")
@@ -2674,16 +2828,16 @@ def session_send_turn(session_id, text, path, as_json):
     click.echo(f"[scad] sent {result['bytes']} bytes to {result['tmux']} ({session_id})")
 
 
-@session.command("notes")
-@click.argument("session_id", required=False)
+@session.command("memos")
+@click.argument("session_id", required=False, shell_complete=_complete_memo_sessions)
 @click.option("--current", is_flag=True,
               help="The session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard to read first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit the records as written.")
-def session_notes_cmd(session_id, current, agent, as_json):
-    """Print a session's notes, oldest first.
+def session_memos_cmd(session_id, current, agent, as_json):
+    """Print a session's memos, oldest first.
 
-    Reads the FILE, not the index. The file is truth, and a note must be
+    Reads the FILE, not the index. The file is truth, and a memo must be
     readable before anything has been indexed and after a --rebuild has dropped
     every row.
     """
@@ -2692,19 +2846,19 @@ def session_notes_cmd(session_id, current, agent, as_json):
     if current:
         try:
             session_id = current_session_id(agent=agent)
-        except NoteTargetError as exc:
+        except MemoTargetError as exc:
             raise click.ClickException(str(exc)) from exc
-    path = _resolve_note_path(session_id, agent)
+    path = _resolve_memo_path(session_id, agent)
     # Hydrated, not raw: `relation` is computed from the records around it and
     # `kind` has a default, so a consumer reading --json gets the same shape
     # whatever version wrote the file.
-    records = hydrate_notes(read_note_file(path))
+    records = hydrate_memos(read_memo_file(path))
 
     if as_json:
         click.echo(json.dumps(records, ensure_ascii=False, default=str))
         return
     if not records:
-        click.echo(f"[scad] No notes for {session_id}.")
+        click.echo(f"[scad] No memos for {session_id}.")
         return
 
     click.echo(f"[scad] {path}")
@@ -2730,11 +2884,11 @@ def session_notes_cmd(session_id, current, agent, as_json):
 
 
 @main.group()
-def notes():
-    """Find and read notes — how a fresh session picks up where one left off.
+def memos():
+    """Find and read memos — how a fresh session picks up where one left off.
 
-    Deliberately two verbs. A session writes a note when it stops; the next one
-    runs `notes ls --project <p>` to find it and `notes read <session-id>` to
+    Deliberately two verbs. A session writes a memo when it stops; the next one
+    runs `memos ls --project <p>` to find it and `memos read <session-id>` to
     read it. That replaces a handoff document with something written by the
     same command every time, into a store that is already indexed and
     searchable, rather than a file whose name and location must be remembered.
@@ -2743,7 +2897,7 @@ def notes():
 
 
 def _about_matches(row: dict, names) -> list[str]:
-    """The subset of `names` this note row is about, by the same rule the
+    """The subset of `names` this memo row is about, by the same rule the
     SQL used: in tags or entities, the topic, or the project."""
     def arr(key):
         try:
@@ -2754,56 +2908,61 @@ def _about_matches(row: dict, names) -> list[str]:
     return [n for n in names if n in named]
 
 
-@notes.command("ls")
+@memos.command("ls")
 @click.option("--project", "project_name", default=None,
-              help="Only notes filed under this project.")
-@click.option("--session", "session_id", default=None, help="Only this session's notes.")
+              help="Only memos filed under this project.", shell_complete=_complete_projects)
+@click.option("--session", "session_id", default=None, help="Only this session's memos.",
+              shell_complete=_complete_memo_sessions)
 @click.option("--about", multiple=True,
-              help="Notes about NAME wherever they were written: NAME in tags or "
+              help="Memos about NAME wherever they were written: NAME in tags or "
                    "entities, as the topic, or as the project. Repeatable; JSON rows "
                    "then carry `about`, the names each one matched.")
 @click.option("--kind", "kind", type=click.Choice(KINDS), default=None,
-              help="Only notes of this kind (handoff is the catch-up query).")
+              help="Only memos of this kind (handoff is the catch-up query).")
 @click.option("--limit", default=20, help="How many, newest first.")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
-def notes_ls(project_name, session_id, about, kind, limit, as_json):
-    """List notes, newest first.
+def memos_ls(project_name, session_id, about, kind, limit, as_json):
+    """List memos, newest first.
 
-    Metadata only — the body is not in the index at all, so this can say what
-    exists and never what it says. `notes read` is the second half.
+    Metadata only: this says which memos exist, never what they say. The body
+    is indexed so `search --memos` can match it, but a listing does not print
+    it. `memos read` is the second half.
     """
+    # The index alone would answer "no memos" on a machine whose store has not
+    # moved, which looks like the store working. Asking for the root refuses.
+    memos_root()
     conn = index_connect()
     where, params = [], []
     if project_name:
-        # The note's own project first, the writing session's second. Filtering
-        # on `s.project` alone is what hid a cross-captured note: filed against
+        # The memo's own project first, the writing session's second. Filtering
+        # on `s.project` alone is what hid a cross-captured memo: filed against
         # B, listed only under A, findable by nobody looking for either.
-        where.append(f"{NOTE_PROJECT_RESOLVED} = ?")
+        where.append(f"{MEMO_PROJECT_RESOLVED} = ?")
         params.append(project_name)
     if session_id:
         where.append("n.session_id = ?")
         params.append(session_id)
     if about:
-        # A note about X is often written in Y: a field report on one project
+        # A memo about X is often written in Y: a field report on one project
         # from another project's session, cross-tagged. Project alone found
-        # three of eight such notes. `tags` and `entities` are JSON arrays,
+        # three of eight such memos. `tags` and `entities` are JSON arrays,
         # so the quoted form matches a whole element and not a prefix.
         clauses = []
         for name in about:
             clauses.append(f"(n.tags LIKE ? OR n.entities LIKE ? OR n.topic = ? "
-                           f"OR {NOTE_PROJECT_RESOLVED} = ?)")
+                           f"OR {MEMO_PROJECT_RESOLVED} = ?)")
             quoted = f'%{json.dumps(name)}%'
             params.extend([quoted, quoted, name, name])
         where.append("(" + " OR ".join(clauses) + ")")
     if kind:
-        where.append(f"{NOTE_KIND_SQL} = ?")
+        where.append(f"{MEMO_KIND_SQL} = ?")
         params.append(kind)
     clause = f"WHERE {' AND '.join(where)}" if where else ""
     rows = [dict(r) for r in conn.execute(
-        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
-        f"       {NOTE_PROJECT_SQL}, s.name, s.agent "
-        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+        f"SELECT n.session_id, n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, "
+        f"       {MEMO_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       {MEMO_PROJECT_SQL}, s.name, s.agent "
+        f"FROM memos n LEFT JOIN sessions s ON s.id = n.session_id "
         f"{clause} ORDER BY n.ts DESC LIMIT ?", (*params, limit))]
 
     if as_json:
@@ -2816,63 +2975,63 @@ def notes_ls(project_name, session_id, about, kind, limit, as_json):
         return
     if not rows:
         scope = f" for project '{project_name}'" if project_name else ""
-        click.echo(f"[scad] No notes{scope}.")
+        click.echo(f"[scad] No memos{scope}.")
         return
 
     for r in rows:
         # `ts` is epoch MILLISECONDS here, not the ISO string _relative_time
-        # takes — the notes table stores what the CLI stamped, not what a
+        # takes — the memos table stores what the CLI stamped, not what a
         # transcript recorded.
         when = (datetime.fromtimestamp(r["ts"] / 1000).strftime("%m-%d %H:%M")
                 if r.get("ts") else "?")
         # The session id leads because it is the argument to the next command.
-        # `kind` and `relation` are both here: kind says what the note IS, and
-        # relation says whether the note before it belongs to the same thread —
+        # `kind` and `relation` are both here: kind says what the memo IS, and
+        # relation says whether the memo before it belongs to the same thread —
         # which is the whole stopping rule for backtracking.
         # `agent` is shown because the store is sharded by it: without this
         # column you cannot tell which `--agent` a row wants, and reading a
-        # non-claude note reported that it did not exist.
+        # non-claude memo reported that it did not exist.
         click.echo(f'{r["session_id"]}  [{r["idx"]}]  {when:>14}  '
                    f'{(r.get("agent") or "-"):7}  '
                    f'{(r.get("project") or "-"):22}  {(r.get("kind") or "-"):12}  '
                    f'{(r.get("relation") or "-"):9}  {(r.get("topic") or "-"):20}  '
                    f'{r.get("title") or ""}')
-    click.echo(f"\n[scad] {len(rows)} note(s). Read one: scad notes read <session-id>")
+    click.echo(f"\n[scad] {len(rows)} memo(s). Read one: scad memos read <session-id>")
 
 
-@notes.command("read")
-@click.argument("session_id")
-@click.option("--last", is_flag=True, help="Only the newest note.")
-@click.option("--idx", "idx", type=int, default=None, help="Only this note's index.")
+@memos.command("read")
+@click.argument("session_id", shell_complete=_complete_memo_sessions)
+@click.option("--last", is_flag=True, help="Only the newest memo.")
+@click.option("--idx", "idx", type=int, default=None, help="Only this memo's index.")
 @click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
 @click.option("--json", "as_json", is_flag=True, help="Emit as JSON.")
 @click.pass_context
-def notes_read(ctx, session_id, last, idx, agent, as_json):
-    """Print a session's notes — all of them, or one.
+def memos_read(ctx, session_id, last, idx, agent, as_json):
+    """Print a session's memos — all of them, or one.
 
-    Reads the FILE, not the index: the index stores no body text, so the file is
-    the only place the narrative exists.
+    Reads the FILE, not the index. The file is truth: it is readable before
+    anything has been indexed and after a --rebuild has dropped every row.
 
     `--last` / `--idx` are what make recall progressive. Catching up should cost
     what you actually need, not the whole length of the session that came
-    before — read the newest, and go back only while `notes ls` says the thread
+    before — read the newest, and go back only while `memos ls` says the thread
     continues.
     """
     if not last and idx is None:
-        ctx.invoke(session_notes_cmd, session_id=session_id, agent=agent, as_json=as_json)
+        ctx.invoke(session_memos_cmd, session_id=session_id, agent=agent, as_json=as_json)
         return
 
-    # Hydrated over the WHOLE file even when one note is wanted: `relation` is a
-    # statement about the notes before it, so a single record cannot answer it.
-    resolved = _resolve_note_path(session_id, agent)
-    records = hydrate_notes(read_note_file(resolved))
+    # Hydrated over the WHOLE file even when one memo is wanted: `relation` is a
+    # statement about the memos before it, so a single record cannot answer it.
+    resolved = _resolve_memo_path(session_id, agent)
+    records = hydrate_memos(read_memo_file(resolved))
     if not records:
-        click.echo(f"[scad] No notes for {session_id}.")
+        click.echo(f"[scad] No memos for {session_id}.")
         return
 
     want = len(records) - 1 if last else idx
     if not 0 <= want < len(records):
-        click.echo(f"[scad] There is no note [{want}] for {session_id} "
+        click.echo(f"[scad] There is no memo [{want}] for {session_id} "
                    f"— it has {len(records)} (0..{len(records) - 1}).")
         return
 
@@ -2947,7 +3106,7 @@ def project_aliases():
 
 
 @project.command("show")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_projects)
 @click.option("--limit", default=40, help="Rows to show.")
 def project_show(name, limit):
     """List a project's sessions."""
@@ -2957,8 +3116,8 @@ def project_show(name, limit):
     # cannot be resumed; listing them here while the page hid them made the two
     # disagree about the same project (1309 of 1462 rows are subagents).
     rows = conn.execute(
-        "SELECT id, name, kind, agent, title, n_turns, started FROM sessions "
-        "WHERE project = ? AND kind = 'main' ORDER BY started DESC LIMIT ?",
+        f"SELECT id, name, kind, agent, title, n_turns, started, {_N_SUBAGENTS_SQL} "
+        f"FROM sessions WHERE project = ? AND kind = 'main' ORDER BY started DESC LIMIT ?",
         (name, limit),
     ).fetchall()
     if not rows:
@@ -2970,11 +3129,12 @@ def project_show(name, limit):
         # nobody chose one. `title` is derived and never stands in for a name.
         label = (r["name"] or "")[:26]
         click.echo(f"{r['id'][:12]:<14} {label:<27} {when}  {r['agent']:<7} "
-                   f"{r['kind']:<14} {r['n_turns']:>5}t  {(r['title'] or '')[:52]}")
+                   f"{r['kind']:<14} {r['n_turns']:>5}t {_subagents_cell(r['n_subagents'])}  "
+                   f"{(r['title'] or '')[:52]}")
 
 
 @session.command("read")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 @click.option("--kind", default=None,
               type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
               help="Only this kind of turn — e.g. --kind text to skip tool noise.")
@@ -3002,23 +3162,26 @@ def session_read(session_id, kind, role, limit):
 
 @main.command()
 @click.argument("query")
-@click.option("--project", default=None, help="Restrict to one project.")
+@click.option("--project", default=None, help="Restrict to one project.",
+              shell_complete=_complete_projects)
 @click.option("--kind", default=None,
               type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
               help="Search only this kind — e.g. --kind thinking for reasoning.")
 @click.option("--limit", default=20, help="Hits to show.")
-@click.option("--notes", "notes_only", is_flag=True, help="Search notes instead of turns.")
+@click.option("--memos", "memos_only", is_flag=True,
+              help="Search memos (body, topic, title, tags) instead of turns.")
 @click.option("--json", "as_json", is_flag=True, help="Emit hits as JSON.")
-def search(query, project, kind, limit, notes_only, as_json):
-    """Full-text search across every indexed turn, or across notes with --notes."""
+def search(query, project, kind, limit, memos_only, as_json):
+    """Full-text search across every indexed turn, or across memos with --memos."""
     conn = index_connect()
-    if notes_only:
-        hits = search_notes(conn, query, limit=limit)
+    if memos_only:
+        memos_root()                     # refuses a store that has not moved
+        hits = search_memos(conn, query, limit=limit)
         if as_json:
             click.echo(json.dumps(hits, default=str))
             return
         if not hits:
-            click.echo(f"[scad] No note matches {query!r}.")
+            click.echo(f"[scad] No memo matches {query!r}.")
             return
         for h in hits:
             when = datetime.fromtimestamp(h["ts"] / 1000).strftime("%Y-%m-%d %H:%M") if h["ts"] else "?"
@@ -3074,7 +3237,9 @@ del _verb
 
 
 @main.command()
-@click.option("--days", default=14, help="How far back the waiting list looks.")
+# A no-op kept for scripts that pass it. It bounded the waiting list to recent
+# sessions, and a question nobody answered does not stop waiting at 14 days.
+@click.option("--days", default=None, type=int, hidden=True)
 @click.option("--output", default=None, type=click.Path(), help="Write the page here.")
 @click.option("--no-open", is_flag=True, help="Write the page without opening a browser.")
 @click.option("--no-refresh", is_flag=True,
@@ -3124,7 +3289,7 @@ def view(days, output, no_open, refresh, no_refresh):
             click.echo(f"[scad] Warning: refresh failed, rendering existing index: {exc}")
 
     conn = index_connect()
-    data = gather(conn, tmux_panes(), running_run_ids(), days=days)
+    data = gather(conn, tmux_panes(), running_run_ids())
     target = _Path(output) if output else get_scad_home() / "view.html"
     write_view(target, render(data))
 

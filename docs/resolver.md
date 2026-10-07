@@ -1,8 +1,6 @@
 # The resolver engine
 
-scad owns the resolution *engine*; each consumer owns its *config*. The engine
-knows about precedence, walk-up, and git; it knows nothing about projects,
-apartments, or sessions.
+scad owns the resolution *engine*; each consumer owns its *config*. The engine knows about precedence, walk-up, and git; it knows nothing about projects, apartments, or sessions.
 
 ## Python
 
@@ -18,9 +16,7 @@ def resolve_root(explicit=None):
     return root
 ```
 
-Every entry point starts with `root = resolve_root(args.root)`. That one line is
-the whole guarantee: the path is computed on every call, never recalled from a
-model's context.
+Every entry point starts with `root = resolve_root(args.root)`. That one line is the whole guarantee: the path is computed on every call, never recalled from a model's context.
 
 ## CLI
 
@@ -51,5 +47,4 @@ Path on stdout, announce on stderr, exit `0` resolved / `1` unresolved / `2` usa
 - Guess. There is no `.` or `~` fallback — unresolved is returned, never assumed.
 - Raise. `resolve()` is total, so it can be mapped over thousands of recorded paths.
 - Derive a name. It returns a directory; turning that into a key is the consumer's job.
-- Follow a moved directory. Path aliases (`~/.scad/aliases`) belong to scad's
-  project layer: `scad.aliases` translates a gone path before the engine is called.
+- Follow a moved directory. Path aliases (`~/.scad/aliases`) belong to scad's project layer: `scad.aliases` translates a gone path before the engine is called.

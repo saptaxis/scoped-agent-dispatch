@@ -106,8 +106,8 @@ fi
 # (Claude, which does not read the shared one) are flat and GLOBAL: every skill
 # on the machine, from every source, lands in these two directories. So install
 # may write only names we ship, and uninstall may delete only entries it can
-# prove are ours -- scad ships a skill called `remember`, and a name that
-# generic will collide.
+# prove are ours -- scad ships skills called `scad` and `memo-write`, and names
+# that generic will collide.
 SKILL_TARGETS=("$HOME/.agents/skills" "$HOME/.claude/skills")
 
 # realpath_of PATH -- canonical absolute path. `readlink -f` and `realpath` are

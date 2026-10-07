@@ -17,7 +17,7 @@ from datetime import datetime
 from pathlib import Path
 
 from scad.aliases import current_cwd
-from scad.index import NOTE_KIND_SQL, NOTE_PROJECT_SQL, NOTE_RELATION_SQL
+from scad.index import MEMO_KIND_SQL, MEMO_PROJECT_SQL, MEMO_RELATION_SQL
 from scad.live import (
     ClaudeSession,
     TmuxPane,
@@ -28,7 +28,6 @@ from scad.live import (
     is_agent_command,
     newest_by_session,
     other_holders,
-    pane_occupants,
     pid_panes,
 )
 
@@ -75,124 +74,6 @@ def _goto(target: str) -> str:
     return f"tmux select-window -t {window} \\; select-pane -t {target}"
 
 
-def live_pane_rows(conn, panes: list[TmuxPane],
-                   sessions: list[ClaudeSession] | None = None,
-                   records: list[dict] | None = None) -> list[dict]:
-    """One row per live agent pane — the panes themselves, not sessions.
-
-    This is the section that answers "what have I got open right now". It is
-    pane-first because that is what exists: `list-panes -a` spans every tmux
-    session, and a single window routinely holds several agents (three in
-    `main:3` here). A claude pane is matched to its session by process tree
-    and a scad-launched pane by its launch record, both exact; a pane neither
-    can name gets the newest session in its directory, labelled as the guess
-    it is.
-    """
-    # Two proofs before the guess. The registry ties a claude pid to a
-    # session id, and the pane's process tree ties the pid to the pane; a
-    # launch record names the pane outright, for any family. Only a pane
-    # neither can name falls through to "the newest session in this cwd",
-    # which handed one session to two panes when they shared a directory.
-    proven = pane_occupants(panes, sessions or [])
-    if records is None:
-        from scad.launch import launch_records   # launch imports this module
-        records = launch_records()
-    from scad.launch import pane_target
-    # Keyed by where each recorded pane is now, not where it was at launch:
-    # a pane keeps its id and loses its index path when a window is moved.
-    recorded = {}
-    for r in records:
-        if not r.get("session_id"):
-            continue
-        where = pane_target(r)
-        if where:
-            recorded[where] = r["session_id"]
-    rows = []
-    for pane in panes:
-        if not is_agent_command(pane.command):
-            continue
-        # The pane names its own agent, except Claude, which re-execs to its
-        # version string. Anything-else-is-claude was wrong the moment a third
-        # family existed: a kimi pane was labelled claude, and then matched
-        # against claude sessions for its occupant.
-        agent = pane.command if pane.command in ("codex", "kimi") else "claude"
-        exact = (proven[pane.target].session_id if pane.target in proven
-                 else recorded.get(pane.target))
-        if exact:
-            occupant = "proven"
-            guess = conn.execute(
-                "SELECT id, project, name, title, outcome, ended FROM sessions "
-                "WHERE id = ?", (exact,),
-            ).fetchone()
-            if guess is None:
-                # Known to be running here; the index has not caught up. The
-                # id is still the fact, so it is still named.
-                guess = {"id": exact, "project": None, "name": None,
-                         "title": None, "outcome": None, "ended": None}
-        else:
-            occupant = "guessed"
-            # Match the pane's own agent: a codex pane must not be offered a
-            # claude session as its likely occupant, which the unfiltered
-            # query did.
-            guess = conn.execute(
-                "SELECT id, project, name, title, outcome, ended FROM sessions "
-                "WHERE cwd = ? AND kind = 'main' AND agent = ? ORDER BY ended DESC LIMIT 1",
-                (pane.path, agent),
-            ).fetchone()
-        rows.append({
-            "occupant": occupant if guess else None,
-            "target": pane.target,
-            "tmux_session": pane.session,
-            "window": pane.window,
-            "cwd": pane.path,
-            "agent": agent,
-            "version": pane.command,
-            "project": (guess["project"] if guess else None),
-            "likely_id": (guess["id"] if guess else None),
-            "likely_name": (guess["name"] if guess else None),
-            "likely_title": (guess["title"] if guess else None),
-            "likely_outcome": (guess["outcome"] if guess else None),
-            "last_activity": (guess["ended"] if guess else None),
-            "goto": _goto(pane.target),
-        })
-    return rows
-
-
-def group_panes(rows: list[dict]) -> list[dict]:
-    """Nest live panes the way tmux holds them: session -> window -> panes.
-
-    This mirrors how the work is actually laid out — tmuxinator opens a window
-    per project — so the page reads like the screen rather than like a table dump.
-
-    Everything is ordered by **last message time**, most recent first: panes
-    within a window, windows within a session, sessions against each other. What
-    you touched last is what you are most likely coming back to; tmux's own index
-    order says nothing about that. Panes whose directory has no indexed session
-    sort last — unknown is not recent.
-    """
-    sessions: dict[str, dict[str, list[dict]]] = {}
-    for row in rows:
-        windows = sessions.setdefault(row["tmux_session"], {})
-        key = f'{row["target"].split(".")[0]}|{row.get("window") or ""}'
-        windows.setdefault(key, []).append(row)
-    def recency(rows):
-        return max((r.get("last_activity") or 0) for r in rows)
-
-    grouped = []
-    for name, windows in sessions.items():
-        win_rows = [
-            {"label": key.split("|", 1)[1], "target": key.split("|", 1)[0],
-             "panes": sorted(panes, key=lambda r: r.get("last_activity") or 0, reverse=True),
-             "last_activity": recency(panes)}
-            for key, panes in windows.items()
-        ]
-        win_rows.sort(key=lambda w: w["last_activity"], reverse=True)
-        grouped.append({"session": name, "windows": win_rows,
-                        "last_activity": max(w["last_activity"] for w in win_rows)})
-    grouped.sort(key=lambda g: g["last_activity"], reverse=True)
-    return grouped
-
-
 def split_waiting(waiting: list[dict], cwds: set[str]) -> tuple[list[dict], list[dict]]:
     """Split the waiting list into "there is a pane open for it" and "gone".
 
@@ -203,30 +84,6 @@ def split_waiting(waiting: list[dict], cwds: set[str]) -> tuple[list[dict], list
     at_hand = [r for r in waiting if r.get("cwd") and r["cwd"] in cwds]
     closed = [r for r in waiting if not (r.get("cwd") and r["cwd"] in cwds)]
     return at_hand, closed
-
-
-def group_notes(notes: list[dict]) -> list[dict]:
-    """Notes grouped by the session that wrote them, newest session first.
-
-    A note only means something beside its siblings — the `relation` edges
-    (continue / shift / branch / return) describe a session's shape, and a lone
-    note out of order says nothing about it.
-    """
-    sessions: dict[str, list[dict]] = {}
-    for note in notes:
-        sessions.setdefault(note["session_id"], []).append(note)
-    groups = [
-        {"session_id": sid,
-         "label": rows[0].get("name") or sid[:12],
-         "project": rows[0].get("project"),
-         "agent": rows[0].get("agent"),
-         "cwd": rows[0].get("cwd"),
-         "rows": sorted(rows, key=lambda r: r.get("idx") or 0),
-         "last_activity": max((r.get("ts") or 0) for r in rows)}
-        for sid, rows in sessions.items()
-    ]
-    groups.sort(key=lambda g: g["last_activity"], reverse=True)
-    return groups
 
 
 def group_by_project(rows: list[dict]) -> list[dict]:
@@ -409,11 +266,43 @@ def reentry_for(row: dict, panes: list[TmuxPane], running: set[str]) -> Reentry:
     return Reentry("resume", resume)
 
 
-_WAITING = ("awaiting-question", "awaiting-user")
+# What "waiting on you" means: the session asked you something. Not
+# `awaiting-user`, which is how nearly every finished session ends (the agent
+# spoke last): counted, it was 183 of 232 sessions in August against one
+# real question.
+_WAITING = "awaiting-question"
 _SNIPPET = 400
 
 _COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state, "
-            "needs, n_turns, started, ended, scad_run_id, grade")
+            "needs, n_turns, started, ended, scad_run_id, grade, "
+            "context_tokens, context_window")
+
+
+def _thousands(n: int) -> str:
+    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else (
+        f"{round(n / 1000)}k" if n >= 1000 else str(n))
+
+
+def context_pct(tokens, window) -> int | None:
+    return round(100 * tokens / window) if tokens and window else None
+
+
+def context_short(tokens, window) -> str:
+    """How full a session's context is, for a list row: `83%` where the window
+    is known, else the tokens (`150k`), else nothing."""
+    if not tokens:
+        return ""
+    pct = context_pct(tokens, window)
+    return f"{pct}%" if pct is not None else _thousands(tokens)
+
+
+def context_long(tokens, window) -> str:
+    """The same, in full, for `session show`."""
+    if not tokens:
+        return ""
+    if window:
+        return f"{tokens:,} of {window:,} tokens ({context_pct(tokens, window)}%)"
+    return f"{tokens:,} tokens (window unknown)"
 
 
 def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict]:
@@ -423,6 +312,8 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
     now: dict[str | None, str | None] = {}
     for r in cursor_rows:
         row = dict(r)
+        row["context_label"] = context_short(row.get("context_tokens"),
+                                             row.get("context_window"))
         # Where the directory is now, as the export serves it, and set before
         # the resume command and the pane match are built from it.
         row["cwd_recorded"] = row.get("cwd")
@@ -501,14 +392,14 @@ def project_tabs(rows: list[dict], waiting: list[dict]) -> list[dict]:
         if not key:
             continue
         tab = tabs.setdefault(key, {"project": key, "sessions": 0, "waiting": 0,
-                                    "notes": 0, "last_activity": 0})
+                                    "memos": 0, "last_activity": 0})
         tab["sessions"] += 1
-        # Notes per project, so the strip answers a third question: where has
+        # Memos per project, so the strip answers a third question: where has
         # anything been *written down*. The authored tier is the only one that
         # cannot be re-derived, and it is invisible from a session count — a
-        # project with 200 sessions and no notes looks identical to one with
+        # project with 200 sessions and no memos looks identical to one with
         # 200 sessions and twenty, which is exactly the difference worth seeing.
-        tab["notes"] += row.get("n_notes") or 0
+        tab["memos"] += row.get("n_memos") or 0
         tab["last_activity"] = max(tab["last_activity"], row.get("ended") or 0)
     for key, tab in tabs.items():
         tab["waiting"] = waits.get(key, 0)
@@ -722,7 +613,7 @@ def _last_text(conn, session_id: str) -> str:
     return (row["text"] or "")[:_SNIPPET] if row else ""
 
 
-def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
+def gather(conn, panes: list[TmuxPane], running: set[str],
            live_ids: set[str] | None = None, live_sessions: list | None = None) -> dict:
     """Everything the page needs: what waits, what is live, and the full list.
 
@@ -735,7 +626,6 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     scopes itself in the browser, so a second filter in SQL would be a parallel
     mechanism that could disagree with the tabs about the same project.
     """
-    cutoff = int((time.time() - days * 86400) * 1000)
     sessions = _live_sessions(live_sessions)
     if live_sessions is None:
         # Additive, and never a duplicate: a container session's id cannot also
@@ -749,16 +639,14 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
     # session is". That distinction is what status_for reports honestly.
     cwds = {p.path for p in panes if is_agent_command(p.command) and p.path}
 
+    # No age limit: a question nobody answered is still waiting after 14 days,
+    # and the window that used to drop it hid the only real one. Newest first,
+    # because the page is read top-down and current work is what you want at
+    # hand.
     waiting_rows = conn.execute(
         f"SELECT {_COLUMNS} FROM sessions "
-        f"WHERE kind = 'main' AND outcome IN (?, ?) AND ended >= ? "
-        # Questions first — one that actually asked you something outranks one
-        # merely idle — then newest first inside each group. The page is read
-        # top-down and current work is what you want at hand. Oldest-first was
-        # the earlier rule, to keep old rows from rotting unseen at the bottom;
-        # they are still listed, just below the live ones rather than above them.
-        f"ORDER BY CASE outcome WHEN 'awaiting-question' THEN 0 ELSE 1 END, ended DESC",
-        (*_WAITING, cutoff),
+        f"WHERE kind = 'main' AND outcome = ? ORDER BY ended DESC",
+        (_WAITING,),
     ).fetchall()
     waiting = _as_rows(waiting_rows, panes, running, live_ids, cwds)
 
@@ -792,55 +680,47 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
 
     live = _one_per_place(r for r in all_rows if r["reentry"]["kind"] in ("tmux", "container"))
 
-    # Notes are the authored tier — the only thing here that can never be
+    # Memos are the authored tier — the only thing here that can never be
     # re-derived — and until now they were write-only from the page's side.
-    notes = [dict(r) for r in conn.execute(
-        f"SELECT n.session_id, n.idx, n.ts, {NOTE_KIND_SQL} AS kind, n.topic, "
-        f"       {NOTE_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
-        f"       n.note_path, {NOTE_PROJECT_SQL}, s.name, s.agent, s.cwd "
-        f"FROM notes n LEFT JOIN sessions s ON s.id = n.session_id "
+    memos = [dict(r) for r in conn.execute(
+        f"SELECT n.session_id, n.idx, n.ts, {MEMO_KIND_SQL} AS kind, n.topic, "
+        f"       {MEMO_RELATION_SQL}, n.parent, n.title, n.tags, n.entities, "
+        f"       n.memo_path, {MEMO_PROJECT_SQL}, s.name, s.agent, s.cwd "
+        f"FROM memos n LEFT JOIN sessions s ON s.id = n.session_id "
         f"ORDER BY n.ts DESC"
     ).fetchall()]
-    for note in notes:
-        note["cwd"] = current_cwd(note["cwd"])
+    for memo in memos:
+        memo["cwd"] = current_cwd(memo["cwd"])
 
-    # Notes belong ON the row, not only in their own section. A session with
-    # three notes rendered identically to one with none, so the only way to find
-    # a note was to scroll elsewhere and match session ids by eye. Notes are the
+    # Memos belong ON the row, not only in their own section. A session with
+    # three memos rendered identically to one with none, so the only way to find
+    # a memo was to scroll elsewhere and match session ids by eye. Memos are the
     # authored tier — the one thing here that can never be re-derived — and a
     # tier you cannot see from the main view is one you stop writing to.
-    # Counted from the notes already loaded above rather than re-queried: same
+    # Counted from the memos already loaded above rather than re-queried: same
     # numbers by construction, so the row and the section cannot disagree.
-    note_counts: dict[str, int] = {}
+    memo_counts: dict[str, int] = {}
     by_session: dict[str, list[dict]] = {}
-    for note in notes:
-        sid = note.get("session_id")
+    for memo in memos:
+        sid = memo.get("session_id")
         if sid:
-            note_counts[sid] = note_counts.get(sid, 0) + 1
+            memo_counts[sid] = memo_counts.get(sid, 0) + 1
             # Newest first and capped: the row shows what was written, and a
-            # session with thirty notes should not push every other row off the
-            # screen. `notes read` is the place for all of them.
-            if len(by_session.setdefault(sid, [])) < _NOTES_ON_ROW:
-                by_session[sid].append({"kind": note.get("kind"), "topic": note.get("topic"),
-                                        "title": note.get("title"), "ts": note.get("ts")})
+            # session with thirty memos should not push every other row off the
+            # screen. `memos read` is the place for all of them.
+            if len(by_session.setdefault(sid, [])) < _MEMOS_ON_ROW:
+                by_session[sid].append({"kind": memo.get("kind"), "topic": memo.get("topic"),
+                                        "title": memo.get("title"), "ts": memo.get("ts")})
     # Built here rather than inline in the return so it can be counted too — a
     # running session is the likeliest one to have just been written about.
     open_now = live_rows(sessions, panes, all_rows, running)
     for collection in (waiting, all_rows, open_now):
         for row in collection:
             # 0, never None: the renderer should be able to test a number, and
-            # "no notes" is a fact worth stating rather than absent data.
-            row["n_notes"] = note_counts.get(row.get("id"), 0)
-            row["notes"] = by_session.get(row.get("id"), [])
+            # "no memos" is a fact worth stating rather than absent data.
+            row["n_memos"] = memo_counts.get(row.get("id"), 0)
+            row["memos"] = by_session.get(row.get("id"), [])
 
-    pane_rows = live_pane_rows(conn, panes, sessions)
-    # A pane row is a pane, not a session — but it names the session it most
-    # likely holds, and that is the row a reader is looking at when they ask
-    # "what is this one". Same context, fetched once per distinct session.
-    for row in pane_rows:
-        if row.get("likely_id"):
-            row["first_text"] = _first_text(conn, row["likely_id"])
-            row["last_text"] = _last_text(conn, row["likely_id"])
     at_hand, closed_waiting = split_waiting(waiting, cwds)
 
     return {
@@ -849,22 +729,10 @@ def gather(conn, panes: list[TmuxPane], running: set[str], days: int = 14,
         "waiting": waiting,
         "waiting_at_hand": at_hand,
         "waiting_closed": closed_waiting,
-        "notes": notes,
-        # Unrendered since notes moved onto their rows (0.6.0), like
-        # `grouped_panes` above and for the same reason. Kept so `group_notes`
-        # is not dead code with a test harness attached; the backlog carries
-        # the removal of both.
-        "grouped_notes": group_notes(notes),
+        "memos": memos,
         "live_now": open_now,
-        # Unrendered since the two live sections became one (0.6.0): `live_rows`
-        # resolves a pane to its session by process tree and by launch record,
-        # which is what `live_pane_rows` and `group_panes` were for. Kept only
-        # so neither becomes dead code with a test harness attached; the backlog
-        # carries the removal, which cascades to `pane_occupants`.
-        "grouped_panes": group_panes(pane_rows),
         "grouped_closed": group_by_project(closed_waiting),
         "live": live,
-        "panes": pane_rows,
         "all": all_rows,
         "generated": int(time.time() * 1000),
     }
@@ -956,7 +824,7 @@ _PAGE = """<!doctype html>
  .tiny {{ font-size: .74rem; margin-left: auto; white-space: nowrap; }}
  .age {{ color: var(--dim); font-variant-numeric: tabular-nums; }}
  .turns {{ font-size: var(--label); color: var(--faint); }}
- .notes-badge {{ color: var(--ask); }}
+ .memos-badge {{ color: var(--ask); }}
  .pill.runbadge {{ background: transparent; color: var(--codex);
                    border: 1px solid currentColor; }}
  /* Every dot on the page. Faded so the facts carry the weight, and spaced --
@@ -1010,7 +878,7 @@ _PAGE = """<!doctype html>
  .busy {{ color: var(--open); background: var(--open-bg); }}
  .waiting {{ color: var(--maybe); background: var(--maybe-bg); }}
  .nn {{ margin-left: .3rem; padding: 0 .3rem; border-radius: 6px;
-        background: var(--note-bg, #e8e2ff); color: var(--note, #5b46b8);
+        background: var(--memo-bg, #e8e2ff); color: var(--memo, #5b46b8);
         font-size: .7rem; font-weight: 600; }}
  .idle {{ color: var(--shut); background: var(--shut-bg); }}
  .ag {{ font-size: .72rem; font-weight: 600; }}
@@ -1020,7 +888,7 @@ _PAGE = """<!doctype html>
  /* All three axes in one place, and they stay reachable: 200 rows means the
     filters scroll away exactly when you realise you want them. */
  /* A facet rail, not three widgets. Each facet is one row of a shared grid --
-    label gutter, then controls -- so a new facet (outcome, when, has-notes,
+    label gutter, then controls -- so a new facet (outcome, when, has-memos,
     full-text) is another row rather than a re-layout. That matters because
     this is where Littlebird's query UI grows. */
  .filters {{ position: sticky; top: 0; z-index: 20; background: var(--bg);
@@ -1033,7 +901,7 @@ _PAGE = """<!doctype html>
             color: var(--faint); }}
  .facet input {{ width: 100%; margin: 0; }}
  .warn {{ color: var(--warn, #b45309); }}
-.note-kind {{ font-size: .66rem; text-transform: uppercase; letter-spacing: .04em;
+.memo-kind {{ font-size: .66rem; text-transform: uppercase; letter-spacing: .04em;
   color: var(--dim); margin-right: .35em; }}
 h3.bucket {{ font-weight: 600; font-size: .78rem; line-height: 1; letter-spacing: .04em;
   text-transform: uppercase; color: var(--dim); margin: var(--s4) 0 var(--s2);
@@ -1124,7 +992,7 @@ h3.bucket:first-child {{ margin-top: 0; }}
    regenerate with <code onclick="copy(this)">scad view</code></div>
  <div class="sub">{n_live_now} live ·
    {n_at_hand} waiting at hand · {n_closed} waiting closed · {n_all} sessions ·
-   {notes_line} ·
+   {memos_line} ·
    click any command to copy</div>
 </header>
 
@@ -1184,28 +1052,28 @@ const label = r => r.name || r.id.slice(0, 12);
 
 // Mirror of _context_fold: the opener says what a session is, the last word
 // says where it stopped, and a native <details> keeps 200 rows scannable.
-// The row's notes, mirroring _notes_block on the server so the two lists look
-// the same. Notes are the one tier that cannot be re-derived; off the row they
+// The row's memos, mirroring _memos_block on the server so the two lists look
+// the same. Memos are the one tier that cannot be re-derived; off the row they
 // were invisible unless you scrolled to a section of their own.
-function noteBlock(r) {{
-  const ns = r.notes || [];
+function memoBlock(r) {{
+  const ns = r.memos || [];
   if (!ns.length) return '';
-  const parts = ns.map(n => '<span class="note-kind">' + esc(n.kind || 'info') +
+  const parts = ns.map(n => '<span class="memo-kind">' + esc(n.kind || 'info') +
     '</span>' + esc(n.title || n.topic || '(untitled)'));
-  const more = (r.n_notes || 0) - ns.length;
+  const more = (r.n_memos || 0) - ns.length;
   const tail = more > 0 ? ' <span class="m">+' + more + ' more</span>' : '';
-  return '<p class="fold-part"><span class="fold-tag">notes</span>' +
+  return '<p class="fold-part"><span class="fold-tag">memos</span>' +
          parts.join(' · ') + tail + '</p>';
 }}
 
 function ctxFold(r) {{
   const first = (r.first_text || "").trim(), last = (r.last_text || "").trim();
-  const notes = noteBlock(r);
-  if (!first && !last && !notes) return '';
+  const memos = memoBlock(r);
+  if (!first && !last && !memos) return '';
   let blocks = '';
   if (first) blocks += '<p class="fold-part"><span class="fold-tag">opened</span>' + esc(first) + '</p>';
   if (last && last !== first) blocks += '<p class="fold-part"><span class="fold-tag">last</span>' + esc(last) + '</p>';
-  return '<details class="ctx"><summary>' + blocks + notes + '</summary></details>';
+  return '<details class="ctx"><summary>' + blocks + memos + '</summary></details>';
 }}
 
 // A second process on one session id, which a reattach leaves behind. Said on
@@ -1227,7 +1095,8 @@ function rows(list) {{
     '<span class="pill ' + esc(r.status) + '">' + esc(r.status) + '</span></div>' +
     '<div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
-    (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
+    (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') +
+    (r.context_label ? ' · context ' + esc(r.context_label) : '') + ' · ' + esc(when(r.ended)) +
     (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
     heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
@@ -1590,9 +1459,13 @@ def _facts(row: dict) -> str:
         ident.append(_agent_tag(str(row["agent"])))
     if row.get("project"):
         ident.append(e(str(row["project"])))
-    if row.get("n_notes"):
-        ident.append(f'<span class="notes-badge" title="{row["n_notes"]} notes">'
-                     f'◆ {row["n_notes"]}</span>')
+    if row.get("n_memos"):
+        ident.append(f'<span class="memos-badge" title="{row["n_memos"]} memos">'
+                     f'◆ {row["n_memos"]}</span>')
+    if row.get("context_label"):
+        full = context_long(row.get("context_tokens"), row.get("context_window"))
+        ident.append(f'<span class="dimmer" title="{e(full)}">context '
+                     f'{e(row["context_label"])}</span>')
     title = (row.get("title") or "").strip()
     label = (row.get("name") or "").strip()
     # A session named by /rename gets a title recording that rename, so this
@@ -1716,31 +1589,31 @@ def _tabs_html(tabs: list[dict], n_all: int, n_waiting: int) -> str:
     reason to click one. The totals ride along in the tooltip.
     """
     e = _html.escape
-    n_notes_all = sum(t.get("notes") or 0 for t in tabs)
+    n_memos_all = sum(t.get("memos") or 0 for t in tabs)
     out = [f'<button class="tab on{" hot" if n_waiting else ""}" data-tab="" '
-           f'title="{n_all} sessions · {n_waiting} waiting · {n_notes_all} notes">All'
+           f'title="{n_all} sessions · {n_waiting} waiting · {n_memos_all} memos">All'
            f'<span class="n">{n_waiting}</span>'
-           f'{_note_badge(n_notes_all)}</button>']
+           f'{_memo_badge(n_memos_all)}</button>']
     for tab in tabs:
         name = e(tab["project"])
         out.append(
             f'<button class="tab{" hot" if tab["waiting"] else ""}" data-tab="{name}" '
             f'title="{tab["sessions"]} sessions · {tab["waiting"]} waiting · '
-            f'{tab.get("notes") or 0} notes · {_ago(tab["last_activity"])}">{name}'
+            f'{tab.get("memos") or 0} memos · {_ago(tab["last_activity"])}">{name}'
             f'<span class="n">{tab["waiting"]}</span>'
-            f'{_note_badge(tab.get("notes") or 0)}</button>')
+            f'{_memo_badge(tab.get("memos") or 0)}</button>')
     return "".join(out)
 
 
-def _note_badge(n: int) -> str:
+def _memo_badge(n: int) -> str:
     """A second, quieter number on a tab: how much has been written down here.
 
     Separate from the waiting count rather than folded into it, because they
-    pull in opposite directions — waiting is work arriving, notes are work
+    pull in opposite directions — waiting is work arriving, memos are work
     understood. Silent at zero, which is the common case and would otherwise
     put a `0` on every tab and teach the eye to ignore the position entirely.
     """
-    return f'<span class="nn" title="{n} note{"" if n == 1 else "s"}">{n}</span>' if n else ""
+    return f'<span class="nn" title="{n} memo{"" if n == 1 else "s"}">{n}</span>' if n else ""
 
 
 def _live_now_html(rows: list[dict]) -> str:
@@ -1778,29 +1651,29 @@ def _live_now_html(rows: list[dict]) -> str:
     return f'<div class="card">{"".join(out)}</div>'
 
 
-#: How many of a session's notes ride on its row. Four fits the fold without
+#: How many of a session's memos ride on its row. Four fits the fold without
 #: making a long-lived session's row taller than the rest of the page.
-_NOTES_ON_ROW = 4
+_MEMOS_ON_ROW = 4
 
 
-def _notes_block(r: dict) -> str:
-    """A session's notes, as the third block of its context fold.
+def _memos_block(r: dict) -> str:
+    """A session's memos, as the third block of its context fold.
 
     They were in a section of their own, which meant matching session ids by
-    eye to find the note for the row you were looking at. A tier nobody can see
+    eye to find the memo for the row you were looking at. A tier nobody can see
     from the main view is a tier people stop writing to.
     """
     e = _html.escape
     out = []
-    for n in (r.get("notes") or []):
+    for n in (r.get("memos") or []):
         label = n.get("title") or n.get("topic") or "(untitled)"
         kind = n.get("kind") or "info"
-        out.append(f'<span class="note-kind">{e(str(kind))}</span>{e(str(label))}')
+        out.append(f'<span class="memo-kind">{e(str(kind))}</span>{e(str(label))}')
     if not out:
         return ""
-    more = (r.get("n_notes") or 0) - len(out)
+    more = (r.get("n_memos") or 0) - len(out)
     tail = f' <span class="m">+{more} more</span>' if more > 0 else ""
-    return ('<p class="fold-part"><span class="fold-tag">notes</span>'
+    return ('<p class="fold-part"><span class="fold-tag">memos</span>'
             + " · ".join(out) + tail + "</p>")
 
 
@@ -1819,8 +1692,8 @@ def _context_fold(r: dict) -> str:
     e = _html.escape
     first = " ".join(str(r.get("first_text") or "").split())
     last = " ".join(str(r.get("last_text") or "").split())
-    notes = _notes_block(r)
-    if not first and not last and not notes:
+    memos = _memos_block(r)
+    if not first and not last and not memos:
         return ""
     # The summary IS the opener, carried in full — `<details>` keeps it on
     # screen when open, so repeating it in the body printed the same paragraph
@@ -1837,7 +1710,7 @@ def _context_fold(r: dict) -> str:
         parts.append(("last", last))
     blocks = "".join(
         f'<p class="fold-part"><span class="fold-tag">{tag}</span>{e(text)}</p>'
-        for tag, text in parts) + notes
+        for tag, text in parts) + memos
     # Both ends live in the summary so both are visible without opening
     # anything: "what did I start this for" and "where did it get to" are two
     # questions, and answering only the first until you click made the second
@@ -1890,12 +1763,12 @@ def render(data: dict) -> str:
         generated=datetime.fromtimestamp(data["generated"] / 1000).strftime("%Y-%m-%d %H:%M"),
         n_all=len(data["all"]), n_waiting=len(data["waiting"]), n_live=len(data["live"]),
         n_live_now=len(data.get("live_now") or []),
-        # The page stopped having a Notes section when notes moved onto their
+        # The page stopped having a Memos section when memos moved onto their
         # rows, and that section was the only thing telling anyone the tier
         # exists. An empty store now says so here, where the counts are.
-        notes_line=(f'{len(data.get("notes") or [])} notes'
-                    if data.get("notes") else
-                    'no notes yet — write one with <code>/remember</code>'),
+        memos_line=(f'{len(data.get("memos") or [])} memos'
+                    if data.get("memos") else
+                    'no memos yet — write one with <code>/memo-write</code>'),
         live_now=_live_now_html(data.get("live_now") or []),
         n_at_hand=len(data.get("waiting_at_hand") or []),
         n_closed=len(data.get("waiting_closed") or []),
