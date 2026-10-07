@@ -274,7 +274,35 @@ _WAITING = "awaiting-question"
 _SNIPPET = 400
 
 _COLUMNS = ("id, name, kind, agent, project, cwd, title, outcome, harness_state, "
-            "needs, n_turns, started, ended, scad_run_id, grade")
+            "needs, n_turns, started, ended, scad_run_id, grade, "
+            "context_tokens, context_window")
+
+
+def _thousands(n: int) -> str:
+    return f"{n / 1_000_000:.1f}M" if n >= 1_000_000 else (
+        f"{round(n / 1000)}k" if n >= 1000 else str(n))
+
+
+def context_pct(tokens, window) -> int | None:
+    return round(100 * tokens / window) if tokens and window else None
+
+
+def context_short(tokens, window) -> str:
+    """How full a session's context is, for a list row: `83%` where the window
+    is known, else the tokens (`150k`), else nothing."""
+    if not tokens:
+        return ""
+    pct = context_pct(tokens, window)
+    return f"{pct}%" if pct is not None else _thousands(tokens)
+
+
+def context_long(tokens, window) -> str:
+    """The same, in full, for `session show`."""
+    if not tokens:
+        return ""
+    if window:
+        return f"{tokens:,} of {window:,} tokens ({context_pct(tokens, window)}%)"
+    return f"{tokens:,} tokens (window unknown)"
 
 
 def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict]:
@@ -284,6 +312,8 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
     now: dict[str | None, str | None] = {}
     for r in cursor_rows:
         row = dict(r)
+        row["context_label"] = context_short(row.get("context_tokens"),
+                                             row.get("context_window"))
         # Where the directory is now, as the export serves it, and set before
         # the resume command and the pane match are built from it.
         row["cwd_recorded"] = row.get("cwd")
@@ -1065,7 +1095,8 @@ function rows(list) {{
     '<span class="pill ' + esc(r.status) + '">' + esc(r.status) + '</span></div>' +
     '<div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
-    (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') + ' · ' + esc(when(r.ended)) +
+    (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') +
+    (r.context_label ? ' · context ' + esc(r.context_label) : '') + ' · ' + esc(when(r.ended)) +
     (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
     heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
@@ -1431,6 +1462,10 @@ def _facts(row: dict) -> str:
     if row.get("n_memos"):
         ident.append(f'<span class="memos-badge" title="{row["n_memos"]} memos">'
                      f'◆ {row["n_memos"]}</span>')
+    if row.get("context_label"):
+        full = context_long(row.get("context_tokens"), row.get("context_window"))
+        ident.append(f'<span class="dimmer" title="{e(full)}">context '
+                     f'{e(row["context_label"])}</span>')
     title = (row.get("title") or "").strip()
     label = (row.get("name") or "").strip()
     # A session named by /rename gets a title recording that rename, so this

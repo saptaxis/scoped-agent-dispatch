@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   source_size       INTEGER,
   parsed_offset     INTEGER NOT NULL DEFAULT 0,
   memos_offset      INTEGER NOT NULL DEFAULT 0,
+  context_tokens    INTEGER,           -- the newest turn's input: the context in use
+  context_window    INTEGER,           -- its size, when the trace states or proves it
   memos_mtime       INTEGER,
   raw_present       INTEGER NOT NULL DEFAULT 1,
   extractor_version INTEGER NOT NULL DEFAULT 1
@@ -169,6 +171,10 @@ _ADDED_COLUMNS: dict[str, dict[str, str]] = {
         # memo file from the start into the new, empty `memos` table.
         "memos_offset": "INTEGER NOT NULL DEFAULT 0",
         "memos_mtime": "INTEGER",
+        # Filled as files are next parsed. An incremental pass reads only a
+        # file's tail, so a session nobody touches again keeps NULL until a
+        # rebuild; the ones still in use fill on their next turn.
+        "context_tokens": "INTEGER", "context_window": "INTEGER",
     },
 }
 
@@ -228,8 +234,8 @@ def upsert_session(
             scad_run_id, cwd, project, title, name, git_branch, started, ended,
             grade, source, outcome, last_stop_reason, n_interrupts,
             n_tool_denials, n_errors, archive_path, source_mtime, source_size,
-            parsed_offset, raw_present, extractor_version
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?)
+            parsed_offset, raw_present, extractor_version, context_tokens, context_window
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
         ON CONFLICT(id) DO UPDATE SET
             -- First cwd wins, and later passes may only FILL it, never move it.
             -- Claude Code stamps `cwd` on every record, so a tool call made in
@@ -284,7 +290,10 @@ def upsert_session(
             source_mtime     = excluded.source_mtime,
             source_size      = excluded.source_size,
             parsed_offset    = excluded.parsed_offset,
-            raw_present      = 1
+            raw_present      = 1,
+            -- The newest figure wins; a tail that carried none keeps the last.
+            context_tokens   = COALESCE(excluded.context_tokens, sessions.context_tokens),
+            context_window   = COALESCE(excluded.context_window, sessions.context_window)
         """,
         (
             session.id, session.kind, session.parent_session_id, session.agent_id,
@@ -294,7 +303,7 @@ def upsert_session(
             session.grade, session.source, session.outcome, session.last_stop_reason,
             session.n_interrupts, session.n_tool_denials, session.n_errors,
             archive_path, source_mtime, source_size,
-            parsed_offset, EXTRACTOR_VERSION,
+            parsed_offset, EXTRACTOR_VERSION, session.context_tokens, session.context_window,
             GRADE_FULL, GRADE_FULL, GRADE_FULL,
         ),
     )

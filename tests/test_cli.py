@@ -4497,3 +4497,39 @@ class TestSubAgentCounts:
         self._conn(tmp_path, monkeypatch)
         out = runner.invoke(main, ["project", "show", "proj"]).output
         assert "3 sub" in next(l for l in out.splitlines() if l.startswith("P "))
+
+
+class TestContextFillInTheCli:
+    def _conn(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        for sid, tokens, window in (("P", 215_227, 258_400), ("Q", 150_000, None),
+                                    ("R", None, None)):
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, project, "
+                "started, n_turns, context_tokens, context_window) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (sid, "main", "claude", "m", "full", "claude-transcript", "proj", 1, 1,
+                 tokens, window))
+        conn.commit()
+
+    def test_the_json_export_carries_tokens_window_and_percent(self, runner, tmp_path,
+                                                               monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        rows = {r["id"]: r for r in json.loads(
+            runner.invoke(main, ["session", "ls", "--json"]).output)}
+        assert (rows["P"]["context_tokens"], rows["P"]["context_window"],
+                rows["P"]["context_pct"]) == (215_227, 258_400, 83)
+        assert rows["Q"]["context_pct"] is None and rows["R"]["context_tokens"] is None
+
+    def test_session_ls_shows_it(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "ls"]).output
+        assert "83%" in next(l for l in out.splitlines() if l.startswith("P "))
+        assert "150k" in next(l for l in out.splitlines() if l.startswith("Q "))
+
+    def test_session_show_says_it_in_full(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "show", "P"]).output
+        assert "215,227 of 258,400 tokens (83%)" in out

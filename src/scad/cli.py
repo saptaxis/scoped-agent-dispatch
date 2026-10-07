@@ -130,7 +130,8 @@ from scad.memos import (
     StoreNotMoved,
 )
 from scad.view import (
-    _is_agent_state_dir, gather, render, resume_argv, resume_command, write_view,
+    _is_agent_state_dir, context_long, context_pct, context_short, gather, render,
+    resume_argv, resume_command, write_view,
 )
 
 
@@ -2130,7 +2131,8 @@ def index_status_cmd(as_json):
 @click.option("--json", "as_json", is_flag=True,
               help="Emit rows as JSON. The export a consumer reads instead of the index "
                    "file: adds cwd (where the directory is now), cwd_recorded, ended, "
-                   "needs, parent_session_id, n_subagents, last_turn and live.")
+                   "needs, parent_session_id, n_subagents, context_tokens, context_window, "
+                   "context_pct, last_turn and live.")
 def session_ls(project, agent, kind, machine, grade, outcome, since, until, parent_id,
                limit, as_json):
     """List indexed sessions, newest first."""
@@ -2150,7 +2152,7 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, pare
     rows = conn.execute(
         f"SELECT id, name, harness_state, kind, agent, project, title, n_turns, "
         f"grade, outcome, started, ended, cwd, needs, parent_session_id, "
-        f"{_N_SUBAGENTS_SQL} "
+        f"context_tokens, context_window, {_N_SUBAGENTS_SQL} "
         f"FROM sessions {clause} ORDER BY started DESC LIMIT ?",
         (*params, limit),
     ).fetchall()
@@ -2173,6 +2175,7 @@ def session_ls(project, agent, kind, machine, grade, outcome, since, until, pare
         name = (r["name"] or "")[:26]     # the longest real one is 26 characters
         click.echo(f"{r['id'][:12]:<14} {name:<27} {when}  {r['agent']:<7} "
                    f"{r['kind']:<14} {(r['project'] or '?'):<24} {r['n_turns']:>5}t "
+                   f"{context_short(r['context_tokens'], r['context_window']):>5} "
                    f"{_subagents_cell(r['n_subagents'])}  {title}")
 
 
@@ -2216,6 +2219,7 @@ def _session_export(conn, rows) -> list[dict]:
     now: dict[str | None, str | None] = {}
     for r in rows:
         row = dict(r)
+        row["context_pct"] = context_pct(row.get("context_tokens"), row.get("context_window"))
         row["cwd_recorded"] = row["cwd"]
         if row["cwd"] not in now:
             now[row["cwd"]] = aliases.current_cwd(row["cwd"])
@@ -2281,6 +2285,8 @@ def session_show(session_id):
     ).fetchone()["n"]
     if kids:
         click.echo(f"{'subagents':<18} {kids}")
+    if row["context_tokens"]:
+        click.echo(f"{'context':<18} {context_long(row['context_tokens'], row['context_window'])}")
 
     # The authored tier. Listed by topic rather than counted alone, because the
     # question a memo answers is "what did I decide here", and a bare count

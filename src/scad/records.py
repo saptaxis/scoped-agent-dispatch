@@ -69,6 +69,11 @@ class SessionRecord:
     n_interrupts: int = 0
     n_tool_denials: int = 0
     n_errors: int = 0
+    # How full the context is: the newest turn's input, in tokens, and the
+    # window it fills when the trace says or proves it. None is "not seen in
+    # what was parsed", so an incremental pass keeps what an earlier one found.
+    context_tokens: int | None = None
+    context_window: int | None = None
 
 
 @dataclass(frozen=True)

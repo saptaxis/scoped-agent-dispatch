@@ -1783,3 +1783,24 @@ class TestTheIndexLock:
             pass
         with index_lock(conn, timeout_s=0.3):
             pass
+
+
+class TestContextColumns:
+    """An incremental pass parses only a file's tail, so a tail with no usage
+    in it must not blank the figure an earlier pass found."""
+
+    def _upsert(self, conn, **ctx):
+        upsert_session(conn, rec(id="S1", **ctx), machine="m", project="p",
+                       archive_path="/a", source_size=1, source_mtime=1, parsed_offset=1)
+        return session_row(conn, "S1")
+
+    def test_a_new_figure_replaces_the_old(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        self._upsert(conn, context_tokens=100)
+        assert self._upsert(conn, context_tokens=250)["context_tokens"] == 250
+
+    def test_a_tail_without_usage_keeps_the_old(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        self._upsert(conn, context_tokens=100, context_window=258_400)
+        row = self._upsert(conn)
+        assert (row["context_tokens"], row["context_window"]) == (100, 258_400)

@@ -144,6 +144,29 @@ def derive_outcome(tail: dict) -> str | None:
     return None
 
 
+# A Claude transcript names the model but not whether the session runs with
+# the 200k window or the 1M one. A turn past 200k proves the larger; below it
+# the window is unknown and no percentage is shown, rather than a guess.
+CLAUDE_SMALL_WINDOW = 200_000
+CLAUDE_LARGE_WINDOW = 1_000_000
+
+
+def _int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _claude_context(usage) -> int | None:
+    """Input tokens of one assistant turn: the context it was given."""
+    if not isinstance(usage, dict):
+        return None
+    total = sum(_int(usage.get(k)) for k in
+                ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens"))
+    return total or None
+
+
 def read_claude_transcript(
     path: Path, start_offset: int = 0
 ) -> tuple[SessionRecord | None, list[TurnRecord], int]:
@@ -155,6 +178,7 @@ def read_claude_transcript(
     tail: dict = {}
     interrupts = denials = errors = 0
     last_stop = None
+    context = window = None
 
     for offset, rec in _iter_lines(path, start_offset):
         if rec is None:
@@ -200,6 +224,11 @@ def read_claude_transcript(
             kinds = {b.get("type") for b in blocks if isinstance(b, dict)}
             tail["last_was_tool_result"] = "tool_result" in kinds
             if role == "assistant":
+                used = _claude_context(message.get("usage"))
+                if used:
+                    context = used
+                    if used > CLAUDE_SMALL_WINDOW:
+                        window = CLAUDE_LARGE_WINDOW
                 tail["asked_question"] = "AskUserQuestion" in names
                 if names:
                     tail["pending_tool_use"] = True
@@ -218,6 +247,7 @@ def read_claude_transcript(
         started=started, ended=ended, grade=GRADE_FULL,
         outcome=derive_outcome(tail), last_stop_reason=last_stop,
         n_interrupts=interrupts, n_tool_denials=denials, n_errors=errors,
+        context_tokens=context, context_window=window,
     )
     return session, turns, end_offset
 
@@ -452,6 +482,8 @@ def read_codex_rollout(
     tail: dict = {}
     open_calls: set = set()      # call_ids still awaiting their output
 
+    context = window = None
+
     for offset, rec in _iter_lines(path, start_offset):
         if rec is None:
             continue
@@ -471,6 +503,18 @@ def read_codex_rollout(
 
         if rtype == "turn_context":
             cwd = payload.get("cwd") or cwd     # cwd can change mid-session
+            continue
+
+        if rtype == "event_msg" and payload.get("type") == "token_count":
+            # The one event_msg read: it is not a duplicate of anything, and it
+            # is the only place codex states both the context used and its window.
+            info = payload.get("info")
+            if isinstance(info, dict):
+                last = info.get("last_token_usage")
+                if isinstance(last, dict) and _int(last.get("input_tokens")):
+                    context = _int(last.get("input_tokens"))
+                if _int(info.get("model_context_window")):
+                    window = _int(info.get("model_context_window"))
             continue
 
         if rtype != "response_item":
@@ -522,6 +566,7 @@ def read_codex_rollout(
         cwd=cwd, started=started, ended=ended, grade=GRADE_FULL,
         outcome=derive_outcome(tail),
         # last_stop_reason has no codex analogue; NULL beats an invented one.
+        context_tokens=context, context_window=window,
     )
     return session, turns, end_offset
 
@@ -708,6 +753,7 @@ def read_kimi_wire(
     open_calls: set = set()          # toolCallIds still awaiting their result
     last_stop = None
     denials = 0
+    context = window = None
 
     for offset, rec in _iter_lines(path, start_offset):
         if not isinstance(rec, dict):
@@ -739,6 +785,19 @@ def read_kimi_wire(
             # friction — a missed denial is invisible, a spurious one is not.
             if decision is not None and decision != "approved":
                 denials += 1
+            continue
+
+        if rtype == "llm.request" and _int(rec.get("maxTokens")):
+            # Equal to the model's max_context_size in kimi's config, so taken as
+            # the window. It also bounds the request, so this is an inference.
+            window = _int(rec.get("maxTokens"))
+            continue
+        if rtype == "usage.record" and isinstance(rec.get("usage"), dict):
+            usage = rec["usage"]
+            used = sum(_int(usage.get(k)) for k in
+                       ("inputOther", "inputCacheRead", "inputCacheCreation"))
+            if used:
+                context = used
             continue
 
         if rtype != "context.append_loop_event":
@@ -813,6 +872,7 @@ def read_kimi_wire(
         started=started, ended=ended, grade=GRADE_FULL,
         outcome=derive_outcome(tail), last_stop_reason=last_stop,
         n_tool_denials=denials,
+        context_tokens=context, context_window=window,
         # n_interrupts and n_errors stay 0: a kimi wire has no abort marker and no
         # error marker. `turn.steer` is a mid-turn interjection, not a stop — and
         # it is part of the duplicate stream besides. A guessed count would be

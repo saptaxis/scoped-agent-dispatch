@@ -1617,3 +1617,34 @@ class TestAGoneDirectory:
         row = gather(conn, [], set())["waiting"][0]
         assert not row["cwd_gone"]
         assert row["reentry"]["command"] == "codex resume C1"
+
+
+class TestContextFill:
+    """How much of each session's context is used, wherever a session shows."""
+
+    def test_the_short_label(self):
+        from scad.view import context_short
+        assert context_short(None, None) == ""
+        assert context_short(653_162, 1_000_000) == "65%"
+        assert context_short(150_000, None) == "150k"
+        assert context_short(900, None) == "900"
+
+    def test_the_long_label(self):
+        from scad.view import context_long
+        assert context_long(215_227, 258_400) == "215,227 of 258,400 tokens (83%)"
+        assert context_long(150_000, None) == "150,000 tokens (window unknown)"
+        assert context_long(None, None) == ""
+
+    def test_a_row_on_the_page_shows_it(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-question")
+        conn.execute("UPDATE sessions SET context_tokens = 215227, context_window = 258400")
+        conn.commit()
+        data = gather(conn, [], set(), live_sessions=[])
+        row = next(r for r in data["all"] if r["id"] == "S1")
+        assert row["context_label"] == "83%"
+        assert "83%" in render(data)
+
+    def test_the_client_side_rows_show_it_too(self, tmp_path):
+        html = render(gather(connect(tmp_path / "i.sqlite"), [], set(), live_sessions=[]))
+        assert "r.context_label" in html
