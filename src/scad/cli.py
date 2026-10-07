@@ -2440,6 +2440,62 @@ def _tmux_panes_now():
     return tmux_panes()
 
 
+HANDOFF_POLL_S = 2.0
+HANDOFF_TIMEOUT_S = 600
+
+
+def _handoffs_in(session_id: str, agent: str) -> list[dict]:
+    path = _resolve_memo_path(session_id, agent)
+    return [m for m in hydrate_memos(read_memo_file(path)) if m.get("kind") == "handoff"]
+
+
+@session.command("handoff")
+@click.argument("session_id", shell_complete=_complete_sessions)
+@click.argument("angle", required=False, default="")
+@click.option("--timeout", default=HANDOFF_TIMEOUT_S, type=float, show_default=True,
+              help="Seconds to wait for the handoff memo.")
+def session_handoff(session_id, angle, timeout):
+    """Ask an open session to write its own handoff memo, and wait for it.
+
+    Types `/memo-handoff ANGLE` into the session's pane; the angle shapes what
+    the handoff is for. Only sessions scad launched or restored have a pane scad
+    can type into. A nearly full session is refused: it may not have room to
+    write a good handoff, and `session launch --from` writes one from outside.
+    """
+    from scad.view import context_long, nearly_full
+
+    row = session_row(index_connect(), session_id)
+    record = read_record(session_id)
+    if record is None or not record.get("tmux"):
+        raise click.ClickException(
+            f"{session_id} was not started by scad, so there is no pane scad can type into. "
+            f"Type /memo-handoff {angle}".rstrip() + " in it yourself.")
+    if row is not None and nearly_full(row["context_tokens"], row["context_window"]):
+        raise click.ClickException(
+            f"{session_id} is nearly full ({context_long(row['context_tokens'], row['context_window'])}). "
+            f"Start a fresh session from it instead: "
+            f"scad session launch --agent claude --from {session_id}")
+
+    agent = record.get("agent") or "claude"
+    before = len(_handoffs_in(session_id, agent))
+    try:
+        send_turn(session_id, f"/memo-handoff {angle}".rstrip())
+    except LaunchError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"[scad] asked {session_id} for a handoff; waiting up to {timeout:g}s")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = _handoffs_in(session_id, agent)
+        if len(found) > before:
+            click.echo(f"[scad] handoff written: {found[-1].get('title') or '(untitled)'}")
+            click.echo(f"[scad] read it: scad memos read {session_id} --last")
+            return
+        time.sleep(HANDOFF_POLL_S)
+    click.echo(f"[scad] the request was sent, but no handoff memo appeared in {timeout:g}s. "
+               f"Check with: scad memos ls --session {session_id}")
+    raise SystemExit(1)
+
+
 @session.command("show")
 @click.argument("session_id", shell_complete=_complete_sessions)
 def session_show(session_id):

@@ -1963,7 +1963,7 @@ class TestRunSessionSplit:
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
     TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos",
-                   "snapshot", "restore")
+                   "snapshot", "restore", "handoff")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -4763,3 +4763,60 @@ class TestSessionReadTail:
         self._conn(tmp_path, monkeypatch)
         result = runner.invoke(main, ["session", "read", "S1", "--since", "yesterday"])
         assert result.exit_code == 2
+
+
+class TestSessionHandoff:
+    """`scad session handoff ID "ANGLE"` asks an open session to write its own
+    handoff, shaped by the angle, and waits for the memo."""
+
+    def _setup(self, tmp_path, monkeypatch, *, tokens=50_000, window=1_000_000, record=True,
+               writes=True):
+        from scad.index import connect, upsert_session
+        from scad.records import SessionRecord
+        home = tmp_path / ".scad"
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        conn = connect(home / "index.sqlite")
+        upsert_session(conn, SessionRecord(id="S1", kind="main", agent="claude",
+                                           source="claude-transcript", context_tokens=tokens,
+                                           context_window=window),
+                       machine="m", project="p", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        if record:
+            from scad.launch import write_record
+            write_record({"session_id": "S1", "agent": "claude", "tmux": "main:3.1",
+                          "pane_id": "%7"})
+        sent = []
+
+        def send(session_id, text):
+            sent.append((session_id, text))
+            if writes:
+                from scad.memos import append_memo
+                append_memo({"kind": "handoff", "title": "where it stands"}, session_id="S1")
+            return {"tmux": "main:3.1", "bytes": len(text)}
+        monkeypatch.setattr("scad.cli.send_turn", send)
+        monkeypatch.setattr("scad.cli.HANDOFF_POLL_S", 0.01)
+        return sent
+
+    def test_it_sends_the_angle_and_returns_with_the_memo(self, runner, tmp_path, monkeypatch):
+        sent = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "handoff", "S1", "frame it for orglens"])
+        assert result.exit_code == 0, result.output
+        assert sent == [("S1", "/memo-handoff frame it for orglens")]
+        assert "where it stands" in result.output and "scad memos read S1 --last" in result.output
+
+    def test_a_session_scad_did_not_launch_is_told_to_type_it(self, runner, tmp_path,
+                                                              monkeypatch):
+        sent = self._setup(tmp_path, monkeypatch, record=False)
+        result = runner.invoke(main, ["session", "handoff", "S1"])
+        assert result.exit_code == 1 and "/memo-handoff" in result.output and sent == []
+
+    def test_a_nearly_full_session_is_pointed_at_from(self, runner, tmp_path, monkeypatch):
+        sent = self._setup(tmp_path, monkeypatch, tokens=850_000)
+        result = runner.invoke(main, ["session", "handoff", "S1"])
+        assert result.exit_code == 1 and "--from S1" in result.output and sent == []
+
+    def test_a_timeout_says_it_was_sent_and_how_to_check(self, runner, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, writes=False)
+        result = runner.invoke(main, ["session", "handoff", "S1", "--timeout", "0.05"])
+        assert result.exit_code == 1
+        assert "sent" in result.output and "scad memos ls --session S1" in result.output
