@@ -2640,6 +2640,12 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, fr
     """
     # Bare --split arrives as "" (the caller's pane); a value names a window.
     split = True if split == "" else split
+    # Only the person's own prompt: the turn `--from` writes uses the memo
+    # skills on purpose.
+    from scad.launch import skill_triggers
+    for phrase, skill in skill_triggers(prompt or ""):
+        click.echo(f"[scad] note: the prompt says \"{phrase}\", which may set off scad's "
+                   f"{skill} skill in the new session.", err=as_json)
     if from_id:
         source = session_row(index_connect(), from_id)
         if source is None:

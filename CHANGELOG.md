@@ -12,6 +12,7 @@
 
 ### Added
 
+- `scad session launch` notes when `--prompt` contains a phrase that can set off one of scad's skills in the new session ("write a memo", "hand this off", "catch me up" and others), and launches anyway.
 - `scad session handoff ID ["ANGLE"]` asks an open session that scad launched or restored to write its handoff memo, and waits for it. It refuses a session whose context is nearly full.
 - `scad session launch --from ID` starts a fresh session that picks up ID's work: it reads ID's newest handoff memo and every turn after it, or ID's last 200 text turns when there is no handoff, writes a handoff memo, then follows `--prompt`. The directory defaults to ID's.
 - `scad session read --last N` reads a session's last N turns, and `--since TIME` the turns at or after a time (ISO 8601 or epoch milliseconds).

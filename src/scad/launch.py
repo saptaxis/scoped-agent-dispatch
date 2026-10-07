@@ -373,6 +373,26 @@ def new_session(name: str, cwd: Path, command: str) -> str:
     return f"{name}:0.0"
 
 
+# Phrases that make an agent run one of scad's own skills, from the skills'
+# descriptions. A launch prompt containing one can set the skill off in the new
+# session: kimi ran the old `remember` skill on "Remember the phrase …"
+# (2026-07). Warned about, not refused: the prompt is the person's intent.
+SKILL_TRIGGERS = {
+    "/memo-write": "memo-write", "write a memo": "memo-write", "memo this": "memo-write",
+    "capture this": "memo-write", "note this down": "memo-write",
+    "/memo-handoff": "memo-handoff", "write a handoff": "memo-handoff",
+    "handoff memo": "memo-handoff", "hand this off": "memo-handoff",
+    "/memo-recall": "memo-recall", "recall this project": "memo-recall",
+    "catch me up": "memo-recall",
+}
+
+
+def skill_triggers(text: str) -> list[tuple[str, str]]:
+    """(phrase, skill) for each scad skill trigger in `text`, case-insensitively."""
+    lowered = (text or "").lower()
+    return [(p, skill) for p, skill in SKILL_TRIGGERS.items() if p in lowered]
+
+
 # --- putting a session from a snapshot back into a pane (`session restore`) ---
 
 def resume_for(session: dict) -> str:

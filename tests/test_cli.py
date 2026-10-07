@@ -2959,7 +2959,7 @@ class TestSessionNoteValidatesKindAndProject:
         result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t", "project": "alpha"}))
         assert result.exit_code == 0, result.output
-        assert "warning" not in result.output.lower()
+        assert "may set off" not in result.output
 
     def test_a_project_only_another_note_has_used_counts_as_known(
             self, runner, tmp_path, monkeypatch):
@@ -2972,13 +2972,13 @@ class TestSessionNoteValidatesKindAndProject:
         runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "memo", "--session", "S2"],
                                input=json.dumps({"title": "t", "project": "beta"}))
-        assert "warning" not in result.output.lower()
+        assert "may set off" not in result.output
 
     def test_omitting_project_never_warns(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t"}))
-        assert "warning" not in result.output.lower()
+        assert "may set off" not in result.output
 
 
 class TestNotesReadDerivesRelation:
@@ -4889,3 +4889,42 @@ class TestLaunchFrom:
         calls, _ = self._setup(tmp_path, monkeypatch)
         result = runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "NOPE"])
         assert result.exit_code == 1 and calls == []
+
+
+class TestALaunchPromptThatTriggersAScadSkill:
+    """A prompt that says "write a memo" can make the launched agent run
+    scad's memo-write skill, which files a memo against the new session.
+    Observed 2026-07: kimi fired the old `remember` skill on "Remember the
+    phrase". The prompt is the person's intent, so this warns and launches."""
+
+    def _launch(self, runner, tmp_path, monkeypatch, *args):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        calls = []
+        monkeypatch.setattr("scad.cli.launch_agent", lambda agent, cwd, **kw: calls.append(kw)
+                            or {"session_id": "N", "tmux": "main:1.1", "agent": agent})
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(tmp_path), *args])
+        return result, calls
+
+    def test_a_trigger_phrase_warns_and_still_launches(self, runner, tmp_path, monkeypatch):
+        result, calls = self._launch(runner, tmp_path, monkeypatch,
+                                     "--prompt", "Look at the logs, then write a memo")
+        assert result.exit_code == 0 and len(calls) == 1
+        assert "write a memo" in result.output and "memo-write" in result.output
+
+    def test_a_plain_prompt_does_not_warn(self, runner, tmp_path, monkeypatch):
+        result, _ = self._launch(runner, tmp_path, monkeypatch, "--prompt", "fix the parser")
+        assert "may set off" not in result.output
+
+    def test_the_from_prompt_scad_writes_does_not_warn(self, runner, tmp_path, monkeypatch):
+        from scad.index import connect, upsert_session
+        from scad.records import SessionRecord
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        upsert_session(connect(tmp_path / ".scad" / "index.sqlite"),
+                       SessionRecord(id="SRC1", kind="main", agent="claude",
+                                     source="claude-transcript", cwd=str(tmp_path)),
+                       machine="m", project="p", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        result, calls = self._launch(runner, tmp_path, monkeypatch, "--from", "SRC1")
+        assert "/memo-handoff" in calls[0]["prompt"]
+        assert "may set off" not in result.output
