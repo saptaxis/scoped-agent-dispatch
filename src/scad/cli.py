@@ -1,6 +1,7 @@
 """CLI entry point."""
 
 import copy
+import contextlib
 import json
 import os
 import shlex
@@ -266,6 +267,73 @@ def _complete_cleanable_sessions(ctx, param, incomplete):
         if d.is_dir() and d.name.startswith(incomplete)
         and any(d.iterdir())  # not empty = not fully cleaned
     )
+
+
+def _index_read_only():
+    """The index for a completer: read-only, and None when there is none.
+
+    A Tab press must not write. `index_connect` creates the file and its schema,
+    which a completer has no business doing on a machine that never indexed.
+    """
+    import sqlite3
+    from scad.index import index_path
+    path = index_path()
+    if not path.exists():
+        return None
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def _completions(sql: str, params: tuple, help_of) -> list:
+    """Run one completion query; any failure completes nothing rather than
+    printing a traceback into the shell."""
+    from click.shell_completion import CompletionItem
+    try:
+        conn = _index_read_only()
+        if conn is None:
+            return []
+        with contextlib.closing(conn):
+            return [CompletionItem(r[0], help=help_of(r)) for r in conn.execute(sql, params)]
+    except Exception:
+        return []
+
+
+def _like_prefix(incomplete: str) -> str:
+    return incomplete.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+
+
+def _complete_sessions(ctx, param, incomplete):
+    """Session ids you started (kind = main), newest first. The other ~85% are
+    sub-agents and workflow agents, which cannot be resumed and are almost
+    never the argument wanted. Help is the name, else the title, and project."""
+    return _completions(
+        "SELECT id, name, title, project FROM sessions "
+        "WHERE kind = 'main' AND id LIKE ? ESCAPE '\\' ORDER BY ended DESC LIMIT 60",
+        (_like_prefix(incomplete),),
+        lambda r: " · ".join(x for x in ((r["name"] or (r["title"] or "")[:40]),
+                                          r["project"] or "") if x))
+
+
+def _complete_memo_sessions(ctx, param, incomplete):
+    """Session ids that have memos, newest memo first, helped by its title."""
+    return _completions(
+        "SELECT m.session_id, m.title, s.project FROM memos m "
+        "LEFT JOIN sessions s ON s.id = m.session_id "
+        "WHERE m.session_id LIKE ? ESCAPE '\\' "
+        "AND m.idx = (SELECT MAX(idx) FROM memos WHERE session_id = m.session_id) "
+        "ORDER BY m.ts DESC LIMIT 60",
+        (_like_prefix(incomplete),),
+        lambda r: " · ".join(x for x in ((r["title"] or "")[:50], r["project"] or "") if x))
+
+
+def _complete_projects(ctx, param, incomplete):
+    """Every project the index knows, from sessions and from memos."""
+    return _completions(
+        "SELECT project FROM sessions WHERE project LIKE ? ESCAPE '\\' "
+        "UNION SELECT project FROM memos WHERE project LIKE ? ESCAPE '\\' "
+        "ORDER BY 1",
+        (_like_prefix(incomplete), _like_prefix(incomplete)), lambda r: None)
 
 
 def _complete_config_names(ctx, param, incomplete):
@@ -2113,7 +2181,8 @@ def index_status_cmd(as_json):
 
 
 @session.command("ls")
-@click.option("--project", default=None, help="Filter by resolved project.")
+@click.option("--project", default=None, help="Filter by resolved project.",
+              shell_complete=_complete_projects)
 @click.option("--agent", default=None, help="Filter by agent (claude, codex, kimi).")
 @click.option("--kind", default=None, help="Filter by kind (main, subagent, workflow-agent).")
 @click.option("--machine", default=None, help="Filter by machine.")
@@ -2242,7 +2311,7 @@ def _session_export(conn, rows) -> list[dict]:
 
 
 @session.command("show")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 def session_show(session_id):
     """Show one session's metadata and turn breakdown."""
     conn = index_connect()
@@ -2469,7 +2538,7 @@ def _open_in(session_id: str, record: dict) -> str | None:
 
 
 @session.command("resume")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 @click.option("--print", "print_only", is_flag=True,
               help="Emit the command instead of running it.")
 def session_resume(session_id, print_only):
@@ -2729,7 +2798,7 @@ def _resolve_memo_path(session_id: str, agent: str):
 
 
 @session.command("send")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 @click.argument("text", required=False)
 @click.option("--file", "path", default=None, type=click.Path(exists=True, dir_okay=False),
               help="Read the turn from this file instead of the argument.")
@@ -2756,7 +2825,7 @@ def session_send_turn(session_id, text, path, as_json):
 
 
 @session.command("memos")
-@click.argument("session_id", required=False)
+@click.argument("session_id", required=False, shell_complete=_complete_memo_sessions)
 @click.option("--current", is_flag=True,
               help="The session whose trace is being written in this cwd.")
 @click.option("--agent", default="claude", help="Which agent's shard to read first.")
@@ -2837,8 +2906,9 @@ def _about_matches(row: dict, names) -> list[str]:
 
 @memos.command("ls")
 @click.option("--project", "project_name", default=None,
-              help="Only memos filed under this project.")
-@click.option("--session", "session_id", default=None, help="Only this session's memos.")
+              help="Only memos filed under this project.", shell_complete=_complete_projects)
+@click.option("--session", "session_id", default=None, help="Only this session's memos.",
+              shell_complete=_complete_memo_sessions)
 @click.option("--about", multiple=True,
               help="Memos about NAME wherever they were written: NAME in tags or "
                    "entities, as the topic, or as the project. Repeatable; JSON rows "
@@ -2926,7 +2996,7 @@ def memos_ls(project_name, session_id, about, kind, limit, as_json):
 
 
 @memos.command("read")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_memo_sessions)
 @click.option("--last", is_flag=True, help="Only the newest memo.")
 @click.option("--idx", "idx", type=int, default=None, help="Only this memo's index.")
 @click.option("--agent", default="claude", help="Which agent's shard (claude, codex).")
@@ -3032,7 +3102,7 @@ def project_aliases():
 
 
 @project.command("show")
-@click.argument("name")
+@click.argument("name", shell_complete=_complete_projects)
 @click.option("--limit", default=40, help="Rows to show.")
 def project_show(name, limit):
     """List a project's sessions."""
@@ -3060,7 +3130,7 @@ def project_show(name, limit):
 
 
 @session.command("read")
-@click.argument("session_id")
+@click.argument("session_id", shell_complete=_complete_sessions)
 @click.option("--kind", default=None,
               type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
               help="Only this kind of turn — e.g. --kind text to skip tool noise.")
@@ -3088,7 +3158,8 @@ def session_read(session_id, kind, role, limit):
 
 @main.command()
 @click.argument("query")
-@click.option("--project", default=None, help="Restrict to one project.")
+@click.option("--project", default=None, help="Restrict to one project.",
+              shell_complete=_complete_projects)
 @click.option("--kind", default=None,
               type=click.Choice(["text", "thinking", "tool_use", "tool_result"]),
               help="Search only this kind — e.g. --kind thinking for reasoning.")

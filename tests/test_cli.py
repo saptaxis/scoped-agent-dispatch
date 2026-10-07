@@ -4533,3 +4533,74 @@ class TestContextFillInTheCli:
         self._conn(tmp_path, monkeypatch)
         out = runner.invoke(main, ["session", "show", "P"]).output
         assert "215,227 of 258,400 tokens (83%)" in out
+
+
+class TestTabCompletion:
+    """`scad memos read 3f<tab>` completes. Sessions are the ones you started
+    (kind = main), memo ids only the sessions that have memos, and each
+    candidate carries its name and project as help, which zsh and fish show."""
+
+    def _index(self, tmp_path, monkeypatch):
+        from scad.index import connect
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        for sid, kind, name, project, ended in (
+                ("3f11", "main", "scad-backlog", "scad", 3),
+                ("3f22", "main", None, "orglens", 2),
+                ("3f33", "subagent", None, "scad", 1),
+                ("9a00", "main", None, "inwit", 1)):
+            conn.execute(
+                "INSERT INTO sessions (id, kind, agent, machine, grade, source, name, "
+                "project, title, ended) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (sid, kind, "claude", "m", "full", "claude-transcript", name, project,
+                 f"title of {sid}", ended))
+        conn.execute("INSERT INTO memos (session_id, idx, title, memo_path) "
+                     "VALUES ('3f22', 0, 'the handoff', '/m')")
+        conn.commit()
+        conn.close()
+
+    def test_sessions_complete_mains_by_prefix_with_their_label(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_sessions
+        self._index(tmp_path, monkeypatch)
+        items = _complete_sessions(None, None, "3f")
+        assert [i.value for i in items] == ["3f11", "3f22"]
+        assert "scad-backlog" in items[0].help and "scad" in items[0].help
+
+    def test_memo_ids_offer_only_sessions_with_memos(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_memo_sessions
+        self._index(tmp_path, monkeypatch)
+        items = _complete_memo_sessions(None, None, "3f")
+        assert [i.value for i in items] == ["3f22"]
+        assert "the handoff" in items[0].help
+
+    def test_projects_complete_from_the_index(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_projects
+        self._index(tmp_path, monkeypatch)
+        assert [i.value for i in _complete_projects(None, None, "s")] == ["scad"]
+
+    def test_no_index_completes_nothing_and_creates_none(self, tmp_path, monkeypatch):
+        from scad.cli import _complete_projects, _complete_sessions
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        assert _complete_sessions(None, None, "") == []
+        assert _complete_projects(None, None, "") == []
+        assert not (tmp_path / ".scad" / "index.sqlite").exists()
+
+    @pytest.mark.parametrize("argv,param,completer", [
+        (["session", "show"], "session_id", "_complete_sessions"),
+        (["session", "read"], "session_id", "_complete_sessions"),
+        (["session", "resume"], "session_id", "_complete_sessions"),
+        (["session", "send"], "session_id", "_complete_sessions"),
+        (["session", "memos"], "session_id", "_complete_memo_sessions"),
+        (["memos", "read"], "session_id", "_complete_memo_sessions"),
+        (["memos", "ls"], "session_id", "_complete_memo_sessions"),
+        (["memos", "ls"], "project_name", "_complete_projects"),
+        (["session", "ls"], "project", "_complete_projects"),
+        (["project", "show"], "name", "_complete_projects"),
+        (["search"], "project", "_complete_projects"),
+    ])
+    def test_each_argument_has_its_completer(self, argv, param, completer):
+        cmd = main
+        for word in argv:
+            cmd = cmd.commands[word]
+        p = next(p for p in cmd.params if p.name == param)
+        assert p._custom_shell_complete.__name__ == completer
