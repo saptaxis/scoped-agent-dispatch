@@ -2310,6 +2310,20 @@ def _session_export(conn, rows) -> list[dict]:
     return out
 
 
+@session.command("snapshot")
+def session_snapshot():
+    """Record every open agent session, to bring back with `session restore`.
+
+    Every open Claude session, and codex and kimi sessions started with
+    `scad session launch`. Take one before a restart: nothing takes them
+    automatically.
+    """
+    from scad import snapshot
+    path, summary = snapshot.take(index_connect())
+    click.echo(f"[scad] {summary}")
+    click.echo(f"[scad] {path}")
+
+
 @session.command("show")
 @click.argument("session_id", shell_complete=_complete_sessions)
 def session_show(session_id):

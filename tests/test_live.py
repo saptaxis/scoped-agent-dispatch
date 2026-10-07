@@ -600,3 +600,26 @@ class TestOtherHolders:
         from scad.live import ClaudeSession, other_holders
         s = [ClaudeSession("S", p, updated_at=t) for p, t in ((100, 10), (200, 30), (300, 20))]
         assert [h.pid for h in other_holders(s)["S"]] == [100, 300]
+
+
+class TestPaneIds:
+    """A tmux pane id (`%19`) names a pane for as long as it exists, however its
+    window is moved or renumbered. Claude's registry records the pane it runs
+    in, and tmux can list each pane's id, so the two meet exactly."""
+
+    def test_tmux_panes_carry_their_id(self):
+        from scad.live import tmux_panes
+        out = "main:3.3|scad|/repo|zsh|40324|%19\nmain:3.0|scad|/repo|2.1.205|2941\n"
+        with patch("scad.live.subprocess.run", return_value=fake_run(out)):
+            panes = tmux_panes()
+        assert (panes[0].pane_id, panes[0].pid, panes[0].command) == ("%19", 40324, "zsh")
+        assert (panes[1].pane_id, panes[1].pid) == ("", 2941)
+
+    def test_the_registry_names_its_pane(self, tmp_path):
+        from scad.live import claude_live_sessions
+        write_entry(tmp_path, 40333, tmux="main:@4.%19")
+        write_entry(tmp_path, 40334)
+        kill, starts = alive(40333, 40334)
+        with kill, starts:
+            got = {s.pid: s.tmux_pane for s in claude_live_sessions(tmp_path)}
+        assert got == {40333: "%19", 40334: ""}

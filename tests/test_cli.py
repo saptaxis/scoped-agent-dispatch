@@ -1962,7 +1962,8 @@ class TestRunSessionSplit:
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos")
+    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos",
+                   "snapshot")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -4616,3 +4617,21 @@ class TestSplitTakesAWindow:
         assert mock_launch.call_args.kwargs["split"] is True
         runner.invoke(main, base + ["--split", "orglens"])
         assert mock_launch.call_args.kwargs["split"] == "orglens"
+
+
+class TestSessionSnapshot:
+    def test_it_writes_a_snapshot_and_prints_the_path_and_summary(self, runner, tmp_path,
+                                                                  monkeypatch):
+        from scad.live import ClaudeSession, TmuxPane
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setattr("scad.live.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession("S1", 200, cwd="/w")])
+        monkeypatch.setattr("scad.live.tmux_panes", lambda: [
+            TmuxPane("main:1.0", "/w", "2.1.270", window="w", pid=100)])
+        monkeypatch.setattr("scad.live._process_parents", lambda: {200: 100})
+        monkeypatch.setattr("scad.launch.launch_records", lambda: [])
+        result = runner.invoke(main, ["session", "snapshot"])
+        assert result.exit_code == 0, result.output
+        assert "1 session: 1 claude" in result.output
+        path = next((tmp_path / ".scad" / "snapshots").glob("open-*.json"))
+        assert str(path) in result.output
