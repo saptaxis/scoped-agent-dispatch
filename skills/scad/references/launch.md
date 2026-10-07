@@ -6,12 +6,12 @@ No container. This is independent of `scad dispatch`, which is the same idea wit
 
 ```bash
 scad session launch --agent claude|codex|kimi [--cwd DIR] [--prompt TEXT] [--add-dir DIR]...
-                   [--window [NAME]] [--split] [--name NAME] [--attach]
+                   [--window [NAME]] [--split [WINDOW]] [--name NAME] [--attach]
 scad session resume <session-id> [--print]
 scad session send <session-id> TEXT | --file PATH
 ```
 
-`launch` opens its own detached tmux session by default. **`--window [NAME]` puts it in the caller's tmux session as a named window instead**, and the recorded target becomes e.g. `main:7.0`; bare `--window` names it after the directory. Prefer it: a launch the human cannot see is one they re-enter by hand with `claude` + `/resume`, which is a second process on one session id. `--split` opens it in a pane beside the caller's own, from `$TMUX_PANE`. `--name NAME` sets the display name — in the index row at launch, and for claude also `claude -n`, which shows it in the prompt box and the `/resume` picker. It starts the agent in tmux, prints the pane and `scad session resume <id>`, and exits. `--attach` opts into attaching. `--add-dir` is Claude-only and repeatable; it is refused, not dropped, for the other two.
+`launch` opens its own detached tmux session by default. **`--window [NAME]` puts it in the caller's tmux session as a named window instead**, and the recorded target becomes e.g. `main:7.0`; bare `--window` names it after the directory. Prefer it: a launch the human cannot see is one they re-enter by hand with `claude` + `/resume`, which is a second process on one session id. `--split` opens it in a pane beside the caller's own, from `$TMUX_PANE`; `--split review` (or `--split main:4`) splits that window's active pane, and refuses a name two windows share. `--name NAME` sets the display name — in the index row at launch, and for claude also `claude -n`, which shows it in the prompt box and the `/resume` picker. It starts the agent in tmux, prints the pane and `scad session resume <id>`, and exits. `--attach` opts into attaching. `--add-dir` is Claude-only and repeatable; it is refused, not dropped, for the other two.
 
 `send` delivers a later turn into the session's open pane and submits it. Use it instead of `tmux send-keys`: a 1,400-character turn sent that way was measured to arrive with its first ~200 characters missing, because the Claude Code TUI took the burst as a paste and collapsed it. `send` pastes through a tmux buffer with bracketed paste, waits for the echo, then presses Enter. It refuses a session that has closed (use `resume`) and a pane sitting at a dialog. Only sessions scad launched can be sent to; the pane comes from the launch record.
 

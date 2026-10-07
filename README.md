@@ -84,18 +84,21 @@ scad harvest|finish <run-id>                        # fetch, then review or tear
 scad session launch --agent claude|codex|kimi --cwd <dir>
 scad session launch --split --name "triage"          # a pane beside this one, named
 scad session launch --window docs                   # or a named window in your tmux session
+scad session launch --split review                  # or a pane in another window, by name
 scad session resume <id>                            # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
-scad session ls|show|read <id>
+scad session ls|show|read <id>                      # ls and show say how full each context is
 scad session ls --json                              # the export other programs read
 scad session memo --current                         # append a /memo-write capture
 
 # Corpus
 scad archive                                        # copy traces in, append-only
 scad reindex                                        # archive, then index
+scad index status                                   # when the index was last refreshed
 scad search <query> [--memos]
 scad view                                           # render the index and open it
 scad memos ls [--kind handoff] [--about <name>]
+scad memos read <session-id> --last                 # the newest memo a session wrote
 scad project ls|show <name>|aliases
 scad where                                          # how this directory resolves
 ```

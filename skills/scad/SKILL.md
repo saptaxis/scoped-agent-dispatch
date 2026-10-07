@@ -62,6 +62,7 @@ scad session ls                                 # every indexed session
 scad search "phrase"                            # full text across turns
 scad view                                       # the browsable page
 scad memos ls                                   # the authored tier
+scad index status                               # how fresh the index is
 scad where                                      # what project resolves here
 ```
 

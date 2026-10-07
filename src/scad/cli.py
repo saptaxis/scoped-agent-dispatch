@@ -2395,7 +2395,7 @@ def _exec(argv: list[str]) -> None:
                    "detached one. Bare --window names it after the directory.")
 @click.option("--split", default=None, is_flag=False, flag_value="",
               help="Land the agent in a pane beside this one. With a value, split that "
-                   "window's active pane instead: a window name (orglens) or a target "
+                   "window's active pane instead: a window name (review) or a target "
                    "(main:4).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,

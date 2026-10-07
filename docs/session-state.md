@@ -132,7 +132,7 @@ scad session launch --agent claude --cwd . --json    # the launch record, for sc
 scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
 scad session launch --agent claude --window triage --name "triage loop"   # a window here, named
 scad session launch --agent claude --split                     # a pane beside this one
-scad session launch --agent claude --split orglens             # a pane in the window named orglens
+scad session launch --agent claude --split review              # a pane in the window named review
 scad session resume <id>                             # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command

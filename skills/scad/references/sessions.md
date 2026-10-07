@@ -9,7 +9,7 @@ Every agent session on the machine is indexed, whether scad started it or merely
 ## Finding a session
 
 ```bash
-scad session ls                      # every indexed session, newest first
+scad session ls                      # every indexed session, newest first, with context fill and sub-agent counts
 scad session ls --project <name>     # scoped to one project
 scad search "phrase"                 # full-text across every indexed turn
 scad search "phrase" --memos         # memos: body, topic, title, tags, entities
@@ -45,7 +45,10 @@ Refreshes the index by default, because nothing else does — there is no timer,
 scad archive                         # copy new traces into the append-only archive
 scad reindex                         # archive, then index what is new
 scad reindex --rebuild               # drop and re-derive every row
+scad index status                    # when a reindex last finished; runs none
 ```
+
+Nothing reindexes on a timer: `scad view` refreshes before it renders, and every other command reads the index as it is. Before trusting an empty or quiet answer, check `scad index status` (`--json` gives `indexed_at` and `age_s`) and reindex if it is old. Only one reindex runs at a time; a second waits, then finds nothing new.
 
 **Write the alias rule before any rebuild after a directory moves**, or its sessions go to `unfiled`.
 
@@ -75,4 +78,4 @@ scad memos read <session-id> --last  # the newest memo in a session
 scad memos read <session-id> --idx N
 ```
 
-Writing them is the `memo-write` skill, or `memo-handoff` for a handoff; catching up from them is `memo-recall`. Do not hand-roll any of them: they exist, and `memo-recall` knows when to stop reading.
+Writing them is the `memo-write` skill, or `memo-handoff` for a handoff; catching up from them is `memo-recall`. Do not hand-roll them: `memo-recall` knows when to stop reading, and `memo-handoff` checks the repo first.

@@ -11,7 +11,7 @@ description: >
 
 You are writing a **handoff memo**: one scad memo of kind `handoff`, filed against this session, for whoever resumes the work, probably a later you with no memory of this conversation. `/memo-recall` looks for it first.
 
-A handoff differs from an ordinary memo in one way that matters: it makes claims about **the state of things now** (the branch, what is committed, what passes), and those must be checked, not remembered. So unlike `/memo-write`, this skill reads the repo before it writes.
+Unlike an ordinary memo, a handoff makes claims about **the state of things now** (the branch, what is committed, what passes), and those must be checked, not remembered. So unlike `/memo-write`, this skill reads the repo before it writes.
 
 ## 1. Scope, from the arguments
 
@@ -41,7 +41,7 @@ Markdown, in these sections, each scaled to the work; cut what does not apply:
 - **What to trust, and what not**: verified, assumed, unfinished, kept apart. This is the most valuable section; do not soften it.
 - **Concluded** and **Rejected**: decisions with their reasons; each rejection with the condition that would reverse it.
 - **Open**: questions still to decide, and whose they are.
-- **Next steps**: concrete and ordered, the cheapest high-leverage one first.
+- **Next steps**: concrete and ordered, the cheapest one that unblocks the most first.
 
 Real numbers, paths, commands and commit hashes; absolute dates.
 

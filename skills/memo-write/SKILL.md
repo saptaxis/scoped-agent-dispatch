@@ -95,4 +95,4 @@ Everything about *where the memo goes* belongs to `scad session memo`, not here:
 - Do not pick or create a file. The store is `~/.scad/memos/<agent>/<session-uuid>.jsonl`, one file per session, and appending is the only write.
 - Do not append with `>>` yourself. The CLI validates the record, fills the defaults, and is the same contract codex and pi call.
 
-References (in scad's unit in the inwit docs repo, not shipped with this skill): `specs/session-index.org`, §Notes, for the addressing; `specs/memos.org` for why these are memos and the plain verbs went.
+Reference: the *Memos* section of `docs/session-state.md` in the scad repository, for the record's fields and the store's layout.

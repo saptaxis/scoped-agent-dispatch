@@ -2,11 +2,13 @@
 
 ## [Unreleased]
 
-**Notes are memos.** scad's session records shared a name with the docs tree's `notes.org`, and went by three names besides: `/remember` wrote them, `session note` stored them, `notes ls` listed them and `/recall` read them. They are memos now, everywhere, with no aliases: the old commands and skills are gone.
+## [0.9.0] - 2026-10-07
 
 ### Changed
 
-| before | 0.9.0 |
+- Notes are renamed to memos everywhere. The old commands and skills are removed, with no aliases.
+
+| Before | 0.9.0 |
 |---|---|
 | `scad notes ls`, `scad notes read` | `scad memos ls`, `scad memos read` |
 | `scad session note`, `scad session notes` | `scad session memo`, `scad session memos` |
@@ -15,30 +17,36 @@
 | `~/.scad/notes/` | `~/.scad/memos/` |
 | JSON `note_path`; view rows `notes`, `n_notes` | `memo_path`; `memos`, `n_memos` |
 
-The record format is unchanged. The plain verbs went because `remember` collides with Claude Code's own memory, where "remember that I prefer X" means something else.
-
-- "Waiting on you" in `scad view` means a session asked you something (`awaiting-question`), not that the agent spoke last (`awaiting-user`), which is how nearly every finished session ends: in August that was 183 of 232 sessions against one real question. An unanswered question also no longer drops off after 14 days; on the author's machine the only real one was older than that, and hidden. `scad view --days` is now a no-op, kept so scripts that pass it still run.
+- `scad view` counts a session as waiting on you only when it asked you a question (`awaiting-question`). Sessions that ended with the agent speaking last (`awaiting-user`) are no longer counted. Questions stay listed however old they are. `scad view --days` is still accepted and has no effect.
 
 ### Added
 
-- `/memo-handoff`: a handoff memo, written for this session only after checking each repo the work touched (`git status`, `git log`), with its scope from the arguments: empty for the whole context, `brief` for the latest phase, anything else as the focus.
-- `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and project. The index stores the body; listings still never print it.
-- `scad session ls` and `scad project show` show how many sub-agents and workflow agents each session started, as `scad view` already did, and `session ls --json` carries it as `n_subagents`. A session that fanned out to hundreds looked like a one-question one.
-- `scad index status [--json]`: when a reindex last finished, and how many sessions and memos the index holds, without running one. Nothing reindexes on a timer, so a reader that does not refresh first can now tell a quiet session from a stale index.
+- `/memo-handoff` writes a handoff memo after checking `git status` and `git log` in each repository the work touched. Its argument sets the scope: none for the whole session, `brief` for the latest phase, any other text for a focus.
+- `scad search --memos` matches memo bodies as well as topic, title, tags, entities and project.
+- `scad view`, `scad session ls` and `scad session show` show how much of each session's context is used: a percentage when the window is known, otherwise the token count. `session ls --json` adds `context_tokens`, `context_window` and `context_pct`. codex and kimi record their window; for Claude it is known once a turn exceeds 200k tokens, which means the 1M window. Sessions not parsed since upgrading show nothing until their next turn or a `scad reindex --rebuild`.
+- `scad session ls` and `scad project show` show each session's sub-agent count. `session ls --json` adds `n_subagents`.
+- `scad index status [--json]` prints when the last reindex finished and how many sessions and memos the index holds, without reindexing.
+- Tab completion for session ids, memo ids and project names. Each candidate shows the session's name or title and its project.
+- `scad session launch --split WINDOW` opens the agent in a pane of another tmux window, given by name or as a target such as `main:4`. A name shared by two windows is refused. Bare `--split` still splits the current pane.
 
 ### Fixed
 
-- Two reindexes at once indexed the same turns twice: each read a session's offset before the other committed, and both appended. In a test of 60 sessions, 21 were doubled. A reindex now holds a lock beside the index for the whole pass; a second one waits, then finds nothing new. Writing a memo takes the same lock.
-- Opening the index while another process was creating it failed with "database is locked": every connection switched the journal to WAL, which needs the file to itself. It is switched only when it is not WAL already.
+- Two reindexes running at once could index the same turns twice. A reindex now holds a lock, and a second one waits for it. Writing a memo takes the same lock.
+- Opening the index while another process was creating it could fail with "database is locked".
+- The test suite no longer reads or writes the real `~/.scad`, and no test can run `colima` or reach the Docker daemon. Tests that need the real VM are marked `vm` and run only with `pytest --run-vm -m vm`.
 
 ### Upgrading
 
 On each machine, before any other scad command:
 
-1. `mv ~/.scad/notes ~/.scad/memos`. Until this is done, every command that reads or writes memos stops and prints it.
-2. `scad reindex`. The index gains an empty `memos` table and fills it from the memo files.
-3. Optionally, drop what the old index kept: `sqlite3 ~/.scad/index.sqlite "DROP TABLE notes; ALTER TABLE sessions DROP COLUMN notes_offset; ALTER TABLE sessions DROP COLUMN notes_mtime; UPDATE sessions SET source = 'scad-memo' WHERE source = 'scad-note';"`
-4. Remove the old `remember` and `recall` skills from `~/.agents/skills` and `~/.claude/skills`, and reinstall to get the new ones.
+1. `mv ~/.scad/notes ~/.scad/memos`. Until this is done, every memo command exits with this instruction.
+2. `scad reindex`.
+3. Optionally, remove the old index data: `sqlite3 ~/.scad/index.sqlite "DROP TABLE notes; ALTER TABLE sessions DROP COLUMN notes_offset; ALTER TABLE sessions DROP COLUMN notes_mtime; UPDATE sessions SET source = 'scad-memo' WHERE source = 'scad-note';"`
+4. Remove the `remember` and `recall` skills from `~/.agents/skills` and `~/.claude/skills`, then re-run `install.sh` to install `memo-write`, `memo-handoff` and `memo-recall`.
+
+### Known limitations
+
+- kimi exports no session id, so the memo skills need `--session <id>` under kimi.
 
 ## [0.8.0] - 2026-10-01
 
