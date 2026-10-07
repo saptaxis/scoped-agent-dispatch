@@ -680,6 +680,52 @@ class TestLaunching:
         with pytest.raises(LaunchError, match="no tmux window named 'nope'"):
             launch("claude", tmp_path, binary=binary, split="nope")
 
+    # --- placing a resumed session (snapshot restore) ---
+
+    def _snap(self, **over):
+        s = {"id": "S1", "agent": "claude", "name": "backlog", "project": "scad",
+             "cwd": "/tmp", "tmux_session": "box", "window": "scad", "pane": "box:0.0"}
+        s.update(over)
+        return s
+
+    def test_a_restored_session_splits_into_its_window_when_it_exists(self, tmp_path):
+        from scad.launch import place_resume, read_record
+        self._windows("scad", "orglens")
+        record = place_resume(self._snap(cwd=str(tmp_path)), command="sleep 30")
+        panes = self._panes_in("box:scad")
+        assert len(panes) == 2 and record["pane_id"] in panes
+        assert record["created_window"] is False
+        saved = read_record("S1")
+        assert (saved["session_id"], saved["pane_id"], saved["window"]) == \
+            ("S1", record["pane_id"], "scad")
+        assert saved["provenance"] == "restore"
+
+    def test_a_missing_window_is_created_with_its_name(self, tmp_path):
+        from scad.launch import place_resume
+        self._windows("ops")
+        record = place_resume(self._snap(cwd=str(tmp_path)), command="sleep 30")
+        assert record["created_window"] is True
+        assert record["pane_id"] in self._panes_in("box:scad")
+
+    def test_a_missing_tmux_session_is_created(self, tmp_path):
+        from scad.launch import place_resume
+        record = place_resume(self._snap(cwd=str(tmp_path), tmux_session="fresh"),
+                              command="sleep 30")
+        assert record["pane_id"] in self._panes_in("fresh:scad")
+
+    def test_a_session_that_had_no_window_gets_one_named_after_it(self, tmp_path, monkeypatch):
+        from scad.launch import place_resume
+        self._windows("ops")
+        record = place_resume(self._snap(cwd=str(tmp_path), tmux_session=None, window=None),
+                              command="sleep 30", default_session="box")
+        assert record["pane_id"] in self._panes_in("box:backlog")
+
+    def test_the_resume_command_is_the_agents_own(self, tmp_path):
+        """No stub given: the pane runs the same command `session resume` uses."""
+        from scad.launch import resume_for
+        assert resume_for(self._snap(cwd="/w")).endswith("claude --resume S1")
+        assert "codex resume C1" in resume_for(self._snap(id="C1", agent="codex", cwd="/w"))
+
     def test_split_without_a_caller_pane_falls_back(self, tmp_path, monkeypatch):
         from scad.launch import launch
 

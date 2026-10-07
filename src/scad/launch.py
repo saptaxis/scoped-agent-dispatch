@@ -373,6 +373,89 @@ def new_session(name: str, cwd: Path, command: str) -> str:
     return f"{name}:0.0"
 
 
+# --- putting a session from a snapshot back into a pane (`session restore`) ---
+
+def resume_for(session: dict) -> str:
+    """The command `session resume` would run for this session: `cd DIR && <resume>`."""
+    from scad.view import resume_command
+    return resume_command({"id": session["id"], "agent": session.get("agent") or "claude",
+                           "cwd": session.get("cwd"), "kind": "main"})
+
+
+def _window_active_pane(tmux_session: str, window: str) -> str | None:
+    """The active pane id of the window named `window` in `tmux_session`, or None."""
+    listed = _tmux(["list-windows", "-t", f"{tmux_session}:", "-F",
+                    "#{window_name}\t#{pane_id}"])
+    if listed.returncode != 0:
+        return None
+    for line in listed.stdout.splitlines():
+        name, _, pane = line.partition("\t")
+        if name == window and pane.startswith("%"):
+            return pane
+    return None
+
+
+def place_resume(session: dict, *, command: str | None = None,
+                 default_session: str | None = None) -> dict:
+    """Run a snapshot session's resume command in the window it came from.
+
+    The window named `session["window"]` in `session["tmux_session"]` gets it as a
+    split of its active pane, its other panes and layout left alone. If that
+    window is gone it is created with that name, and if the tmux session is gone
+    that is created too, detached. A session that was not in tmux at all goes to
+    `default_session` (else the caller's, else `main`), in a window named after it.
+
+    Writes a launch record, as a launch does, so `scad view`, `session resume`
+    and the next snapshot know which pane holds the session. `command` replaces
+    the resume command; tests pass a stub so no agent starts.
+    """
+    command = command or resume_for(session)
+    cwd = Path(session.get("cwd") or "")
+    if not session.get("cwd") or not cwd.is_dir():
+        cwd = Path.home()
+    tmux_session = (session.get("tmux_session") or default_session
+                    or _caller_tmux_session() or "main")
+    window = session.get("window") or session.get("name") or session["id"][:8]
+    run = f"{command}; exec bash"
+    created = False
+    if tmux_session not in session_names():
+        made = _tmux(["new-session", "-d", "-s", tmux_session, "-n", window, "-c", str(cwd),
+                      "-x", str(_WIDTH), "-y", str(_HEIGHT), "-P", "-F", "#{pane_id}", run])
+        if made.returncode != 0:
+            raise LaunchError(f"tmux refused to start a session: {made.stderr.strip()}")
+        pane, created = made.stdout.strip(), True
+    else:
+        active = _window_active_pane(tmux_session, window)
+        if active:
+            pane = split_pane(active, cwd, command)
+        else:
+            pane = pane_id_of(new_window(tmux_session, window, cwd, command)) or ""
+            created = True
+    target = _tmux(["display-message", "-p", "-t", pane,
+                    "#{session_name}:#{window_index}.#{pane_index}"]).stdout.strip()
+    record = {
+        "agent": session.get("agent") or "claude",
+        "session_id": session["id"],
+        "cwd": session.get("cwd"),
+        "add_dirs": [],
+        "name": session.get("name") or None,
+        "window": window,
+        "tmux": target,
+        "pane_id": pane,
+        "started": _now_iso(),
+        "resume": resume_for(session),
+        "provenance": "restore",
+        "created_window": created,
+    }
+    write_record(record, key=session["id"])
+    return record
+
+
+def tile(tmux_session: str, window: str) -> None:
+    """Even out a window `restore` built, so its panes share the space."""
+    _tmux(["select-layout", "-t", f"{tmux_session}:{window}", "tiled"])
+
+
 def capture_pane(target: str) -> str:
     """What the pane is showing right now. Empty on any failure."""
     result = _tmux(["capture-pane", "-p", "-t", target])
