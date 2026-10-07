@@ -2848,6 +2848,9 @@ def memos_ls(project_name, session_id, about, kind, limit, as_json):
     is indexed so `search --memos` can match it, but a listing does not print
     it. `memos read` is the second half.
     """
+    # The index alone would answer "no memos" on a machine whose store has not
+    # moved, which looks like the store working. Asking for the root refuses.
+    memos_root()
     conn = index_connect()
     where, params = [], []
     if project_name:
@@ -3091,6 +3094,7 @@ def search(query, project, kind, limit, memos_only, as_json):
     """Full-text search across every indexed turn, or across memos with --memos."""
     conn = index_connect()
     if memos_only:
+        memos_root()                     # refuses a store that has not moved
         hits = search_memos(conn, query, limit=limit)
         if as_json:
             click.echo(json.dumps(hits, default=str))

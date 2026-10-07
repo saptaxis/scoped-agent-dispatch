@@ -2097,6 +2097,8 @@ class TestStoreNotMovedStopsTheCommand:
         ["session", "memo", "--session", "S1"],
         ["session", "memos", "S1"],
         ["memos", "read", "S1"],
+        ["memos", "ls"],
+        ["search", "--memos", "x"],
         ["reindex"],
     ])
     def test_each_memo_command_exits_non_zero_naming_the_move(self, runner, tmp_path,
