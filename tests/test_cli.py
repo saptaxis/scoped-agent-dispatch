@@ -2496,6 +2496,10 @@ class TestTheMemoSkills:
         assert "scad memos ls" in text and "scad memos read" in text
         assert "git log" in text
 
+    def test_recall_reads_what_happened_after_the_memo(self):
+        text = self._text("memo-recall")
+        assert "--since" in text and "--last 200" in text
+
     def test_handoff_writes_a_handoff_memo_for_its_own_session(self):
         text = self._text("memo-handoff")
         assert "scad session memo --current --agent" in text
