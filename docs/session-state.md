@@ -122,7 +122,7 @@ Live panes and containers are discovered at render time and are current. The ind
 
 The archive keeps every version of a source file: one that was rewritten rather than appended to is stored as a fork beside the original. A refresh reads the newest fork and replaces that session's turns from it, once, and reports it as "re-read from a rewritten source". Codex did this to 133 rollouts at once in September 2026 when it changed its on-disk format.
 
-A claude pane is matched to its session through the process tree, from the pane's shell to the pid Claude's registry names, and a scad-launched pane through its launch record. A pane neither can name gets the newest session in its working directory, labelled as the guess it is. Only panes running an agent count. tmux and docker are queried at render time and degrade to empty if either is unavailable.
+A Claude session's pane is the one its registry entry names (Claude records its tmux pane id), or failing that the pane whose shell its process descends from. A scad-launched session's pane comes from its launch record. An agent pane neither can name is listed with no session. tmux and docker are queried at render time and degrade to empty if either is unavailable.
 
 ## Interactive launch
 

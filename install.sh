@@ -594,6 +594,6 @@ fi
 echo ""
 echo "[scad] Install complete!"
 echo ""
-echo "  Restart your shell or run: source ~/.zshrc"
+echo "  Add the completion line above to your shell rc, then open a new shell."
 echo "  Then try: scad view       # who is waiting on you"
 echo "            scad --help"

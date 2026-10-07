@@ -67,7 +67,7 @@ scad resolve                         # the path, for scripting
 
 **A directory that moved** is the other cause. The recorded cwd points at nothing, so a rebuild files those sessions as `unfiled`. The fix is a rule in `~/.scad/aliases`, `old path -> new path`, used only when the old path is gone. Rules chain, so each move needs only its own rules, written in the current spelling. `scad project aliases` checks the rules (`ok`, `stale`, `broken`), and `scad where --start <old path>` shows a `via alias:` line per rule that answered. `session ls --json` then serves the new path as `cwd` and the old one as `cwd_recorded`, and `session resume` resumes in the new place. With no rule, a gone directory still resumes, with a warning that the agent will start in the current directory.
 
-## Handing work on
+## Handoffs
 
 ```bash
 scad session handoff <id> "ANGLE"              # ask a scad-launched session for its handoff memo
@@ -84,7 +84,7 @@ scad session snapshot                # before: record the open sessions
 scad session restore                 # after: shows the plan, asks once, resumes each in its window
 ```
 
-Includes every open Claude session and the codex and kimi sessions `scad session launch` started. A session already open is never started twice. Snapshots are only taken by hand.
+A snapshot includes every open Claude session and the codex and kimi sessions `scad session launch` started. A session already open is never started twice. Snapshots are only taken by hand.
 
 ## Memos
 
