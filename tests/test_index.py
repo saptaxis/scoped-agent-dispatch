@@ -1804,3 +1804,33 @@ class TestContextColumns:
         self._upsert(conn, context_tokens=100, context_window=258_400)
         row = self._upsert(conn)
         assert (row["context_tokens"], row["context_window"]) == (100, 258_400)
+
+
+class TestReadingTheTail:
+    """`--last N` and `--since TIME`: a long session is read from the end it
+    stopped at, and a handoff is followed by every turn written after it."""
+
+    def _conn(self, tmp_path):
+        from scad.records import TurnRecord
+        conn = connect(tmp_path / "i.sqlite")
+        store(conn, rec(id="S1"))
+        append_turns(conn, "S1", [
+            TurnRecord(ts=1000 * i, role="assistant" if i % 2 else "user",
+                       kind="text" if i % 3 else "tool_use", text=f"t{i}")
+            for i in range(1, 11)])
+        return conn
+
+    def test_last_is_the_tail_in_order(self, tmp_path):
+        from scad.index import session_turns
+        rows = session_turns(self._conn(tmp_path), "S1", last=3)
+        assert [r["text"] for r in rows] == ["t8", "t9", "t10"]
+
+    def test_last_counts_after_the_kind_filter(self, tmp_path):
+        from scad.index import session_turns
+        rows = session_turns(self._conn(tmp_path), "S1", kind="text", last=2)
+        assert [r["text"] for r in rows] == ["t8", "t10"]
+
+    def test_since_takes_epoch_ms_and_is_inclusive(self, tmp_path):
+        from scad.index import session_turns
+        rows = session_turns(self._conn(tmp_path), "S1", since=8000)
+        assert [r["text"] for r in rows] == ["t8", "t9", "t10"]

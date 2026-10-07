@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-07
+
+### Added
+
+- `scad session snapshot` records the open agent sessions: every Claude session, and the codex and kimi sessions started with `scad session launch`. Snapshots are written to `~/.scad/snapshots/`, each listing its sessions by project; the newest 50 are kept.
+- `scad session restore [FILE]` brings a snapshot's sessions back. It shows the plan, grouped by project, and asks once (`-y` to skip; `--skip` and `--only` take id prefixes; `--list` shows recent snapshots). Each session resumes in its own directory, as a split of the window it came from, or in a new window of that name. Sessions already open are not started again.
+- `scad session handoff ID ["ANGLE"]` asks an open session that scad launched or restored to write its handoff memo, and waits for it. It refuses a session whose context is nearly full.
+- `scad session launch --from ID` starts a fresh session that picks up ID's work: it reads ID's newest handoff memo and every turn after it, or ID's last 200 text turns when there is no handoff, writes a handoff memo, then follows `--prompt`. The directory defaults to ID's.
+- `scad view` marks a session whose context is nearly full: 80% of its window, or 160k tokens when the window is unknown.
+- `scad session read --last N` reads a session's last N turns, and `--since TIME` the turns at or after a time (ISO 8601 or epoch milliseconds).
+- `/memo-recall` reads the turns written after the memo it starts from.
+- `scad session launch` notes when `--prompt` contains a phrase that can set off one of scad's skills in the new session ("write a memo", "hand this off", "catch me up" and others), and launches anyway.
+
+### Changed
+
+- `install.sh` no longer edits `~/.zshrc` or `~/.bashrc`. It writes the completion scripts to `$SCAD_HOME/completion/` and prints the line that sources them. Opening a new shell no longer runs scad (it took 0.21 to 0.33 s).
+
+### Fixed
+
+- `scad view` showed some open Claude sessions without their tmux pane: those whose pane tmux reports as the shell rather than Claude. A session's pane now comes from the pane id Claude records in its own registry, then from the process tree.
+
+### Upgrading
+
+1. Re-run `install.sh`. It writes the completion scripts and updates the installed skills, which are copies: the `scad` and `memo-recall` skills changed.
+2. In `~/.zshrc` (or `~/.bashrc`), replace `eval "$(_SCAD_COMPLETE=zsh_source scad)"` with the line `install.sh` prints.
+
 ## [0.9.0] - 2026-10-07
 
 ### Changed

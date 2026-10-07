@@ -90,6 +90,10 @@ scad session send <id> "next turn"                  # into the open pane; --file
 scad session ls|show|read <id>                      # ls and show say how full each context is
 scad session ls --json                              # the export other programs read
 scad session memo --current                         # append a /memo-write capture
+scad session snapshot                               # record the open sessions, before a restart
+scad session restore                                # bring them back, each in its window
+scad session handoff <id> "for the next step"       # ask a session for its handoff memo
+scad session launch --agent claude --from <id>      # a fresh session picks up its work
 
 # Corpus
 scad archive                                        # copy traces in, append-only

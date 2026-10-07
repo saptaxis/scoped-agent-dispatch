@@ -5,11 +5,13 @@ description: >
   containers (scad dispatch, run inject, batch, harvest); when launching an
   interactive claude, codex or kimi session at a directory and resuming it
   later; or when asking which sessions exist, what is running, what is waiting
-  on you, what a past session was about, or where work happened. Also for the
-  session index, full-text search across turns, the browsable view page, and
-  project attribution. Triggers on scad, container execution, isolated agent
-  dispatch, session launch, resume that session, which sessions, what am I
-  running, and what did I work on.
+  on you, what a past session was about, or where work happened. Also for
+  snapshotting the open sessions before a restart and restoring them after,
+  handing a session's work to a fresh one, the session index, full-text search
+  across turns, the browsable view page, and project attribution. Triggers on
+  scad, container execution, isolated agent dispatch, session launch, resume
+  that session, restore my sessions, hand this off, start fresh from that
+  session, which sessions, what am I running, and what did I work on.
 compatibility: Requires tmux. Container features additionally require Docker.
 ---
 
@@ -56,6 +58,10 @@ scad session launch --agent claude --split --name "triage"   # a pane beside you
 scad session launch --agent claude --window docs             # a named window in your tmux session
 scad session resume <id>                        # attach if open, resume if not
 scad session send <id> "text" | --file f        # a later turn into the open pane
+scad session handoff <id> "angle"               # ask a scad-launched session for its handoff
+scad session launch --agent claude --from <id>  # a fresh session picks up <id>'s work
+scad session snapshot                           # record the open sessions, before a restart
+scad session restore                            # bring them back, each in its window
 
 # find what ran
 scad session ls                                 # every indexed session

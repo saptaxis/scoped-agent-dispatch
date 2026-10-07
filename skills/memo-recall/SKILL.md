@@ -41,6 +41,18 @@ If no project was named, `scad where` announces the one for this directory. Ever
 scad memos read <session-id> --last
 ```
 
+**Then read what happened after it.** A memo is written at one moment, and the session may have gone on. Read the turns written after it; when the memo is current there are few or none:
+
+```
+scad session read <session-id> --kind text --since <the memo's ts>
+```
+
+If you are picking up a session that has no handoff memo at all (for instance, you were started with `scad session launch --from`), read its last turns instead, then its memos, then git:
+
+```
+scad session read <session-id> --kind text --last 200
+```
+
 **3. Backtrack only while the thread continues.**
 
 The `relation` on each row is the stopping rule, and it is why you do not need to read everything. It is *derived*, not something the writer chose: `parent` set means `branch`, a topic seen earlier in that session means `continue`, and anything else is `shift`.

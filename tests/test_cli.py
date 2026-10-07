@@ -1962,7 +1962,8 @@ class TestRunSessionSplit:
     # `note` and `notes` belong here rather than under `run`: they are keyed on
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
-    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos")
+    TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos",
+                   "snapshot", "restore", "handoff")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -2495,6 +2496,10 @@ class TestTheMemoSkills:
         assert "scad memos ls" in text and "scad memos read" in text
         assert "git log" in text
 
+    def test_recall_reads_what_happened_after_the_memo(self):
+        text = self._text("memo-recall")
+        assert "--since" in text and "--last 200" in text
+
     def test_handoff_writes_a_handoff_memo_for_its_own_session(self):
         text = self._text("memo-handoff")
         assert "scad session memo --current --agent" in text
@@ -2954,7 +2959,7 @@ class TestSessionNoteValidatesKindAndProject:
         result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t", "project": "alpha"}))
         assert result.exit_code == 0, result.output
-        assert "warning" not in result.output.lower()
+        assert "may set off" not in result.output
 
     def test_a_project_only_another_note_has_used_counts_as_known(
             self, runner, tmp_path, monkeypatch):
@@ -2967,13 +2972,13 @@ class TestSessionNoteValidatesKindAndProject:
         runner.invoke(main, ["reindex", "--no-archive"])
         result = runner.invoke(main, ["session", "memo", "--session", "S2"],
                                input=json.dumps({"title": "t", "project": "beta"}))
-        assert "warning" not in result.output.lower()
+        assert "may set off" not in result.output
 
     def test_omitting_project_never_warns(self, runner, tmp_path, monkeypatch):
         self._home(tmp_path, monkeypatch)
         result = runner.invoke(main, ["session", "memo", "--session", "S1"],
                                input=json.dumps({"title": "t"}))
-        assert "warning" not in result.output.lower()
+        assert "may set off" not in result.output
 
 
 class TestNotesReadDerivesRelation:
@@ -4616,3 +4621,310 @@ class TestSplitTakesAWindow:
         assert mock_launch.call_args.kwargs["split"] is True
         runner.invoke(main, base + ["--split", "orglens"])
         assert mock_launch.call_args.kwargs["split"] == "orglens"
+
+
+class TestSessionSnapshot:
+    def test_it_writes_a_snapshot_and_prints_the_path_and_summary(self, runner, tmp_path,
+                                                                  monkeypatch):
+        from scad.live import ClaudeSession, TmuxPane
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        monkeypatch.setattr("scad.live.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession("S1", 200, cwd="/w")])
+        monkeypatch.setattr("scad.live.tmux_panes", lambda: [
+            TmuxPane("main:1.0", "/w", "2.1.270", window="w", pid=100)])
+        monkeypatch.setattr("scad.live._process_parents", lambda: {200: 100})
+        monkeypatch.setattr("scad.launch.launch_records", lambda: [])
+        result = runner.invoke(main, ["session", "snapshot"])
+        assert result.exit_code == 0, result.output
+        assert "1 session: 1 claude" in result.output
+        path = next((tmp_path / ".scad" / "snapshots").glob("open-*.json"))
+        assert str(path) in result.output
+
+
+class TestSessionRestore:
+    """`scad session restore`: show the plan, ask once, place each session in
+    tmux order, report. Placement is mocked here; test_launch drives it in
+    real tmux."""
+
+    SESSIONS = [
+        {"name": "zeta-work", "project": "zeta", "agent": "claude", "id": "Z1",
+         "cwd": "/tmp", "tmux_session": "main", "window": "z", "pane": "main:1.0",
+         "context_tokens": 524_490, "context_window": 1_000_000, "last_active": 1},
+        {"name": "alpha-work", "project": "alpha", "agent": "codex", "id": "A1",
+         "cwd": "/tmp", "tmux_session": "main", "window": "a", "pane": "main:2.0",
+         "context_tokens": None, "context_window": None, "last_active": 1},
+        {"name": "open-one", "project": "alpha", "agent": "claude", "id": "O1",
+         "cwd": "/tmp", "tmux_session": "main", "window": "a", "pane": "main:2.1",
+         "context_tokens": None, "context_window": None, "last_active": 1},
+    ]
+
+    def _setup(self, tmp_path, monkeypatch, *, open_ids=("O1",), fail=()):
+        from scad.live import ClaudeSession
+        home = tmp_path / ".scad"
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        snaps = home / "snapshots"
+        snaps.mkdir(parents=True)
+        (snaps / "open-20261007-164521.json").write_text(json.dumps(
+            {"format": 1, "taken": "2026-10-07T16:45:21+05:30", "machine": "m",
+             "sessions": self.SESSIONS, "not_restorable": [
+                 {"pane": "main:5.1", "window": "w", "command": "codex", "cwd": "/x"}]}))
+        monkeypatch.setattr("scad.live.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession(i, 9) for i in open_ids])
+        monkeypatch.setattr("scad.live.tmux_panes", lambda: [])
+        monkeypatch.setattr("scad.launch.launch_records", lambda: [])
+        placed, tiled = [], []
+
+        def place(session, **kw):
+            if session["id"] in fail:
+                from scad.launch import LaunchError
+                raise LaunchError("tmux said no")
+            placed.append(session["id"])
+            return {"pane_id": f"%{len(placed)}", "tmux": "main:9.0",
+                    "window": session["window"], "created_window": session["id"] == "A1"}
+        monkeypatch.setattr("scad.launch.place_resume", place)
+        monkeypatch.setattr("scad.launch.tile", lambda s, w: tiled.append((s, w)))
+        return placed, tiled
+
+    def test_the_plan_is_grouped_by_project_and_marks_what_is_open(self, runner, tmp_path,
+                                                                   monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "restore"], input="n\n").output
+        assert out.index("alpha") < out.index("zeta")
+        assert "already open" in next(l for l in out.splitlines() if "open-one" in l)
+        assert "52%" in next(l for l in out.splitlines() if "zeta-work" in l)
+        assert "not restorable" in out and "main:5.1" in out
+        assert "Restore these 2?" in out
+
+    def test_yes_places_each_in_tmux_order_and_tiles_new_windows(self, runner, tmp_path,
+                                                                 monkeypatch):
+        placed, tiled = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "restore"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert placed == ["Z1", "A1"]            # main:1.0 before main:2.0, not file order
+        assert tiled == [("main", "a")]
+        assert "restored" in result.output
+
+    def test_declining_starts_nothing(self, runner, tmp_path, monkeypatch):
+        placed, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "restore"], input="n\n")
+        assert placed == []
+
+    def test_skip_and_only_take_prefixes(self, runner, tmp_path, monkeypatch):
+        placed, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "restore", "-y", "--skip", "Z"])
+        assert placed == ["A1"]
+        placed.clear()
+        runner.invoke(main, ["session", "restore", "-y", "--only", "Z"])
+        assert placed == ["Z1"]
+
+    def test_one_failure_does_not_stop_the_rest_and_fails_the_exit(self, runner, tmp_path,
+                                                                   monkeypatch):
+        placed, _ = self._setup(tmp_path, monkeypatch, fail=("Z1",))
+        result = runner.invoke(main, ["session", "restore", "-y"])
+        assert placed == ["A1"]
+        assert result.exit_code == 1
+        assert "tmux said no" in result.output
+
+    def test_list_shows_the_snapshots(self, runner, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "restore", "--list"]).output
+        assert "open-20261007-164521.json" in out and "3 sessions" in out
+
+    def test_no_snapshot_says_how_to_take_one(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        result = runner.invoke(main, ["session", "restore"])
+        assert result.exit_code == 1 and "scad session snapshot" in result.output
+
+
+class TestSessionReadTail:
+    def _conn(self, tmp_path, monkeypatch):
+        from scad.index import append_turns, connect, upsert_session
+        from scad.records import SessionRecord, TurnRecord
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        upsert_session(conn, SessionRecord(id="S1", kind="main", agent="claude",
+                                           source="claude-transcript"),
+                       machine="m", project="p", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        append_turns(conn, "S1", [TurnRecord(ts=1_791_000_000_000 + 1000 * i, role="user",
+                                             kind="text", text=f"turn-{i}") for i in range(5)])
+
+    def test_last(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "read", "S1", "--last", "2"]).output
+        assert "turn-3" in out and "turn-4" in out and "turn-2" not in out
+
+    def test_since_takes_an_iso_time_or_epoch_ms(self, runner, tmp_path, monkeypatch):
+        from datetime import datetime, timezone
+        self._conn(tmp_path, monkeypatch)
+        iso = datetime.fromtimestamp(1_791_000_003, timezone.utc).isoformat()
+        out = runner.invoke(main, ["session", "read", "S1", "--since", iso]).output
+        assert "turn-3" in out and "turn-2" not in out
+        out = runner.invoke(main, ["session", "read", "S1", "--since", "1791000004000"]).output
+        assert "turn-4" in out and "turn-3" not in out
+
+    def test_a_bad_since_is_a_usage_error(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "read", "S1", "--since", "yesterday"])
+        assert result.exit_code == 2
+
+
+class TestSessionHandoff:
+    """`scad session handoff ID "ANGLE"` asks an open session to write its own
+    handoff, shaped by the angle, and waits for the memo."""
+
+    def _setup(self, tmp_path, monkeypatch, *, tokens=50_000, window=1_000_000, record=True,
+               writes=True):
+        from scad.index import connect, upsert_session
+        from scad.records import SessionRecord
+        home = tmp_path / ".scad"
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        conn = connect(home / "index.sqlite")
+        upsert_session(conn, SessionRecord(id="S1", kind="main", agent="claude",
+                                           source="claude-transcript", context_tokens=tokens,
+                                           context_window=window),
+                       machine="m", project="p", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        if record:
+            from scad.launch import write_record
+            write_record({"session_id": "S1", "agent": "claude", "tmux": "main:3.1",
+                          "pane_id": "%7"})
+        sent = []
+
+        def send(session_id, text):
+            sent.append((session_id, text))
+            if writes:
+                from scad.memos import append_memo
+                append_memo({"kind": "handoff", "title": "where it stands"}, session_id="S1")
+            return {"tmux": "main:3.1", "bytes": len(text)}
+        monkeypatch.setattr("scad.cli.send_turn", send)
+        monkeypatch.setattr("scad.cli.HANDOFF_POLL_S", 0.01)
+        return sent
+
+    def test_it_sends_the_angle_and_returns_with_the_memo(self, runner, tmp_path, monkeypatch):
+        sent = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "handoff", "S1", "frame it for orglens"])
+        assert result.exit_code == 0, result.output
+        assert sent == [("S1", "/memo-handoff frame it for orglens")]
+        assert "where it stands" in result.output and "scad memos read S1 --last" in result.output
+
+    def test_a_session_scad_did_not_launch_is_told_to_type_it(self, runner, tmp_path,
+                                                              monkeypatch):
+        sent = self._setup(tmp_path, monkeypatch, record=False)
+        result = runner.invoke(main, ["session", "handoff", "S1"])
+        assert result.exit_code == 1 and "/memo-handoff" in result.output and sent == []
+
+    def test_a_nearly_full_session_is_pointed_at_from(self, runner, tmp_path, monkeypatch):
+        sent = self._setup(tmp_path, monkeypatch, tokens=850_000)
+        result = runner.invoke(main, ["session", "handoff", "S1"])
+        assert result.exit_code == 1 and "--from S1" in result.output and sent == []
+
+    def test_a_timeout_says_it_was_sent_and_how_to_check(self, runner, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch, writes=False)
+        result = runner.invoke(main, ["session", "handoff", "S1", "--timeout", "0.05"])
+        assert result.exit_code == 1
+        assert "sent" in result.output and "scad memos ls --session S1" in result.output
+
+
+class TestLaunchFrom:
+    """`scad session launch --from ID`: a fresh session picks up ID's work, from
+    its handoff memo and the turns after it, or from its last turns when it has
+    no handoff. The source does not have to write anything."""
+
+    def _setup(self, tmp_path, monkeypatch, *, handoff=True):
+        from scad.index import connect, upsert_session
+        from scad.memos import append_memo
+        from scad.records import SessionRecord
+        home = tmp_path / ".scad"
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        src = tmp_path / "repo"
+        src.mkdir()
+        conn = connect(home / "index.sqlite")
+        upsert_session(conn, SessionRecord(id="SRC1", kind="main", agent="claude",
+                                           source="claude-transcript", cwd=str(src), ended=1),
+                       machine="m", project="proj", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        append_memo({"kind": "info", "title": "a finding"}, session_id="SRC1")
+        if handoff:
+            append_memo({"kind": "handoff", "title": "where it stands",
+                         "ts": "2026-10-07T12:00:00+05:30"}, session_id="SRC1")
+            append_memo({"kind": "info", "title": "later note"}, session_id="SRC1")
+        calls = []
+        monkeypatch.setattr("scad.cli.launch_agent", lambda agent, cwd, **kw: calls.append(
+            (agent, cwd, kw)) or {"session_id": "NEW", "tmux": "main:1.1", "agent": agent})
+        return calls, src
+
+    def test_with_a_handoff_it_names_that_memo_and_the_turns_after_it(self, runner, tmp_path,
+                                                                     monkeypatch):
+        calls, src = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "SRC1"])
+        assert result.exit_code == 0, result.output
+        (agent, cwd, kw), = calls
+        prompt = kw["prompt"]
+        assert cwd == src
+        assert "scad memos read SRC1 --idx 1" in prompt
+        assert "scad session read SRC1 --kind text --since 2026-10-07T12:00:00+05:30" in prompt
+        assert "/memo-handoff" in prompt and "continue the work" in prompt
+
+    def test_without_a_handoff_it_reads_the_last_200_turns(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch, handoff=False)
+        runner.invoke(main, ["session", "launch", "--agent", "codex", "--from", "SRC1"])
+        prompt = calls[0][2]["prompt"]
+        assert "scad session read SRC1 --kind text --last 200" in prompt
+        assert "scad memos ls --session SRC1" in prompt
+
+    def test_the_prompt_says_where_to_take_it(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "SRC1",
+                             "--prompt", "prepare the orglens side"])
+        assert calls[0][2]["prompt"].rstrip().endswith("Then: prepare the orglens side")
+
+    def test_cwd_overrides_the_sources_directory(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "SRC1",
+                             "--cwd", str(tmp_path)])
+        assert calls[0][1] == tmp_path
+
+    def test_an_unknown_source_starts_nothing(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "NOPE"])
+        assert result.exit_code == 1 and calls == []
+
+
+class TestALaunchPromptThatTriggersAScadSkill:
+    """A prompt that says "write a memo" can make the launched agent run
+    scad's memo-write skill, which files a memo against the new session.
+    Observed 2026-07: kimi fired the old `remember` skill on "Remember the
+    phrase". The prompt is the person's intent, so this warns and launches."""
+
+    def _launch(self, runner, tmp_path, monkeypatch, *args):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        calls = []
+        monkeypatch.setattr("scad.cli.launch_agent", lambda agent, cwd, **kw: calls.append(kw)
+                            or {"session_id": "N", "tmux": "main:1.1", "agent": agent})
+        result = runner.invoke(main, ["session", "launch", "--agent", "kimi",
+                                      "--cwd", str(tmp_path), *args])
+        return result, calls
+
+    def test_a_trigger_phrase_warns_and_still_launches(self, runner, tmp_path, monkeypatch):
+        result, calls = self._launch(runner, tmp_path, monkeypatch,
+                                     "--prompt", "Look at the logs, then write a memo")
+        assert result.exit_code == 0 and len(calls) == 1
+        assert "write a memo" in result.output and "memo-write" in result.output
+
+    def test_a_plain_prompt_does_not_warn(self, runner, tmp_path, monkeypatch):
+        result, _ = self._launch(runner, tmp_path, monkeypatch, "--prompt", "fix the parser")
+        assert "may set off" not in result.output
+
+    def test_the_from_prompt_scad_writes_does_not_warn(self, runner, tmp_path, monkeypatch):
+        from scad.index import connect, upsert_session
+        from scad.records import SessionRecord
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        upsert_session(connect(tmp_path / ".scad" / "index.sqlite"),
+                       SessionRecord(id="SRC1", kind="main", agent="claude",
+                                     source="claude-transcript", cwd=str(tmp_path)),
+                       machine="m", project="p", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        result, calls = self._launch(runner, tmp_path, monkeypatch, "--from", "SRC1")
+        assert "/memo-handoff" in calls[0]["prompt"]
+        assert "may set off" not in result.output

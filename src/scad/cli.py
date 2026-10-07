@@ -2310,6 +2310,192 @@ def _session_export(conn, rows) -> list[dict]:
     return out
 
 
+@session.command("snapshot")
+def session_snapshot():
+    """Record every open agent session, to bring back with `session restore`.
+
+    Every open Claude session, and codex and kimi sessions started with
+    `scad session launch`. Take one before a restart: nothing takes them
+    automatically.
+    """
+    from scad import snapshot
+    path, summary = snapshot.take(index_connect())
+    click.echo(f"[scad] {summary}")
+    click.echo(f"[scad] {path}")
+
+
+def _pane_order(session: dict) -> tuple:
+    """`main:3.2` as (main, 3, 2), so windows come back in tmux order."""
+    pane = session.get("pane") or ""
+    tsess, _, rest = pane.partition(":")
+    window, _, index = rest.partition(".")
+    num = lambda x: int(x) if x.isdigit() else 1_000_000
+    return (tsess or "~", num(window), num(index))
+
+
+@session.command("restore")
+@click.argument("snapshot_file", required=False, type=click.Path(exists=True, dir_okay=False))
+@click.option("--list", "list_only", is_flag=True, help="List recent snapshots and exit.")
+@click.option("--skip", "skips", multiple=True, help="Leave out this session (id prefix; repeatable).")
+@click.option("--only", "onlys", multiple=True, help="Restore only this session (id prefix; repeatable).")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask before restoring.")
+def session_restore(snapshot_file, list_only, skips, onlys, yes):
+    """Bring back the sessions a snapshot recorded, each in the window it came from.
+
+    Reads the newest snapshot unless one is named. Shows the plan, asks once,
+    then resumes each session in its own directory: as a split of its window
+    when that window exists, otherwise in a new window of that name. A session
+    that is open right now is never started a second time.
+    """
+    from scad import launch as launch_mod
+    from scad import snapshot
+    from scad.view import context_short, _ago
+
+    if list_only:
+        paths = snapshot.snapshot_paths()
+        if not paths:
+            click.echo("[scad] No snapshots. Take one with: scad session snapshot")
+            return
+        for p in paths[:20]:
+            try:
+                data = snapshot.read(p)
+                click.echo(f"{p.name}  {data.get('taken', '?')}  {snapshot.summary(data)}")
+            except (OSError, ValueError):
+                click.echo(f"{p.name}  (unreadable)")
+        return
+
+    path = Path(snapshot_file) if snapshot_file else snapshot.latest()
+    if path is None:
+        raise click.ClickException(
+            "No snapshot to restore. Take one before a restart with: scad session snapshot")
+    data = snapshot.read(path)
+    sessions = data.get("sessions") or []
+    open_ids = {s["id"] for s in snapshot.gather(
+        index_connect(), _live_sessions_now(),
+        _tmux_panes_now(), launch_mod.launch_records())["sessions"]}
+
+    def chosen(s) -> bool:
+        if onlys and not any(s["id"].startswith(o) for o in onlys):
+            return False
+        return not any(s["id"].startswith(k) for k in skips)
+
+    click.echo(f"[scad] {path.name}, taken {data.get('taken', '?')}: {snapshot.summary(data)}")
+    todo = []
+    project = object()
+    # Grouped for reading whatever the file's order; placement uses tmux order.
+    for s in sorted(sessions, key=lambda x: ((x.get("project") or "").lower(),
+                                             (x.get("name") or "").lower())):
+        if s.get("project") != project:
+            project = s.get("project")
+            click.echo(f"  {project or '(no project)'}")
+        if s["id"] in open_ids:
+            note = "already open"
+        elif not chosen(s):
+            note = "skipped"
+        else:
+            note = ""
+            todo.append(s)
+        ctx = context_short(s.get("context_tokens"), s.get("context_window"))
+        click.echo(f"    {(s.get('name') or s['id'][:12])[:30]:<30} {s.get('agent', ''):<7} "
+                   f"{(s.get('window') or '-'):<12} {ctx:>5}  "
+                   f"{_ago(s.get('last_active')) or '':<9} {note}".rstrip())
+    for p in data.get("not_restorable") or []:
+        click.echo(f"  not restorable: {p.get('pane')} ({p.get('command')}, window "
+                   f"{p.get('window')}): started outside scad")
+    if not todo:
+        click.echo("[scad] Nothing to restore.")
+        return
+    if not yes and not click.confirm(f"Restore these {len(todo)}?", default=True):
+        return
+
+    failed = 0
+    created = []
+    for s in sorted(todo, key=_pane_order):
+        if s.get("cwd") and not Path(s["cwd"]).is_dir():
+            click.echo(f"[scad] warning: {s['cwd']} no longer exists; "
+                       f"{s['id'][:12]} resumes without changing directory.", err=True)
+        try:
+            record = launch_mod.place_resume(s)
+        except Exception as exc:            # one failure must not stop the rest
+            failed += 1
+            click.echo(f"[scad] failed   {(s.get('name') or s['id'][:12])}: {exc}")
+            continue
+        if record.get("created_window"):
+            created.append((record.get("tmux", "").split(":")[0] or s.get("tmux_session"),
+                            record.get("window")))
+        click.echo(f"[scad] restored {(s.get('name') or s['id'][:12])} in {record.get('tmux')}")
+    for tsess, window in dict.fromkeys(created):
+        launch_mod.tile(tsess, window)
+    if failed:
+        raise SystemExit(1)
+
+
+def _live_sessions_now():
+    from scad.live import claude_live_sessions
+    return claude_live_sessions()
+
+
+def _tmux_panes_now():
+    from scad.live import tmux_panes
+    return tmux_panes()
+
+
+HANDOFF_POLL_S = 2.0
+HANDOFF_TIMEOUT_S = 600
+
+
+def _handoffs_in(session_id: str, agent: str) -> list[dict]:
+    path = _resolve_memo_path(session_id, agent)
+    return [m for m in hydrate_memos(read_memo_file(path)) if m.get("kind") == "handoff"]
+
+
+@session.command("handoff")
+@click.argument("session_id", shell_complete=_complete_sessions)
+@click.argument("angle", required=False, default="")
+@click.option("--timeout", default=HANDOFF_TIMEOUT_S, type=float, show_default=True,
+              help="Seconds to wait for the handoff memo.")
+def session_handoff(session_id, angle, timeout):
+    """Ask an open session to write its own handoff memo, and wait for it.
+
+    Types `/memo-handoff ANGLE` into the session's pane; the angle shapes what
+    the handoff is for. Only sessions scad launched or restored have a pane scad
+    can type into. A nearly full session is refused: it may not have room to
+    write a good handoff, and `session launch --from` writes one from outside.
+    """
+    from scad.view import context_long, nearly_full
+
+    row = session_row(index_connect(), session_id)
+    record = read_record(session_id)
+    if record is None or not record.get("tmux"):
+        raise click.ClickException(
+            f"{session_id} was not started by scad, so there is no pane scad can type into. "
+            f"Type /memo-handoff {angle}".rstrip() + " in it yourself.")
+    if row is not None and nearly_full(row["context_tokens"], row["context_window"]):
+        raise click.ClickException(
+            f"{session_id} is nearly full ({context_long(row['context_tokens'], row['context_window'])}). "
+            f"Start a fresh session from it instead: "
+            f"scad session launch --agent claude --from {session_id}")
+
+    agent = record.get("agent") or "claude"
+    before = len(_handoffs_in(session_id, agent))
+    try:
+        send_turn(session_id, f"/memo-handoff {angle}".rstrip())
+    except LaunchError as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"[scad] asked {session_id} for a handoff; waiting up to {timeout:g}s")
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        found = _handoffs_in(session_id, agent)
+        if len(found) > before:
+            click.echo(f"[scad] handoff written: {found[-1].get('title') or '(untitled)'}")
+            click.echo(f"[scad] read it: scad memos read {session_id} --last")
+            return
+        time.sleep(HANDOFF_POLL_S)
+    click.echo(f"[scad] the request was sent, but no handoff memo appeared in {timeout:g}s. "
+               f"Check with: scad memos ls --session {session_id}")
+    raise SystemExit(1)
+
+
 @session.command("show")
 @click.argument("session_id", shell_complete=_complete_sessions)
 def session_show(session_id):
@@ -2379,6 +2565,37 @@ def _exec(argv: list[str]) -> None:
     os.execvp(argv[0], argv)
 
 
+def _from_prompt(source, where_next: str | None) -> str:
+    """The first turn of a session started `--from` another one.
+
+    It names exact commands, looked up now: the newest handoff memo by its index
+    and every turn written after it, or, with no handoff, the last 200 text
+    turns. Reading the turns after a handoff means a stale one costs nothing
+    extra and misses nothing; there is no "recent enough" rule to tune.
+    """
+    from scad.view import _ago
+    sid, agent = source["id"], source["agent"] or "claude"
+    handoffs = [(i, m) for i, m in enumerate(hydrate_memos(read_memo_file(
+        _resolve_memo_path(sid, agent)))) if m.get("kind") == "handoff"]
+    when = _ago(source["ended"]) or "unknown"
+    lines = [f"Pick up the work of session {sid} ({agent}, {source['project'] or 'no project'}, "
+             f"last active {when}). It may be too full to write its own handoff, so you read "
+             f"what it did instead."]
+    if handoffs:
+        idx, memo = handoffs[-1]
+        lines.append(f"1. Run /memo-recall for it: read its newest handoff memo "
+                     f"(scad memos read {sid} --idx {idx}), then every turn written after it "
+                     f"(scad session read {sid} --kind text --since {memo.get('ts')}).")
+    else:
+        lines.append(f"1. Run /memo-recall for it. It has no handoff memo: read its last 200 "
+                     f"text turns (scad session read {sid} --kind text --last 200), its memos "
+                     f"(scad memos ls --session {sid}), and git in its directory.")
+    lines.append("2. Write a handoff memo with /memo-handoff, filed against this session, "
+                 "from what you found.")
+    lines.append(f"3. Then: {where_next}" if where_next else "3. Then continue the work.")
+    return "\n".join(lines)
+
+
 @session.command("launch")
 @click.option("--agent", required=True, type=click.Choice(AGENTS),
               help="Which family to launch.")
@@ -2398,10 +2615,15 @@ def _exec(argv: list[str]) -> None:
                    "window's active pane instead: a window name (review) or a target "
                    "(main:4).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
+@click.option("--from", "from_id", default=None, shell_complete=_complete_sessions,
+              help="Pick up this session's work: the new session reads its handoff memo, or "
+                   "its last turns, writes a handoff, then follows --prompt. Works on a "
+                   "session too full to write its own. The directory defaults to its.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, from_id,
+                   as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the pane and the way back in, and leaves your
@@ -2418,6 +2640,20 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as
     """
     # Bare --split arrives as "" (the caller's pane); a value names a window.
     split = True if split == "" else split
+    # Only the person's own prompt: the turn `--from` writes uses the memo
+    # skills on purpose.
+    from scad.launch import skill_triggers
+    for phrase, skill in skill_triggers(prompt or ""):
+        click.echo(f"[scad] note: the prompt says \"{phrase}\", which may set off scad's "
+                   f"{skill} skill in the new session.", err=as_json)
+    if from_id:
+        source = session_row(index_connect(), from_id)
+        if source is None:
+            raise click.ClickException(f"No session {from_id} in the index.")
+        if not cwd:
+            here = aliases.current_cwd(source["cwd"])
+            cwd = here if here and Path(here).is_dir() else None
+        prompt = _from_prompt(source, prompt)
     target_cwd = Path(cwd) if cwd else Path.cwd()
 
     # Under --json, stdout is a data channel and nothing else may be on it.
@@ -3133,6 +3369,20 @@ def project_show(name, limit):
                    f"{(r['title'] or '')[:52]}")
 
 
+def _epoch_ms_arg(value: str, flag: str) -> int:
+    """An ISO 8601 time or epoch milliseconds, as epoch ms. A usage error otherwise."""
+    if value.isdigit():
+        return int(value)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is neither ISO 8601 nor epoch milliseconds.",
+                                 param_hint=flag) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return int(parsed.timestamp() * 1000)
+
+
 @session.command("read")
 @click.argument("session_id", shell_complete=_complete_sessions)
 @click.option("--kind", default=None,
@@ -3140,12 +3390,16 @@ def project_show(name, limit):
               help="Only this kind of turn — e.g. --kind text to skip tool noise.")
 @click.option("--role", default=None, help="Only this role (user, assistant, tool).")
 @click.option("--limit", default=None, type=int, help="Stop after N turns.")
-def session_read(session_id, kind, role, limit):
+@click.option("--last", default=None, type=int, help="Only the last N turns (after other filters).")
+@click.option("--since", default=None,
+              help="Only turns at or after this time: ISO 8601, or epoch milliseconds.")
+def session_read(session_id, kind, role, limit, last, since):
     """Print a session's turns in order."""
     conn = index_connect()
     if session_row(conn, session_id) is None:
         raise click.ClickException(f"No session {session_id} in the index.")
-    rows = session_turns(conn, session_id, kind=kind, role=role, limit=limit)
+    rows = session_turns(conn, session_id, kind=kind, role=role, limit=limit, last=last,
+                         since=_epoch_ms_arg(since, "--since") if since else None)
     if not rows:
         click.echo("[scad] No turns — this session may be a skeleton (no transcript).")
         return

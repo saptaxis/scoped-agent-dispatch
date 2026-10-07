@@ -29,6 +29,7 @@ from scad.live import (
     newest_by_session,
     other_holders,
     pid_panes,
+    session_pane,
 )
 
 _RESUME = {"claude": "claude --resume {id}",
@@ -287,6 +288,22 @@ def context_pct(tokens, window) -> int | None:
     return round(100 * tokens / window) if tokens and window else None
 
 
+# When a session should write its handoff, while it still has room to write a
+# good one. Unknown windows (a Claude session under 200k, which could be either
+# size) use 80% of the smaller window, so a 1M session is flagged early.
+NEARLY_FULL_SHARE = 0.8
+NEARLY_FULL_UNKNOWN = 160_000
+_FULL_TITLE = "nearly full: write a handoff while it still has room"
+
+
+def nearly_full(tokens, window) -> bool:
+    if not tokens:
+        return False
+    if window:
+        return tokens >= NEARLY_FULL_SHARE * window
+    return tokens >= NEARLY_FULL_UNKNOWN
+
+
 def context_short(tokens, window) -> str:
     """How full a session's context is, for a list row: `83%` where the window
     is known, else the tokens (`150k`), else nothing."""
@@ -314,6 +331,7 @@ def _as_rows(cursor_rows, panes, running, live_ids=None, cwds=None) -> list[dict
         row = dict(r)
         row["context_label"] = context_short(row.get("context_tokens"),
                                              row.get("context_window"))
+        row["nearly_full"] = nearly_full(row.get("context_tokens"), row.get("context_window"))
         # Where the directory is now, as the export serves it, and set before
         # the resume command and the pane match are built from it.
         row["cwd_recorded"] = row.get("cwd")
@@ -472,6 +490,10 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
                              for h in others.get(session.session_id, ())],
         }
         re_ = reentry_for(row, panes, running)
+        exact = session_pane(session, panes)
+        if exact:
+            # The registry says where it is; the directory match only guessed.
+            re_ = Reentry("tmux", re_.command, "", target=exact, goto=_goto(exact))
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
                           "target": re_.target, "goto": re_.goto}
         rows.append(row)
@@ -503,7 +525,7 @@ def live_rows(sessions: list[ClaudeSession], panes: list[TmuxPane],
     by_id = {r["id"]: r for r in indexed}
     occupied = set()
     for session in newest_by_session(sessions).values():
-        pane = pid_panes(agent_panes_, [session.pid]).get(session.pid)
+        pane = session_pane(session, panes)
         if pane:
             occupied.add(pane)
     for row in rows:
@@ -901,6 +923,7 @@ _PAGE = """<!doctype html>
             color: var(--faint); }}
  .facet input {{ width: 100%; margin: 0; }}
  .warn {{ color: var(--warn, #b45309); }}
+.ctx-full {{ color: var(--ask); font-weight: 600; }}
 .memo-kind {{ font-size: .66rem; text-transform: uppercase; letter-spacing: .04em;
   color: var(--dim); margin-right: .35em; }}
 h3.bucket {{ font-weight: 600; font-size: .78rem; line-height: 1; letter-spacing: .04em;
@@ -1096,7 +1119,8 @@ function rows(list) {{
     '<div class="m"><span class="ag ' + esc(r.agent) + '">' + esc(r.agent) + '</span> · ' +
     esc(r.project ?? "") + ' · ' + r.n_turns + ' turns' +
     (r.n_agents ? ' · ' + r.n_agents + ' sub-agents' : '') +
-    (r.context_label ? ' · context ' + esc(r.context_label) : '') + ' · ' + esc(when(r.ended)) +
+    (r.context_label ? ' · ' + (r.nearly_full ? '<span class="ctx-full" title="nearly full: write a handoff while it still has room">context ' + esc(r.context_label) + '</span>' : 'context ' + esc(r.context_label)) : '') +
+    ' · ' + esc(when(r.ended)) +
     (r.title ? ' · ' + esc(r.title.slice(0, 70)) : '') +
     heldTwice(r) + '</div>' +
     '<div class="acts">' + (r.reentry.command ? '<button class="cmd" data-cmd="' +
@@ -1464,8 +1488,12 @@ def _facts(row: dict) -> str:
                      f'◆ {row["n_memos"]}</span>')
     if row.get("context_label"):
         full = context_long(row.get("context_tokens"), row.get("context_window"))
-        ident.append(f'<span class="dimmer" title="{e(full)}">context '
-                     f'{e(row["context_label"])}</span>')
+        if row.get("nearly_full"):
+            ident.append(f'<span class="ctx-full" title="{e(full)}; {_FULL_TITLE}">context '
+                         f'{e(row["context_label"])}</span>')
+        else:
+            ident.append(f'<span class="dimmer" title="{e(full)}">context '
+                         f'{e(row["context_label"])}</span>')
     title = (row.get("title") or "").strip()
     label = (row.get("name") or "").strip()
     # A session named by /rename gets a title recording that rename, so this

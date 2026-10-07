@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 TMUX_FORMAT = ("#{session_name}:#{window_index}.#{pane_index}|#{window_name}|"
-               "#{pane_current_path}|#{pane_current_command}|#{pane_pid}")
+               "#{pane_current_path}|#{pane_current_command}|#{pane_pid}|#{pane_id}")
 _TIMEOUT = 5
 
 # Slack allowed between the registry's `procStart` and the kernel's start time.
@@ -46,6 +46,7 @@ class TmuxPane:
     command: str
     window: str = ""   # tmuxinator's window name, e.g. "scad" — the human label
     pid: int = 0       # the pane's shell; the agent is a descendant of it
+    pane_id: str = ""  # `%19`: names the pane however its window moves
 
     @property
     def session(self) -> str:
@@ -76,6 +77,11 @@ def tmux_panes() -> list[TmuxPane]:
         # Split from both ends: a path may contain "|", the others may not.
         head, _, rest = line.partition("|")
         window, _, rest = rest.partition("|")
+        # The pane id is last when present (`%19`), and nothing else starts with %.
+        before, _, last = rest.rpartition("|")
+        pane_id = ""
+        if last.startswith("%"):
+            pane_id, rest = last, before
         # The pid is last and all digits; a command never is. Read it only
         # when it is there, so a line without one still parses, pid 0.
         before, _, last = rest.rpartition("|")
@@ -85,7 +91,8 @@ def tmux_panes() -> list[TmuxPane]:
         path, _, command = rest.rpartition("|")
         if not head or not command:
             continue
-        panes.append(TmuxPane(target=head, path=path, command=command, window=window, pid=pid))
+        panes.append(TmuxPane(target=head, path=path, command=command, window=window, pid=pid,
+                              pane_id=pane_id))
     return panes
 
 
@@ -236,6 +243,10 @@ class ClaudeSession:
     kind: str = ""         # interactive | ...
     entrypoint: str = ""   # cli | ...
     version: str = ""
+    # The pane Claude says it runs in, as a tmux pane id (`%19`, from the
+    # registry's "tmux": "main:@4.%19"). Exact where the process-tree walk is
+    # not: a pane whose foreground tmux reports as the shell is skipped there.
+    tmux_pane: str = ""
 
 
 def _sessions_dir() -> Path:
@@ -357,6 +368,7 @@ def _read_entry(path: Path) -> tuple[ClaudeSession, float] | None:
         waiting_for=text("waitingFor"),
         started_at=started_at,
         updated_at=updated_at,
+        tmux_pane=(re.search(r"%\d+", text("tmux")) or [""])[0],
         kind=text("kind"),
         entrypoint=text("entrypoint"),
         version=text("version"),
@@ -491,6 +503,22 @@ def claude_live_sessions(registry: Path | str | None = None) -> list[ClaudeSessi
         if session.pid in starts and abs(starts[session.pid] - claimed) <= _START_SKEW
     ]
     return sorted(sessions, key=lambda s: (-s.started_at, s.session_id))
+
+
+def session_pane(session: ClaudeSession, panes: list[TmuxPane],
+                 parents: dict[int, int] | None = None) -> str | None:
+    """The pane a live Claude session runs in, as a target, or None.
+
+    The registry's own pane id first: Claude records it (`"tmux": "main:@4.%19"`),
+    and a pane id names the pane however its window moves. Then the process
+    tree, over every pane, not only those whose command looks like an agent: a
+    pane tmux reports as `zsh` can still hold one (3 of 7 on 2026-10-07).
+    """
+    if session.tmux_pane:
+        for pane in panes:
+            if pane.pane_id == session.tmux_pane:
+                return pane.target
+    return pid_panes(panes, [session.pid], parents).get(session.pid)
 
 
 def newest_by_session(sessions: list[ClaudeSession]) -> dict[str, ClaudeSession]:

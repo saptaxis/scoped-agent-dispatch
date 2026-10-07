@@ -122,7 +122,7 @@ Live panes and containers are discovered at render time and are current. The ind
 
 The archive keeps every version of a source file: one that was rewritten rather than appended to is stored as a fork beside the original. A refresh reads the newest fork and replaces that session's turns from it, once, and reports it as "re-read from a rewritten source". Codex did this to 133 rollouts at once in September 2026 when it changed its on-disk format.
 
-A claude pane is matched to its session through the process tree, from the pane's shell to the pid Claude's registry names, and a scad-launched pane through its launch record. A pane neither can name gets the newest session in its working directory, labelled as the guess it is. Only panes running an agent count. tmux and docker are queried at render time and degrade to empty if either is unavailable.
+A Claude session's pane is the one its registry entry names (Claude records its tmux pane id), or failing that the pane whose shell its process descends from. A scad-launched session's pane comes from its launch record. An agent pane neither can name is listed with no session. tmux and docker are queried at render time and degrade to empty if either is unavailable.
 
 ## Interactive launch
 
@@ -165,6 +165,35 @@ Gates shown in the pane are answered by matching the option label, never by pres
 Every launch writes `~/.scad/launches/<session-id>.json` with the agent, cwd, pane, resume command, and how the session was born. The pane is recorded twice: `pane_id` (`%45`) is authoritative and `tmux` (`main:11.0`) is a snapshot for reading, because an index path stops naming the pane the moment a window is moved or renumbered while the id survives every rearrangement. Everything that needs the pane resolves the id; a record written before the id existed falls back to the path. A file rather than a row, since `reindex --rebuild` would drop it. `scad session resume` reads it when it exists and falls back to the index when it does not, so resume works for every session on the machine.
 
 A launched session is indexed immediately as a skeleton row. Its turns appear after the next index pass, where headless output is immediate.
+
+## Handoffs
+
+```bash
+scad session handoff <id> "frame it for the release"   # ask a session for its handoff
+scad session launch --agent claude --from <id>          # a fresh session picks up its work
+scad session launch --agent claude --from <id> --prompt "prepare the docs instead"
+scad session read <id> --kind text --last 200           # a session's last turns
+scad session read <id> --kind text --since 2026-10-07T12:00:00+05:30
+```
+
+`session handoff` types `/memo-handoff ANGLE` into the session's pane and waits for the handoff memo (up to `--timeout`, 600 seconds by default). It works for sessions scad launched or restored, since those have a pane scad can type into, and it refuses a session whose context is nearly full.
+
+A session is nearly full at 80% of its context window, or at 160k tokens when the window is unknown. `scad view` marks it, so a handoff can be written while there is still room.
+
+`session launch --from` starts a fresh session in the source session's directory and gives it its first turn: read the source's newest handoff memo and every turn written after it, or its last 200 text turns when it has no handoff; write a handoff memo; then follow `--prompt`, or continue the work. The source does not have to write anything, so this works on a session too full to write its own handoff.
+
+## Snapshot and restore
+
+```bash
+scad session snapshot              # record the open sessions
+scad session restore               # bring back the newest snapshot's sessions
+scad session restore --list        # recent snapshots
+scad session restore FILE --skip 3f --only 9a -y
+```
+
+A snapshot records every open Claude session, from Claude's own registry, and every codex and kimi session started with `scad session launch`, from its launch record. Other agent panes are listed as not restorable, since nothing names their session. Snapshots are taken only by hand, into `~/.scad/snapshots/open-<stamp>.json`; the newest 50 are kept. The file lists sessions by project, with each session's name, agent, id, directory, context fill, tmux session, window and pane.
+
+`restore` shows its plan, grouped by project, and asks once. A session that is open now is marked and never started a second time. Each session is resumed in its own directory, in the window it came from: split into that window if it exists, otherwise in a new window of that name, in its tmux session (created if missing). Windows `restore` creates are tiled. A session whose directory is gone resumes without changing directory, with a warning. Each restored pane gets a launch record, so `scad view` and `session resume` know where it is. One failure does not stop the others; the exit status is non-zero if any failed.
 
 ## Memos
 

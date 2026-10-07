@@ -1648,3 +1648,59 @@ class TestContextFill:
     def test_the_client_side_rows_show_it_too(self, tmp_path):
         html = render(gather(connect(tmp_path / "i.sqlite"), [], set(), live_sessions=[]))
         assert "r.context_label" in html
+
+
+class TestNearlyFull:
+    """Nearly full means write a handoff now, while the session still has room
+    to write a good one: 80% of a known window, or 160k tokens when the window
+    is unknown (80% of the smaller Claude window; a 1M session is flagged early,
+    which is the safe mistake)."""
+
+    def test_the_rule(self):
+        from scad.view import nearly_full
+        assert nearly_full(206_720, 258_400) is True       # 80% of a known window
+        assert nearly_full(200_000, 258_400) is False
+        assert nearly_full(160_000, None) is True           # unknown window
+        assert nearly_full(159_999, None) is False
+        assert nearly_full(650_000, 1_000_000) is False
+        assert nearly_full(None, None) is False
+
+    def test_a_nearly_full_row_is_marked_on_the_page(self, tmp_path):
+        conn = connect(tmp_path / "i.sqlite")
+        _store(conn, "S1", "awaiting-question")
+        conn.execute("UPDATE sessions SET context_tokens = 230000, context_window = 258400")
+        conn.commit()
+        data = gather(conn, [], set(), live_sessions=[])
+        row = next(r for r in data["all"] if r["id"] == "S1")
+        assert row["nearly_full"] is True
+        html = render(data)
+        assert 'class="ctx-full"' in html and "write a handoff" in html
+
+    def test_the_client_side_rows_mark_it_too(self, tmp_path):
+        html = render(gather(connect(tmp_path / "i.sqlite"), [], set(), live_sessions=[]))
+        assert "r.nearly_full" in html
+
+
+class TestALiveSessionsPaneIsExact:
+    """The registry names the pane a Claude session runs in. Measured 2026-10-07:
+    3 of 7 open sessions sat under a pane tmux reports as `zsh`, which the
+    directory match among agent panes never saw, so the Live section showed
+    them with no pane."""
+
+    def test_the_registry_pane_wins_over_a_directory_match(self, monkeypatch):
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        sessions = [ClaudeSession("S1", 40333, cwd="/w", tmux_pane="%19")]
+        panes = [TmuxPane("main:3.3", "/w", "zsh", window="scad", pid=40324, pane_id="%19"),
+                 TmuxPane("main:3.2", "/w", "2.1.291", window="scad", pid=12815, pane_id="%7")]
+        (row,) = [r for r in live_rows(sessions, panes, [], set(), records=[]) if r["id"]]
+        assert row["reentry"]["target"] == "main:3.3"
+        assert row["reentry"]["note"] == ""
+        assert row["target"] == "main:3.3"
+
+    def test_without_a_registry_pane_the_process_tree_finds_a_shell_pane(self, monkeypatch):
+        from scad.live import session_pane
+        monkeypatch.setattr("scad.live._process_parents", lambda: {40333: 40324})
+        pane = session_pane(ClaudeSession("S1", 40333),
+                            [TmuxPane("main:3.3", "/w", "zsh", pid=40324)])
+        assert pane == "main:3.3"
