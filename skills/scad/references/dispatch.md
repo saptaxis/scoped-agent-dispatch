@@ -1,7 +1,6 @@
 # Dispatch — containers, runs, and jobs
 
-Read this when the work needs isolation: a container with the repos cloned,
-credentials staged, and one or more agents running inside it.
+Read this when the work needs isolation: a container with the repos cloned, credentials staged, and one or more agents running inside it.
 
 ## Model
 
@@ -115,8 +114,5 @@ scad gc --force                 # clean orphans
 - **Credentials expire ~8h.** Use `scad run refresh <run-id>` to push fresh creds. `scad run ls` warns when <2h remaining.
 
 <HARD-GATE>
-NEVER construct Docker commands manually when scad has a command for it.
-ALWAYS use `scad run inject` to send work — not raw `docker exec`.
-ALWAYS use `scad code fetch` to get branches — not manual git commands.
-If a scad command fails, report the error — do not bypass with Docker/git.
+NEVER construct Docker commands manually when scad has a command for it. ALWAYS use `scad run inject` to send work — not raw `docker exec`. ALWAYS use `scad code fetch` to get branches — not manual git commands. If a scad command fails, report the error — do not bypass with Docker/git.
 </HARD-GATE>

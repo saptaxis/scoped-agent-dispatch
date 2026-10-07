@@ -1,10 +1,6 @@
 # macOS
 
-There is no native Docker on macOS, so scad runs containers in a
-[Colima](https://github.com/abiosoft/colima) VM it owns, under the profile name
-`scad`, isolated from any other Docker on the machine. `install.sh` installs
-Colima via Homebrew if needed and creates the profile. Pass `--no-vm` to skip
-that and wire it up yourself.
+There is no native Docker on macOS, so scad runs containers in a [Colima](https://github.com/abiosoft/colima) VM it owns, under the profile name `scad`, isolated from any other Docker on the machine. `install.sh` installs Colima via Homebrew if needed and creates the profile. Pass `--no-vm` to skip that and wire it up yourself.
 
 Docker Desktop and Podman are not supported targets.
 
@@ -16,8 +12,7 @@ scad vm stop       # stop; containers are preserved
 scad vm delete     # destroy the VM and everything in it
 ```
 
-`build`, `run start`, `dispatch` and `batch` start the VM if it is down, so
-`scad vm start` is rarely needed by hand.
+`build`, `run start`, `dispatch` and `batch` start the VM if it is down, so `scad vm start` is rarely needed by hand.
 
 ## Sizing
 
@@ -36,16 +31,10 @@ Sizing applies when the VM is created. To resize: `scad vm delete && scad vm sta
 
 ## Mounts
 
-Host paths outside `$HOME` (external drives, `/Volumes/...`, `/data`) are not
-visible to the VM by default. At `run start`, scad adds any such `mounts:` or
-repo paths to the VM and restarts it, but only when the set has changed.
+Host paths outside `$HOME` (external drives, `/Volumes/...`, `/data`) are not visible to the VM by default. At `run start`, scad adds any such `mounts:` or repo paths to the VM and restarts it, but only when the set has changed.
 
-`scad code add` of a path outside `$HOME` cannot hot-add, because a VM mount is
-only addable at restart. scad warns and offers to restart (`--restart-vm` skips
-the prompt). The restart stops running sessions, and scad restarts the target
-session afterwards.
+`scad code add` of a path outside `$HOME` cannot hot-add, because a VM mount is only addable at restart. scad warns and offers to restart (`--restart-vm` skips the prompt). The restart stops running sessions, and scad restarts the target session afterwards.
 
 ## GPU
 
-`gpu: true` is unsupported on macOS and errors, since there is no NVIDIA runtime
-in a Lima VM. GPU passthrough is Linux only.
+`gpu: true` is unsupported on macOS and errors, since there is no NVIDIA runtime in a Lima VM. GPU passthrough is Linux only.

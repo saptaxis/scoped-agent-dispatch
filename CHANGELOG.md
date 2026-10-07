@@ -2,10 +2,7 @@
 
 ## [Unreleased]
 
-**Notes are memos.** scad's session records shared a name with the docs tree's `notes.org`,
-and went by three names besides: `/remember` wrote them, `session note` stored them, `notes ls`
-listed them and `/recall` read them. They are memos now, everywhere, with no aliases: the old
-commands and skills are gone.
+**Notes are memos.** scad's session records shared a name with the docs tree's `notes.org`, and went by three names besides: `/remember` wrote them, `session note` stored them, `notes ls` listed them and `/recall` read them. They are memos now, everywhere, with no aliases: the old commands and skills are gone.
 
 ### Changed
 
@@ -18,320 +15,142 @@ commands and skills are gone.
 | `~/.scad/notes/` | `~/.scad/memos/` |
 | JSON `note_path`; view rows `notes`, `n_notes` | `memo_path`; `memos`, `n_memos` |
 
-The record format is unchanged. The plain verbs went because `remember` collides with Claude
-Code's own memory, where "remember that I prefer X" means something else.
+The record format is unchanged. The plain verbs went because `remember` collides with Claude Code's own memory, where "remember that I prefer X" means something else.
 
-- "Waiting on you" in `scad view` means a session asked you something
-  (`awaiting-question`), not that the agent spoke last (`awaiting-user`), which is how nearly
-  every finished session ends: in August that was 183 of 232 sessions against one real
-  question. An unanswered question also no longer drops off after 14 days; on the author's
-  machine the only real one was older than that, and hidden. `scad view --days` is now a
-  no-op, kept so scripts that pass it still run.
+- "Waiting on you" in `scad view` means a session asked you something (`awaiting-question`), not that the agent spoke last (`awaiting-user`), which is how nearly every finished session ends: in August that was 183 of 232 sessions against one real question. An unanswered question also no longer drops off after 14 days; on the author's machine the only real one was older than that, and hidden. `scad view --days` is now a no-op, kept so scripts that pass it still run.
 
 ### Added
 
-- `/memo-handoff`: a handoff memo, written for this session only after checking each repo the
-  work touched (`git status`, `git log`), with its scope from the arguments: empty for the whole
-  context, `brief` for the latest phase, anything else as the focus.
-- `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and
-  project. The index stores the body; listings still never print it.
-- `scad session ls` and `scad project show` show how many sub-agents and workflow agents each
-  session started, as `scad view` already did, and `session ls --json` carries it as
-  `n_subagents`. A session that fanned out to hundreds looked like a one-question one.
-- `scad index status [--json]`: when a reindex last finished, and how many sessions and memos
-  the index holds, without running one. Nothing reindexes on a timer, so a reader that does
-  not refresh first can now tell a quiet session from a stale index.
+- `/memo-handoff`: a handoff memo, written for this session only after checking each repo the work touched (`git status`, `git log`), with its scope from the arguments: empty for the whole context, `brief` for the latest phase, anything else as the focus.
+- `scad search --memos` matches a memo's body, not only its topic, title, tags, entities and project. The index stores the body; listings still never print it.
+- `scad session ls` and `scad project show` show how many sub-agents and workflow agents each session started, as `scad view` already did, and `session ls --json` carries it as `n_subagents`. A session that fanned out to hundreds looked like a one-question one.
+- `scad index status [--json]`: when a reindex last finished, and how many sessions and memos the index holds, without running one. Nothing reindexes on a timer, so a reader that does not refresh first can now tell a quiet session from a stale index.
 
 ### Fixed
 
-- Two reindexes at once indexed the same turns twice: each read a session's offset before the
-  other committed, and both appended. In a test of 60 sessions, 21 were doubled. A reindex now
-  holds a lock beside the index for the whole pass; a second one waits, then finds nothing new.
-  Writing a memo takes the same lock.
-- Opening the index while another process was creating it failed with "database is locked":
-  every connection switched the journal to WAL, which needs the file to itself. It is switched
-  only when it is not WAL already.
+- Two reindexes at once indexed the same turns twice: each read a session's offset before the other committed, and both appended. In a test of 60 sessions, 21 were doubled. A reindex now holds a lock beside the index for the whole pass; a second one waits, then finds nothing new. Writing a memo takes the same lock.
+- Opening the index while another process was creating it failed with "database is locked": every connection switched the journal to WAL, which needs the file to itself. It is switched only when it is not WAL already.
 
 ### Upgrading
 
 On each machine, before any other scad command:
 
-1. `mv ~/.scad/notes ~/.scad/memos`. Until this is done, every command that reads or writes
-   memos stops and prints it.
+1. `mv ~/.scad/notes ~/.scad/memos`. Until this is done, every command that reads or writes memos stops and prints it.
 2. `scad reindex`. The index gains an empty `memos` table and fills it from the memo files.
-3. Optionally, drop what the old index kept:
-   `sqlite3 ~/.scad/index.sqlite "DROP TABLE notes; ALTER TABLE sessions DROP COLUMN notes_offset; ALTER TABLE sessions DROP COLUMN notes_mtime; UPDATE sessions SET source = 'scad-memo' WHERE source = 'scad-note';"`
-4. Remove the old `remember` and `recall` skills from `~/.agents/skills` and `~/.claude/skills`,
-   and reinstall to get the new ones.
+3. Optionally, drop what the old index kept: `sqlite3 ~/.scad/index.sqlite "DROP TABLE notes; ALTER TABLE sessions DROP COLUMN notes_offset; ALTER TABLE sessions DROP COLUMN notes_mtime; UPDATE sessions SET source = 'scad-memo' WHERE source = 'scad-note';"`
+4. Remove the old `remember` and `recall` skills from `~/.agents/skills` and `~/.claude/skills`, and reinstall to get the new ones.
 
 ## [0.8.0] - 2026-10-01
 
-**The release where a directory can move twice.** 0.7.0's aliases carried the docs repository
-from `~/Dropbox/traitful-code/traitful-docs` to `~/Dropbox/inwit`. The next step is a
-restructure inside it: about 30 unit folders move from `inwit/docs/projects/X` to
-`inwit/{personal,traitful}/projects/X`. The 777 sessions recorded before the first move are
-translated by its rule into `inwit/docs/projects/X`, which the restructure removes, and in
-0.7.0 nothing took them further: every rule would have had to be written twice, once per earlier
-spelling. scad's own label is unaffected (every such session resolves to `inwit`); orglens's
-attribution by path is affected: 7 of the 48 inwit sessions it sees on 2026-10-01.
+**The release where a directory can move twice.** 0.7.0's aliases carried the docs repository from `~/Dropbox/traitful-code/traitful-docs` to `~/Dropbox/inwit`. The next step is a restructure inside it: about 30 unit folders move from `inwit/docs/projects/X` to `inwit/{personal,traitful}/projects/X`. The 777 sessions recorded before the first move are translated by its rule into `inwit/docs/projects/X`, which the restructure removes, and in 0.7.0 nothing took them further: every rule would have had to be written twice, once per earlier spelling. scad's own label is unaffected (every such session resolves to `inwit`); orglens's attribution by path is affected: 7 of the 48 inwit sessions it sees on 2026-10-01.
 
 ### Changed
 
-- Path aliases chain. A rule that leads to a path which is itself gone hands it to the next
-  matching rule, until the path exists, so each move needs only its own rules: a repository
-  that moved and then had folders moved inside it is one rule per move, written in the
-  current spelling, rather than one per earlier spelling. No rule is used twice in a chain. A
-  chain that runs into a missing directory keeps its last hop whose new side exists, so a
-  wrong later rule no longer costs the earlier translation. `scad where` shows every hop,
-  and `scad project aliases` counts a rule whose new side moved on as `ok` when its chain
-  arrives.
+- Path aliases chain. A rule that leads to a path which is itself gone hands it to the next matching rule, until the path exists, so each move needs only its own rules: a repository that moved and then had folders moved inside it is one rule per move, written in the current spelling, rather than one per earlier spelling. No rule is used twice in a chain. A chain that runs into a missing directory keeps its last hop whose new side exists, so a wrong later rule no longer costs the earlier translation. `scad where` shows every hop, and `scad project aliases` counts a rule whose new side moved on as `ok` when its chain arrives.
 
 ### Fixed
 
-- A config repo whose `path` is a folder inside a repository (orglens renders a unit's home
-  that way, e.g. `inwit/docs/projects/orglens`) failed at clone time: `git clone --local`
-  refuses a subfolder. The repository containing the folder is now cloned, and `code sync` and
-  `harvest` read from it too. A `worktree: false` repo is still mounted as the folder itself.
+- A config repo whose `path` is a folder inside a repository (orglens renders a unit's home that way, e.g. `inwit/docs/projects/orglens`) failed at clone time: `git clone --local` refuses a subfolder. The repository containing the folder is now cloned, and `code sync` and `harvest` read from it too. A `worktree: false` repo is still mounted as the folder itself.
 
 ### Not done
 
-- A chain still needs its first rule to reach somewhere. A rule written in an old spelling whose
-  new side is mistyped translates nothing, and a rebuild then walks up from the old path,
-  which may find no marker and file the session `unfiled`. Writing each rule in the current
-  spelling avoids it.
+- A chain still needs its first rule to reach somewhere. A rule written in an old spelling whose new side is mistyped translates nothing, and a rebuild then walks up from the old path, which may find no marker and file the session `unfiled`. Writing each rule in the current spelling avoids it.
 
 ## [0.7.0] - 2026-09-30
 
-**The release where a directory can move without taking its sessions with it.** `project` is
-derived from each session's recorded cwd, resolved against the filesystem as it is now, and a
-transcript records its cwd forever. So after a directory moves, `reindex --rebuild` re-derives
-every row, finds nothing at the old path, and files the sessions under `unfiled`, or under the
-name of any marked directory above it. Measured on a copy before the fix: the rebuild is the
-only step that loses attribution, and ordinary reindexes never recompute it. The move that
-forced this one affected 775 of the 1,921 sessions indexed on the machine it was measured on.
+**The release where a directory can move without taking its sessions with it.** `project` is derived from each session's recorded cwd, resolved against the filesystem as it is now, and a transcript records its cwd forever. So after a directory moves, `reindex --rebuild` re-derives every row, finds nothing at the old path, and files the sessions under `unfiled`, or under the name of any marked directory above it. Measured on a copy before the fix: the rebuild is the only step that loses attribution, and ordinary reindexes never recompute it. The move that forced this one affected 775 of the 1,921 sessions indexed on the machine it was measured on.
 
 ### Added
 
-- Path aliases: `~/.scad/aliases` holds hand-written `old path -> new path` rules. A rule is
-  used only when a session's recorded directory no longer exists, so it can never redirect one
-  that is still there. The longest matching rule wins, and rules do not chain. Nothing recorded is
-  rewritten: not the transcripts, not the archive, not the index's `cwd`.
-- Both sides of a rule, and every recorded path, are resolved through symlinks before they are
-  compared. Of the 775 sessions above, 774 recorded the `~/Library/CloudStorage/Dropbox`
-  spelling and one recorded `~/Dropbox`; a rule in either spelling matches both.
-- `scad project aliases` lists the rules as `ok`, `stale` (the old path still exists) or
-  `broken` (the new path is missing). `scad where` shows a `via alias:` line when a rule
-  answered, and for a directory that no longer exists it points at the alias file rather than
-  suggesting a marker.
+- Path aliases: `~/.scad/aliases` holds hand-written `old path -> new path` rules. A rule is used only when a session's recorded directory no longer exists, so it can never redirect one that is still there. The longest matching rule wins, and rules do not chain. Nothing recorded is rewritten: not the transcripts, not the archive, not the index's `cwd`.
+- Both sides of a rule, and every recorded path, are resolved through symlinks before they are compared. Of the 775 sessions above, 774 recorded the `~/Library/CloudStorage/Dropbox` spelling and one recorded `~/Dropbox`; a rule in either spelling matches both.
+- `scad project aliases` lists the rules as `ok`, `stale` (the old path still exists) or `broken` (the new path is missing). `scad where` shows a `via alias:` line when a rule answered, and for a directory that no longer exists it points at the alias file rather than suggesting a marker.
 
 ### Changed
 
-- `session ls --json` serves `cwd` as where the directory is now, through symlinks and the
-  alias file, and adds `cwd_recorded`, the path exactly as the transcript recorded it. This
-  changes an existing field's meaning: a row whose recorded path went through a symlink now
-  serves the resolved path even when nothing moved (`/tmp/x` becomes `/private/tmp/x` on
-  macOS). `session show` and the viewer show the same.
-- `session resume` resumes where a rule says a moved directory went, and says so. For a
-  directory that is gone with no rule it still resumes, since `claude --resume` does not need
-  the directory, and warns that the agent will start in the current directory; `--print` and the viewer
-  drop the `cd`, which used to fail and stop the command. A rule whose new path does not exist
-  is refused.
+- `session ls --json` serves `cwd` as where the directory is now, through symlinks and the alias file, and adds `cwd_recorded`, the path exactly as the transcript recorded it. This changes an existing field's meaning: a row whose recorded path went through a symlink now serves the resolved path even when nothing moved (`/tmp/x` becomes `/private/tmp/x` on macOS). `session show` and the viewer show the same.
+- `session resume` resumes where a rule says a moved directory went, and says so. For a directory that is gone with no rule it still resumes, since `claude --resume` does not need the directory, and warns that the agent will start in the current directory; `--print` and the viewer drop the `cd`, which used to fail and stop the command. A rule whose new path does not exist is refused.
 
 ### Not done
 
-- Nothing warns before a rebuild. A directory that moved without a rule still goes to
-  `unfiled`, silently, exactly as before; the rule has to be written first.
+- Nothing warns before a rebuild. A directory that moved without a rule still goes to `unfiled`, silently, exactly as before; the rule has to be written first.
 - Rules are per machine and edited by hand. There is no command that writes one.
-- A named `.scad-project` marker, which would stop a rename from orphaning future sessions,
-  is still open.
+- A named `.scad-project` marker, which would stop a rename from orphaning future sessions, is still open.
 
 ## [0.6.0] — 2026-09-27
 
-**The release where a launched session lands where you are looking.** A launch opened its own
-detached tmux session, so an agent ran in a window nobody watched, and the way back in was
-`claude --resume` typed by hand. That habit is what produced three separate bug reports: a second
-process on one session id, a `/rename` landing in the wrong registry file, and forked transcripts.
-`--window` and `--split` put the agent in the tmux session and the pane you are already in, and
-the launch record now names its pane by an id that survives being moved, so nothing downstream has
-to guess where a session went.
+**The release where a launched session lands where you are looking.** A launch opened its own detached tmux session, so an agent ran in a window nobody watched, and the way back in was `claude --resume` typed by hand. That habit is what produced three separate bug reports: a second process on one session id, a `/rename` landing in the wrong registry file, and forked transcripts. `--window` and `--split` put the agent in the tmux session and the pane you are already in, and the launch record now names its pane by an id that survives being moved, so nothing downstream has to guess where a session went.
 
 ### Added
 
-- `session launch --window [NAME]`: land the agent as a named window in the caller's tmux
-  session instead of a detached `scad-cl-HHMM` sibling. `NAME` defaults to the cwd basename.
-  Outside tmux, unchanged. The launch record's target becomes e.g. `main:7.0`.
-- `session launch --split`: land the agent in a pane beside the one the command was typed in,
-  in that window, rather than a new window or a detached session. The pane comes from
-  `$TMUX_PANE`, so it is exact. Outside tmux, unchanged.
-- `session launch --name NAME`: the session's display name, passed to `claude -n` and written
-  into the index row at launch, so a listing can tell several sessions apart before any of them
-  has taken a turn. Recorded for codex and kimi too, which have no flag of their own.
+- `session launch --window [NAME]`: land the agent as a named window in the caller's tmux session instead of a detached `scad-cl-HHMM` sibling. `NAME` defaults to the cwd basename. Outside tmux, unchanged. The launch record's target becomes e.g. `main:7.0`.
+- `session launch --split`: land the agent in a pane beside the one the command was typed in, in that window, rather than a new window or a detached session. The pane comes from `$TMUX_PANE`, so it is exact. Outside tmux, unchanged.
+- `session launch --name NAME`: the session's display name, passed to `claude -n` and written into the index row at launch, so a listing can tell several sessions apart before any of them has taken a turn. Recorded for codex and kimi too, which have no flag of their own.
 
 ### Changed
 
-- Spacing in the viewer's stylesheet uses the `--s1`…`--s5` scale wherever a value was already
-  exactly on it — seven declarations, byte-identical output. Nineteen off-scale values remain and
-  are left alone on purpose: snapping `.3rem` to `.25rem` changes how the page looks, CSS has no
-  test that would catch it, and the list belongs in front of someone who can see the page.
-- `scad view` puts a session's notes on its row, as a third block of the context fold beside
-  what it opened with and what it last said, and the separate Notes section is gone. A note was
-  previously findable only by scrolling to that section and matching session ids by eye, which is
-  a poor fate for the one tier that cannot be re-derived. Up to four per row, newest first, with
-  `+N more` beyond that. **Tag chips went with the section** — twelve per note across four notes
-  would have dominated every row; tags stay searchable through `notes ls --about` and
-  `search --notes`. The `/remember` hint the section used to carry moved to the page header, so
-  removing the section did not make the tier harder to discover.
-- `scad view` groups the all-sessions list by recency: Today, Yesterday, This week, This month,
-  Older, newest first, with a count per heading. This answers the standing question of whether
-  `--days` should default to something finite — grouping needs no threshold and hides nothing,
-  where a default would have had to be guessed and would cut rows off. Headings are built from
-  the filtered list, so one never outlives its rows.
-- `scad view` has one **Live** section where it had `Open now` and `Agent panes`. They were the
-  same rows sourced two ways — the registry names the session and not the place, tmux names the
-  place and guessed the occupant by directory — and the duplication was more visible under a
-  filter, not less. A live session now carries its own pane, resolved by process tree or by launch
-  record, and the only rows left are panes running an agent that nothing can name, which say so.
-  On this machine all 12 agent panes resolved, so the guess is gone rather than relabelled.
+- Spacing in the viewer's stylesheet uses the `--s1`…`--s5` scale wherever a value was already exactly on it — seven declarations, byte-identical output. Nineteen off-scale values remain and are left alone on purpose: snapping `.3rem` to `.25rem` changes how the page looks, CSS has no test that would catch it, and the list belongs in front of someone who can see the page.
+- `scad view` puts a session's notes on its row, as a third block of the context fold beside what it opened with and what it last said, and the separate Notes section is gone. A note was previously findable only by scrolling to that section and matching session ids by eye, which is a poor fate for the one tier that cannot be re-derived. Up to four per row, newest first, with `+N more` beyond that. **Tag chips went with the section** — twelve per note across four notes would have dominated every row; tags stay searchable through `notes ls --about` and `search --notes`. The `/remember` hint the section used to carry moved to the page header, so removing the section did not make the tier harder to discover.
+- `scad view` groups the all-sessions list by recency: Today, Yesterday, This week, This month, Older, newest first, with a count per heading. This answers the standing question of whether `--days` should default to something finite — grouping needs no threshold and hides nothing, where a default would have had to be guessed and would cut rows off. Headings are built from the filtered list, so one never outlives its rows.
+- `scad view` has one **Live** section where it had `Open now` and `Agent panes`. They were the same rows sourced two ways — the registry names the session and not the place, tmux names the place and guessed the occupant by directory — and the duplication was more visible under a filter, not less. A live session now carries its own pane, resolved by process tree or by launch record, and the only rows left are panes running an agent that nothing can name, which say so. On this machine all 12 agent panes resolved, so the guess is gone rather than relabelled.
 
 ### Fixed
 
-- A launch record now holds the pane's **id** (`%45`) as well as its index path, and every
-  reader resolves through the id: `session resume`'s attach, `session show`, `session send`, and
-  the viewer's pane-to-session proof. An index path is a snapshot — a pane joined into another
-  window keeps its id and goes from `main:11.0` to `main:0.1` — and the resume path is where a
-  stale target opens a second process on one session id. Records without an id behave as before.
-- `scad view` showed a session once per process holding it, so five sessions appeared twice in
-  "Open now" (19 rows for 14 sessions, measured 2026-09-24). One row per session now, with the
-  other holders named on it.
-- A launch-seeded index row carries the launch time. `session ls` orders by `started DESC` and
-  every one of these rows had it NULL, so the session you started ten seconds ago sorted to the
-  bottom of the listing.
-- `session ls --json` `live` gains `also_held_by`: the other live processes on that session id,
-  each with the pane it sits in. Six ids were doubly held on this machine and nothing said so.
+- A launch record now holds the pane's **id** (`%45`) as well as its index path, and every reader resolves through the id: `session resume`'s attach, `session show`, `session send`, and the viewer's pane-to-session proof. An index path is a snapshot — a pane joined into another window keeps its id and goes from `main:11.0` to `main:0.1` — and the resume path is where a stale target opens a second process on one session id. Records without an id behave as before.
+- `scad view` showed a session once per process holding it, so five sessions appeared twice in "Open now" (19 rows for 14 sessions, measured 2026-09-24). One row per session now, with the other holders named on it.
+- A launch-seeded index row carries the launch time. `session ls` orders by `started DESC` and every one of these rows had it NULL, so the session you started ten seconds ago sorted to the bottom of the listing.
+- `session ls --json` `live` gains `also_held_by`: the other live processes on that session id, each with the pane it sits in. Six ids were doubly held on this machine and nothing said so.
 
 ## [0.5.0] — 2026-09-18
 
-**The release where scad's index became an interface rather than a file.** 0.4.0 added the read
-tier; the first consumer of it, orglens, then reached past the CLI and queried the sqlite file
-directly, which made the schema a contract nobody had written down. This release writes it down:
-`session ls --json` carries what a consumer was fetching, `notes ls --about` answers the question
-a project join could not, and the index is in WAL mode so a reader is never stuck behind a
-reindex. It also closes the one bug 0.4.0 shipped with: the resume command a launch printed was
-the wrong command for the moment it was printed.
+**The release where scad's index became an interface rather than a file.** 0.4.0 added the read tier; the first consumer of it, orglens, then reached past the CLI and queried the sqlite file directly, which made the schema a contract nobody had written down. This release writes it down: `session ls --json` carries what a consumer was fetching, `notes ls --about` answers the question a project join could not, and the index is in WAL mode so a reader is never stuck behind a reindex. It also closes the one bug 0.4.0 shipped with: the resume command a launch printed was the wrong command for the moment it was printed.
 
 ### Added
 
-- `session ls --json` is now the export a consumer reads instead of the index file. Rows carry
-  `cwd`, `ended`, `needs` and `parent_session_id`, plus `last_turn` (the newest turn with text,
-  clipped to 240 characters) and `live` (pid, name, status from Claude's process registry, or
-  null). Filed by orglens as the five query shapes it ran against `~/.scad/index.sqlite`.
+- `session ls --json` is now the export a consumer reads instead of the index file. Rows carry `cwd`, `ended`, `needs` and `parent_session_id`, plus `last_turn` (the newest turn with text, clipped to 240 characters) and `live` (pid, name, status from Claude's process registry, or null). Filed by orglens as the five query shapes it ran against `~/.scad/index.sqlite`.
 - `session ls --parent <id>`: a session's subagents and workflow agents.
-- `session send <id> TEXT | --file PATH`: a later turn into an open session scad launched. The
-  text goes into the session's pane as one bracketed paste (`tmux load-buffer` then
-  `paste-buffer -p`), the echo is waited for, then it is submitted. Measured 2026-09-18: raw
-  `tmux send-keys` of a 1,442-character turn lost its first ~200 characters in the Claude Code
-  TUI; the paste delivered 7,806 bytes over 62 lines verbatim. A closed session is refused with
-  the resume command; a pane at a dialog is refused unanswered. `session launch --prompt` now
-  uses the same transport. Codex and kimi panes are untested with it.
-- `session launch --add-dir PATH`, repeatable. Claude-only, and refused rather than dropped for
-  codex and kimi. Recorded in the launch record as `add_dirs`.
+- `session send <id> TEXT | --file PATH`: a later turn into an open session scad launched. The text goes into the session's pane as one bracketed paste (`tmux load-buffer` then `paste-buffer -p`), the echo is waited for, then it is submitted. Measured 2026-09-18: raw `tmux send-keys` of a 1,442-character turn lost its first ~200 characters in the Claude Code TUI; the paste delivered 7,806 bytes over 62 lines verbatim. A closed session is refused with the resume command; a pane at a dialog is refused unanswered. `session launch --prompt` now uses the same transport. Codex and kimi panes are untested with it.
+- `session launch --add-dir PATH`, repeatable. Claude-only, and refused rather than dropped for codex and kimi. Recorded in the launch record as `add_dirs`.
 - `session notes --current`, resolved the same way `session note --current` writes.
-- `notes ls --about NAME`: notes naming NAME in `tags` or `entities`, as the topic, or as the
-  project. By project alone, three of eight notes about orglens were found; this finds all.
+- `notes ls --about NAME`: notes naming NAME in `tags` or `entities`, as the topic, or as the project. By project alone, three of eight notes about orglens were found; this finds all.
 - An index on `turns(session_id, ts)`, for "the last thing said" per session.
-- `notes ls --json` rows carry `entities`, and `--about` is repeatable; with several names each
-  JSON row carries `about`, the names it matched, so one call serves a consumer that joins per
-  name. Asked by orglens after adopting the export.
+- `notes ls --json` rows carry `entities`, and `--about` is repeatable; with several names each JSON row carries `about`, the names it matched, so one call serves a consumer that joins per name. Asked by orglens after adopting the export.
 
 ### Changed
 
-- `scad session send` is the host-session turn. It was a hidden alias of `scad run send`, the
-  container turn, from the v2.1 rename; `run send` is unchanged.
-- The index opens in WAL mode. A reader in another process is no longer blocked for the whole
-  of a reindex; one external view had stalled 600s behind one.
+- `scad session send` is the host-session turn. It was a hidden alias of `scad run send`, the container turn, from the v2.1 rename; `run send` is unchanged.
+- The index opens in WAL mode. A reader in another process is no longer blocked for the whole of a reindex; one external view had stalled 600s behind one.
 
 ### Fixed
 
-- A source file the archive had forked (rewritten at the source, so a `<name>.<mtime>.jsonl`
-  copy sits beside the original) was parsed from zero and appended on every pass, alternating
-  between the two copies. Codex rewrote 133 rollouts in place on 2026-09-15; each `scad view`
-  then added 6,320 duplicate turns and took ten seconds. Both copies now resolve to one row by
-  name; the older is skipped unopened and a newer fork replaces that session's turns once,
-  reported as "re-read from a rewritten source". Later passes re-read nothing.
-- `session ls --json` `live` is the newest registry entry for a session, by `updatedAt`. A
-  reattach leaves the first process's `<pid>.json` in place with both pids alive, and `/rename`
-  writes into the newer file; the older name was being reported.
-- A note line edited after it was indexed now reaches the index. The unknown-project warning on
-  `session note` invites exactly that edit, and the pass never re-read an existing line, so a
-  corrected note stayed unfindable by project until a rebuild. A changed note file is read whole
-  and its rows replaced when they no longer match its lines; a pure append is still an append.
-- `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the
-  session is certainly open. A second `claude --resume` on an open session is a second process on
-  one transcript: it appends its own entries, the chain forks, and every later resume follows the
-  fork until the original process exits. It prints `scad session resume <id>` instead, which
-  attaches while the pane is open and resumes once it has closed. The launch record still carries
-  the raw command for then.
-- `session resume --print` warns on stderr when the session is open in a recorded pane or in
-  Claude's process registry. stdout is unchanged; it is what the viewer copies.
-- `scad view` no longer shows one session twice when two agent panes share a directory. A
-  claude pane is matched to its session through the process tree, from the pane's shell pid to
-  the pid Claude's registry names, and a scad-launched pane through its launch record; both are
-  exact and for any pane. Only a pane neither can name falls back to the newest session in its
-  directory, and the card now says "best guess by directory" when it does.
+- A source file the archive had forked (rewritten at the source, so a `<name>.<mtime>.jsonl` copy sits beside the original) was parsed from zero and appended on every pass, alternating between the two copies. Codex rewrote 133 rollouts in place on 2026-09-15; each `scad view` then added 6,320 duplicate turns and took ten seconds. Both copies now resolve to one row by name; the older is skipped unopened and a newer fork replaces that session's turns once, reported as "re-read from a rewritten source". Later passes re-read nothing.
+- `session ls --json` `live` is the newest registry entry for a session, by `updatedAt`. A reattach leaves the first process's `<pid>.json` in place with both pids alive, and `/rename` writes into the newer file; the older name was being reported.
+- A note line edited after it was indexed now reaches the index. The unknown-project warning on `session note` invites exactly that edit, and the pass never re-read an existing line, so a corrected note stayed unfindable by project until a rebuild. A changed note file is read whole and its rows replaced when they no longer match its lines; a pure append is still an append.
+- `session launch` no longer prints `cd <cwd> && claude --resume <id>` at the one moment the session is certainly open. A second `claude --resume` on an open session is a second process on one transcript: it appends its own entries, the chain forks, and every later resume follows the fork until the original process exits. It prints `scad session resume <id>` instead, which attaches while the pane is open and resumes once it has closed. The launch record still carries the raw command for then.
+- `session resume --print` warns on stderr when the session is open in a recorded pane or in Claude's process registry. stdout is unchanged; it is what the viewer copies.
+- `scad view` no longer shows one session twice when two agent panes share a directory. A claude pane is matched to its session through the process tree, from the pane's shell pid to the pid Claude's registry names, and a scad-launched pane through its launch record; both are exact and for any pane. Only a pane neither can name falls back to the newest session in its directory, and the card now says "best guess by directory" when it does.
 
 ## [0.4.0] — 2026-09-09
 
-**The release where scad stopped being only a container dispatcher.** 0.3.0 could put a Claude
-agent in a container and get a branch back. This one adds a second tier that reads rather than
-runs: every agent trace on the machine is archived before it can be pruned, indexed into sqlite,
-and made searchable and browsable — for claude, codex and kimi alike, including sessions scad
-never launched. It also adds the one tier nothing can re-derive: durable notes written by
-`/remember`.
+**The release where scad stopped being only a container dispatcher.** 0.3.0 could put a Claude agent in a container and get a branch back. This one adds a second tier that reads rather than runs: every agent trace on the machine is archived before it can be pruned, indexed into sqlite, and made searchable and browsable — for claude, codex and kimi alike, including sessions scad never launched. It also adds the one tier nothing can re-derive: durable notes written by `/remember`.
 
-The two tiers share a project key and little else, and they are deliberately asymmetric: the read
-tier is multi-agent, the container tier remains Claude-only.
+The two tiers share a project key and little else, and they are deliberately asymmetric: the read tier is multi-agent, the container tier remains Claude-only.
 
-**Breaking:** the container verbs moved off `session` (`session start` → `run start`, `scad status`
-→ `scad run ls`); the old paths survive as hidden aliases. scad is no longer distributed as a
-Claude Code plugin. The `/remember` record shape changed — `span` and an authored `relation` are
-gone.
+**Breaking:** the container verbs moved off `session` (`session start` → `run start`, `scad status` → `scad run ls`); the old paths survive as hidden aliases. scad is no longer distributed as a Claude Code plugin. The `/remember` record shape changed — `span` and an authored `relation` are gone.
 
 ### Added — the read tier
 
-- `scad archive` — an append-only copy of every agent trace, taken *before* an agent prunes its
-  own history. Mirrors the source layout under `~/.scad/archive/` and carries a `DO-NOT-DELETE.md`
-  saying why. Reads claude, codex and kimi; a family that is absent from the machine is normal,
-  not an error
-- `scad reindex` — sqlite over `sessions` and `turns`, with FTS5 on turn text. Incremental by size
-  and mtime, resuming from `parsed_offset`, so an ordinary pass costs about a second.
-  `--rebuild` re-derives every table from the archive and refuses when any session's raw is
-  missing — the guard that stops a rebuild silently emptying the corpus
-- `scad session ls|show|read` — the indexed traces of every session on the machine, whether scad
-  started it or merely observed it. Filters for project, agent, kind, machine, grade, outcome and
-  date; `--json` throughout
-- `scad search <query>` — full-text search across every indexed turn. `--notes` searches the
-  authored tier instead, matching metadata rather than bodies
-- `scad view` — a static HTML browser over the index, answering the two questions worth asking:
-  who is waiting on you, and how do you get back in. A `file://` page with no server by design
-- `scad resolve`, `scad where`, `scad project ls|show` — a domain-free resolver by fixed
-  precedence, the project key computed from it, and an explanation of how any directory resolved.
-  `scad where` reports which rung answered, so a wrong answer is checkable rather than mysterious
-- **Durable notes.** `scad session note` appends one `/remember` capture to
-  `~/.scad/notes/<agent>/<session>.jsonl` — session-keyed, project-free, append-only, and the only
-  tier that cannot be re-derived from anything. `scad notes ls|read` browse them; the store is
-  indexed but the file is truth, readable before anything is indexed and after a `--rebuild`
-- Notes are classified by `kind` — `info`, `handoff`, `bug`, `request`, `verification` — with
-  `scad notes ls --kind handoff` as the "where did this leave off" query. An authored `project`
-  files a note against a *different* project than the session it was written in, so a bug noticed
-  while working elsewhere reaches the people looking for it
-- `scad session launch --agent claude|codex|kimi` — start an interactive agent at a directory and
-  learn which session it became, with the exact resume command handed back. tmux is required and
-  not as a convenience: a non-TTY stdout alone makes Claude stamp a session `sdk-cli`, which its
-  own `/resume` picker then hides permanently
+- `scad archive` — an append-only copy of every agent trace, taken *before* an agent prunes its own history. Mirrors the source layout under `~/.scad/archive/` and carries a `DO-NOT-DELETE.md` saying why. Reads claude, codex and kimi; a family that is absent from the machine is normal, not an error
+- `scad reindex` — sqlite over `sessions` and `turns`, with FTS5 on turn text. Incremental by size and mtime, resuming from `parsed_offset`, so an ordinary pass costs about a second. `--rebuild` re-derives every table from the archive and refuses when any session's raw is missing — the guard that stops a rebuild silently emptying the corpus
+- `scad session ls|show|read` — the indexed traces of every session on the machine, whether scad started it or merely observed it. Filters for project, agent, kind, machine, grade, outcome and date; `--json` throughout
+- `scad search <query>` — full-text search across every indexed turn. `--notes` searches the authored tier instead, matching metadata rather than bodies
+- `scad view` — a static HTML browser over the index, answering the two questions worth asking: who is waiting on you, and how do you get back in. A `file://` page with no server by design
+- `scad resolve`, `scad where`, `scad project ls|show` — a domain-free resolver by fixed precedence, the project key computed from it, and an explanation of how any directory resolved. `scad where` reports which rung answered, so a wrong answer is checkable rather than mysterious
+- **Durable notes.** `scad session note` appends one `/remember` capture to `~/.scad/notes/<agent>/<session>.jsonl` — session-keyed, project-free, append-only, and the only tier that cannot be re-derived from anything. `scad notes ls|read` browse them; the store is indexed but the file is truth, readable before anything is indexed and after a `--rebuild`
+- Notes are classified by `kind` — `info`, `handoff`, `bug`, `request`, `verification` — with `scad notes ls --kind handoff` as the "where did this leave off" query. An authored `project` files a note against a *different* project than the session it was written in, so a bug noticed while working elsewhere reaches the people looking for it
+- `scad session launch --agent claude|codex|kimi` — start an interactive agent at a directory and learn which session it became, with the exact resume command handed back. tmux is required and not as a convenience: a non-TTY stdout alone makes Claude stamp a session `sdk-cli`, which its own `/resume` picker then hides permanently
 - `scad session resume <id>` — attach if the session is open, resume it if not
-- `scad session launch --json` — the launch record on stdout and nothing else, so a caller reads
-  the session id from a contract rather than by scraping human-facing lines. Human output moves to
-  stderr under this flag; a launch that resolves no id still exits non-zero
+- `scad session launch --json` — the launch record on stdout and nothing else, so a caller reads the session id from a contract rather than by scraping human-facing lines. Human output moves to stderr under this flag; a launch that resolves no id still exits non-zero
 
 ### Added
 
@@ -355,56 +174,22 @@ gone.
 - `harvest --merge` / `finish --merge` — fast-forward-only merge of fetched branches per repo
 
 ### Changed
-- **BREAKING — the container verbs moved off `session`.** `session start|stop|clean|attach|inject|
-  jobs|logs|send|refresh` are now `run …`, and `scad status` is `scad run ls`. A run is a
-  container and a session is a trace; one noun could not keep meaning both. The old paths remain
-  as **hidden aliases** — working, absent from `--help`
-- **BREAKING — the `/remember` record changed shape.** `span` is gone (it was written on every
-  record and read by no machine), and `relation` is no longer authored: it is derived at read time
-  from `parent` and the topics already in the thread. `kind` and an optional `project` take their
-  place. Older records keep working — `kind` reads through a default and `relation` is computed
-  per query — but a writer must stop emitting the two removed fields
+- **BREAKING — the container verbs moved off `session`.** `session start|stop|clean|attach|inject| jobs|logs|send|refresh` are now `run …`, and `scad status` is `scad run ls`. A run is a container and a session is a trace; one noun could not keep meaning both. The old paths remain as **hidden aliases** — working, absent from `--help`
+- **BREAKING — the `/remember` record changed shape.** `span` is gone (it was written on every record and read by no machine), and `relation` is no longer authored: it is derived at read time from `parent` and the topics already in the thread. `kind` and an optional `project` take their place. Older records keep working — `kind` reads through a default and `relation` is computed per query — but a writer must stop emitting the two removed fields
 - **scad is no longer a Claude Code plugin.** `plugin.json`, `marketplace.json` and `register_claude_plugin()` are gone; skills reach every agent instead of one. The plugin never installed the binary — `install.sh` always did that — so nothing moves but distribution. Install *deregisters* any existing plugin first: plugin skills and directory skills **stack** rather than override, so a machine carrying both offered every skill twice under two names
 - `scad session note --current` resolves the session from the id the agent exports (`CLAUDE_CODE_SESSION_ID`, `CODEX_THREAD_ID`) rather than by scanning directories and comparing mtimes — exact instead of inferred, and it settles the case of several sessions sharing one cwd by removing the ambiguity rather than arbitrating it. Selected by `--agent`; the cwd scan remains a fallback
 - `gpu: true` now errors on macOS — no GPU passthrough into a Lima VM
 
 ### Fixed
-- **Launching into an untrusted directory killed the session.** Claude Code's folder-trust dialog
-  is an arrow menu, so the numbered-option matcher found nothing and the gate marker missed too —
-  the pane read as ready, the priming turn was typed into the dialog, and the Enter that submits a
-  prompt answered its highlighted default, `No, exit`. Claude quit, and because no transcript was
-  written the session was absent from `/resume` as well. Compounding it, only the codex leg
-  consulted the pane state at all; claude and kimi discarded it and sent regardless. All three legs
-  now stop, and `session launch` exits non-zero naming the dialog, the live pane, and the fact that
-  nothing was sent and no key was pressed
-- **A session's project label wandered even after cwd was pinned.** The earlier fix stopped `cwd`
-  moving and left `project = excluded.project` one line below — a plain assignment from the cwd of
-  whatever record a pass happened to parse. One row could therefore contradict itself: cwd in one
-  repository, project in another. Because `project` is the retrieval join key, a session's notes
-  fell out of their own project's listing. Both columns are now pinned the same way
-- **A session scad had just launched was invisible until the next `reindex`.** Launch wrote its
-  record and told the index nothing, so `session show` denied a session started minutes earlier
-  and checking your own run meant leaving scad for `tmux capture-pane`. Launch now seeds a
-  skeleton row; the archive pass upserts onto the same row and upgrades it
-- **A note was unfindable until someone reindexed.** `session note` wrote the file and left
-  indexing to the next pass — worst for a note cross-filed against another project, whose whole
-  purpose is that someone working elsewhere picks it up. Notes now index as they are written,
-  advancing the offset so the next pass does not re-append them
-- **`notes read` denied notes it had just listed.** It defaulted to the claude shard, so a codex or
-  kimi note answered "No notes for <id>" one line after appearing in `notes ls`. It now falls back
-  to whichever shard holds the session, and the listing shows the agent
-- **The `codex` skill told Codex to consult Codex.** Its *When NOT to Use* never said "you are
-  Codex", so a Codex session launched as an independent reviewer matched the skill and spawned
-  `codex exec` against itself — the same weights answering their own question. Surfaced by skills
-  shipping to every agent rather than to Claude alone
-- **`session launch --json` emitted a preamble before the record.** Human-facing `[scad]` lines
-  shared stdout with the JSON, so the output was not parseable as a whole
-- `session show` now reports when a session started, ended and how long it ran. The columns are
-  epoch **milliseconds**, and `datetime(ended,'unixepoch')` returns NULL rather than erroring on
-  them, so the conversion lives in one named place
-- Removed a dead `session_notes` in `index.py` that a second definition had been shadowing — the
-  two returned different types, so deleting the wrong one would have quietly changed every
-  caller's rows to dicts
+- **Launching into an untrusted directory killed the session.** Claude Code's folder-trust dialog is an arrow menu, so the numbered-option matcher found nothing and the gate marker missed too — the pane read as ready, the priming turn was typed into the dialog, and the Enter that submits a prompt answered its highlighted default, `No, exit`. Claude quit, and because no transcript was written the session was absent from `/resume` as well. Compounding it, only the codex leg consulted the pane state at all; claude and kimi discarded it and sent regardless. All three legs now stop, and `session launch` exits non-zero naming the dialog, the live pane, and the fact that nothing was sent and no key was pressed
+- **A session's project label wandered even after cwd was pinned.** The earlier fix stopped `cwd` moving and left `project = excluded.project` one line below — a plain assignment from the cwd of whatever record a pass happened to parse. One row could therefore contradict itself: cwd in one repository, project in another. Because `project` is the retrieval join key, a session's notes fell out of their own project's listing. Both columns are now pinned the same way
+- **A session scad had just launched was invisible until the next `reindex`.** Launch wrote its record and told the index nothing, so `session show` denied a session started minutes earlier and checking your own run meant leaving scad for `tmux capture-pane`. Launch now seeds a skeleton row; the archive pass upserts onto the same row and upgrades it
+- **A note was unfindable until someone reindexed.** `session note` wrote the file and left indexing to the next pass — worst for a note cross-filed against another project, whose whole purpose is that someone working elsewhere picks it up. Notes now index as they are written, advancing the offset so the next pass does not re-append them
+- **`notes read` denied notes it had just listed.** It defaulted to the claude shard, so a codex or kimi note answered "No notes for <id>" one line after appearing in `notes ls`. It now falls back to whichever shard holds the session, and the listing shows the agent
+- **The `codex` skill told Codex to consult Codex.** Its *When NOT to Use* never said "you are Codex", so a Codex session launched as an independent reviewer matched the skill and spawned `codex exec` against itself — the same weights answering their own question. Surfaced by skills shipping to every agent rather than to Claude alone
+- **`session launch --json` emitted a preamble before the record.** Human-facing `[scad]` lines shared stdout with the JSON, so the output was not parseable as a whole
+- `session show` now reports when a session started, ended and how long it ran. The columns are epoch **milliseconds**, and `datetime(ended,'unixepoch')` returns NULL rather than erroring on them, so the conversion lives in one named place
+- Removed a dead `session_notes` in `index.py` that a second definition had been shadowing — the two returned different types, so deleting the wrong one would have quietly changed every caller's rows to dicts
 - `--current` no longer files a note against another agent's session. Environment variables are inherited, so codex or kimi launched from a Claude session sees `CLAUDE_CODE_SESSION_ID`; resolution now refuses when the requested agent's own variable is absent instead of silently using the parent's id — wrong attribution in the one tier that can never be re-derived
 - Cumulative counters (`n_interrupts`, `n_tool_denials`, `n_errors`) survive an incremental reindex. They were overwritten with the tail's counts, so a session that was interrupted and then grew quietly reported zero; the values were recoverable only while raw survived
 - The test suite no longer depends on the developer's ambient git config — 17 tests failed on any machine with no global `user.email`
@@ -483,9 +268,7 @@ Session injection architecture — separates container lifecycle from Claude exe
 Initial pre-release.
 
 - Config-driven Docker sessions for Claude Code
-- Hierarchical CLI: `scad session` (start/stop/attach/clean/status/info/logs),
-  `scad code` (fetch/sync/refresh), `scad config` (list/view/edit/add/remove/new),
-  `scad project` (status), `scad build`, `scad gc`
+- Hierarchical CLI: `scad session` (start/stop/attach/clean/status/info/logs), `scad code` (fetch/sync/refresh), `scad config` (list/view/edit/add/remove/new), `scad project` (status), `scad build`, `scad gc`
 - Interactive (tmux) and headless (stream-json) session modes
 - Host-side local clones with auto-branching (`scad-{config}-{tag}-MonDD-HHMM`)
 - `--prompt` for interactive session with prompt pre-entered, `--headless` for fire-and-forget
