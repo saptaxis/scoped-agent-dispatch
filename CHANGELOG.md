@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- `scad session snapshot` records the open agent sessions: every Claude session, and the codex and kimi sessions started with `scad session launch`. Snapshots are written to `~/.scad/snapshots/`, sorted by project; the newest 50 are kept.
+- `scad session restore [FILE]` brings a snapshot's sessions back. It shows the plan, grouped by project, and asks once (`-y` to skip; `--skip` and `--only` take id prefixes; `--list` shows recent snapshots). Each session resumes in its own directory, as a split of the window it came from, or in a new window of that name. Sessions already open are not started again.
+
 ## [0.9.0] - 2026-10-07
 
 ### Changed

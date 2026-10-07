@@ -166,6 +166,19 @@ Every launch writes `~/.scad/launches/<session-id>.json` with the agent, cwd, pa
 
 A launched session is indexed immediately as a skeleton row. Its turns appear after the next index pass, where headless output is immediate.
 
+## Snapshot and restore
+
+```bash
+scad session snapshot              # record the open sessions
+scad session restore               # bring back the newest snapshot's sessions
+scad session restore --list        # recent snapshots
+scad session restore FILE --skip 3f --only 9a -y
+```
+
+A snapshot records every open Claude session, from Claude's own registry, and every codex and kimi session started with `scad session launch`, from its launch record. Other agent panes are listed as not restorable, since nothing names their session. Snapshots are taken only by hand, into `~/.scad/snapshots/open-<stamp>.json`; the newest 50 are kept. The file lists sessions by project, with each session's name, agent, id, directory, context fill, tmux session, window and pane.
+
+`restore` shows its plan, grouped by project, and asks once. A session that is open now is marked and never started a second time. Each session is resumed in its own directory, in the window it came from: split into that window if it exists, otherwise in a new window of that name, in its tmux session (created if missing). Windows `restore` creates are tiled. A session whose directory is gone resumes without changing directory, with a warning. Each restored pane gets a launch record, so `scad view` and `session resume` know where it is. One failure does not stop the others; the exit status is non-zero if any failed.
+
 ## Memos
 
 Traces are evidence: derived, rebuildable, and pruned by the agents themselves. Memos are self-report: what an agent decided was worth keeping. They cannot be re-derived, so they are stored as plain files and the database only indexes them. Until 0.9.0 they were called notes.

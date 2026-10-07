@@ -90,6 +90,8 @@ scad session send <id> "next turn"                  # into the open pane; --file
 scad session ls|show|read <id>                      # ls and show say how full each context is
 scad session ls --json                              # the export other programs read
 scad session memo --current                         # append a /memo-write capture
+scad session snapshot                               # record the open sessions, before a restart
+scad session restore                                # bring them back, each in its window
 
 # Corpus
 scad archive                                        # copy traces in, append-only
