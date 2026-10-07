@@ -1679,3 +1679,28 @@ class TestNearlyFull:
     def test_the_client_side_rows_mark_it_too(self, tmp_path):
         html = render(gather(connect(tmp_path / "i.sqlite"), [], set(), live_sessions=[]))
         assert "r.nearly_full" in html
+
+
+class TestALiveSessionsPaneIsExact:
+    """The registry names the pane a Claude session runs in. Measured 2026-10-07:
+    3 of 7 open sessions sat under a pane tmux reports as `zsh`, which the
+    directory match among agent panes never saw, so the Live section showed
+    them with no pane."""
+
+    def test_the_registry_pane_wins_over_a_directory_match(self, monkeypatch):
+        from scad.view import live_rows
+        monkeypatch.setattr("scad.live._process_parents", lambda: {})
+        sessions = [ClaudeSession("S1", 40333, cwd="/w", tmux_pane="%19")]
+        panes = [TmuxPane("main:3.3", "/w", "zsh", window="scad", pid=40324, pane_id="%19"),
+                 TmuxPane("main:3.2", "/w", "2.1.291", window="scad", pid=12815, pane_id="%7")]
+        (row,) = [r for r in live_rows(sessions, panes, [], set(), records=[]) if r["id"]]
+        assert row["reentry"]["target"] == "main:3.3"
+        assert row["reentry"]["note"] == ""
+        assert row["target"] == "main:3.3"
+
+    def test_without_a_registry_pane_the_process_tree_finds_a_shell_pane(self, monkeypatch):
+        from scad.live import session_pane
+        monkeypatch.setattr("scad.live._process_parents", lambda: {40333: 40324})
+        pane = session_pane(ClaudeSession("S1", 40333),
+                            [TmuxPane("main:3.3", "/w", "zsh", pid=40324)])
+        assert pane == "main:3.3"

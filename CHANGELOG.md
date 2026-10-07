@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `scad view` showed some open Claude sessions without their tmux pane: those whose pane tmux reports as the shell rather than Claude. A session's pane now comes from the pane id Claude records in its own registry, then from the process tree.
+
 ### Added
 
 - `scad session handoff ID ["ANGLE"]` asks an open session that scad launched or restored to write its handoff memo, and waits for it. It refuses a session whose context is nearly full.

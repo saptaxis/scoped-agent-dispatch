@@ -29,6 +29,7 @@ from scad.live import (
     newest_by_session,
     other_holders,
     pid_panes,
+    session_pane,
 )
 
 _RESUME = {"claude": "claude --resume {id}",
@@ -489,6 +490,10 @@ def open_now_rows(sessions: list[ClaudeSession], indexed: list[dict],
                              for h in others.get(session.session_id, ())],
         }
         re_ = reentry_for(row, panes, running)
+        exact = session_pane(session, panes)
+        if exact:
+            # The registry says where it is; the directory match only guessed.
+            re_ = Reentry("tmux", re_.command, "", target=exact, goto=_goto(exact))
         row["reentry"] = {"kind": re_.kind, "command": re_.command, "note": re_.note,
                           "target": re_.target, "goto": re_.goto}
         rows.append(row)
@@ -520,7 +525,7 @@ def live_rows(sessions: list[ClaudeSession], panes: list[TmuxPane],
     by_id = {r["id"]: r for r in indexed}
     occupied = set()
     for session in newest_by_session(sessions).values():
-        pane = pid_panes(agent_panes_, [session.pid]).get(session.pid)
+        pane = session_pane(session, panes)
         if pane:
             occupied.add(pane)
     for row in rows:

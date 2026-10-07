@@ -505,6 +505,22 @@ def claude_live_sessions(registry: Path | str | None = None) -> list[ClaudeSessi
     return sorted(sessions, key=lambda s: (-s.started_at, s.session_id))
 
 
+def session_pane(session: ClaudeSession, panes: list[TmuxPane],
+                 parents: dict[int, int] | None = None) -> str | None:
+    """The pane a live Claude session runs in, as a target, or None.
+
+    The registry's own pane id first: Claude records it (`"tmux": "main:@4.%19"`),
+    and a pane id names the pane however its window moves. Then the process
+    tree, over every pane, not only those whose command looks like an agent: a
+    pane tmux reports as `zsh` can still hold one (3 of 7 on 2026-10-07).
+    """
+    if session.tmux_pane:
+        for pane in panes:
+            if pane.pane_id == session.tmux_pane:
+                return pane.target
+    return pid_panes(panes, [session.pid], parents).get(session.pid)
+
+
 def newest_by_session(sessions: list[ClaudeSession]) -> dict[str, ClaudeSession]:
     """One entry per session id: the one written most recently.
 

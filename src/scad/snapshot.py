@@ -78,7 +78,7 @@ def _indexed(conn, ids) -> dict[str, dict]:
 def gather(conn, sessions: list, panes: list, records: list) -> dict:
     """The snapshot as a dict: what is open now, and where."""
     from scad.aliases import current_cwd
-    from scad.live import newest_by_session, pid_panes
+    from scad.live import newest_by_session, session_pane
     from scad.view import live_rows
 
     indexed = _indexed(conn, [s.session_id for s in sessions] +
@@ -101,10 +101,7 @@ def gather(conn, sessions: list, panes: list, records: list) -> dict:
         if claude is not None:
             # The registry's own pane id first; then the process tree, over every
             # pane, since a pane tmux reports as the shell holds agents too.
-            by_id = next((p for p in panes if claude.tmux_pane and p.pane_id == claude.tmux_pane),
-                         None)
-            target = (by_id.target if by_id
-                      else pid_panes(panes, [claude.pid]).get(claude.pid))
+            target = session_pane(claude, panes)
             found_by = "registry"
         else:
             target = row.get("target")
