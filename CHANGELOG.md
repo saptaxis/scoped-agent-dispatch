@@ -4,6 +4,11 @@
 
 ### Added
 
+- `scad session handoff ID ["ANGLE"]` asks an open session that scad launched or restored to write its handoff memo, and waits for it. It refuses a session whose context is nearly full.
+- `scad session launch --from ID` starts a fresh session that picks up ID's work: it reads ID's newest handoff memo and every turn after it, or ID's last 200 text turns when there is no handoff, writes a handoff memo, then follows `--prompt`. The directory defaults to ID's.
+- `scad session read --last N` reads a session's last N turns, and `--since TIME` the turns at or after a time (ISO 8601 or epoch milliseconds).
+- `scad view` marks a session whose context is nearly full: 80% of its window, or 160k tokens when the window is unknown.
+- `/memo-recall` reads the turns written after the memo it starts from.
 - `scad session snapshot` records the open agent sessions: every Claude session, and the codex and kimi sessions started with `scad session launch`. Snapshots are written to `~/.scad/snapshots/`, sorted by project; the newest 50 are kept.
 - `scad session restore [FILE]` brings a snapshot's sessions back. It shows the plan, grouped by project, and asks once (`-y` to skip; `--skip` and `--only` take id prefixes; `--list` shows recent snapshots). Each session resumes in its own directory, as a split of the window it came from, or in a new window of that name. Sessions already open are not started again.
 

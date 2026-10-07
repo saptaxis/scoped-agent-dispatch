@@ -166,6 +166,22 @@ Every launch writes `~/.scad/launches/<session-id>.json` with the agent, cwd, pa
 
 A launched session is indexed immediately as a skeleton row. Its turns appear after the next index pass, where headless output is immediate.
 
+## Handoffs
+
+```bash
+scad session handoff <id> "frame it for the release"   # ask a session for its handoff
+scad session launch --agent claude --from <id>          # a fresh session picks up its work
+scad session launch --agent claude --from <id> --prompt "prepare the docs instead"
+scad session read <id> --kind text --last 200           # a session's last turns
+scad session read <id> --kind text --since 2026-10-07T12:00:00+05:30
+```
+
+`session handoff` types `/memo-handoff ANGLE` into the session's pane and waits for the handoff memo (up to `--timeout`, 600 seconds by default). It works for sessions scad launched or restored, since those have a pane scad can type into, and it refuses a session whose context is nearly full.
+
+A session is nearly full at 80% of its context window, or at 160k tokens when the window is unknown. `scad view` marks it, so a handoff can be written while there is still room.
+
+`session launch --from` starts a fresh session in the source session's directory and gives it its first turn: read the source's newest handoff memo and every turn written after it, or its last 200 text turns when it has no handoff; write a handoff memo; then follow `--prompt`, or continue the work. The source does not have to write anything, so this works on a session too full to write its own handoff.
+
 ## Snapshot and restore
 
 ```bash
