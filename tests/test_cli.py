@@ -4604,3 +4604,15 @@ class TestTabCompletion:
             cmd = cmd.commands[word]
         p = next(p for p in cmd.params if p.name == param)
         assert p._custom_shell_complete.__name__ == completer
+
+
+class TestSplitTakesAWindow:
+    @patch("scad.cli.launch_agent")
+    def test_bare_split_is_the_callers_pane_and_a_value_names_a_window(self, mock_launch,
+                                                                        runner, tmp_path):
+        mock_launch.return_value = {"session_id": "S", "tmux": "box:1.1", "agent": "claude"}
+        base = ["session", "launch", "--agent", "claude", "--cwd", str(tmp_path)]
+        runner.invoke(main, base + ["--split"])
+        assert mock_launch.call_args.kwargs["split"] is True
+        runner.invoke(main, base + ["--split", "orglens"])
+        assert mock_launch.call_args.kwargs["split"] == "orglens"

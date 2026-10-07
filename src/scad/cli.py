@@ -2393,8 +2393,10 @@ def _exec(argv: list[str]) -> None:
 @click.option("--window", default=None, is_flag=False, flag_value="",
               help="Land the agent as a named window in this tmux session instead of a "
                    "detached one. Bare --window names it after the directory.")
-@click.option("--split", is_flag=True,
-              help="Land the agent in a pane beside this one, in the window you are in.")
+@click.option("--split", default=None, is_flag=False, flag_value="",
+              help="Land the agent in a pane beside this one. With a value, split that "
+                   "window's active pane instead: a window name (orglens) or a target "
+                   "(main:4).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
@@ -2414,6 +2416,8 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as
       kimi     read back from its own index line, confirmed by workDir
       codex    read off the rollout that the first turn creates
     """
+    # Bare --split arrives as "" (the caller's pane); a value names a window.
+    split = True if split == "" else split
     target_cwd = Path(cwd) if cwd else Path.cwd()
 
     # Under --json, stdout is a data channel and nothing else may be on it.

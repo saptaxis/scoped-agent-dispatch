@@ -628,6 +628,58 @@ class TestLaunching:
         assert record["pane_id"] in panes and record["pane_id"] != caller
         assert record["tmux"].startswith("splitbox:")
 
+    def _windows(self, *names):
+        """A tmux session `box` on the test socket with one window per name."""
+        tmux = ["tmux", "-L", TEST_SOCKET]
+        subprocess.run(tmux + ["new-session", "-d", "-s", "box", "-n", names[0],
+                               "-x", "80", "-y", "24"], capture_output=True)
+        for n in names[1:]:
+            subprocess.run(tmux + ["new-window", "-d", "-t", "box:", "-n", n],
+                           capture_output=True)
+
+    def _panes_in(self, target):
+        return subprocess.run(["tmux", "-L", TEST_SOCKET, "list-panes", "-t", target,
+                               "-F", "#{pane_id}"], capture_output=True, text=True).stdout.split()
+
+    def test_split_into_a_window_by_name(self, tmp_path, monkeypatch):
+        """`--split orglens` lands beside the active pane of the window called
+        orglens, wherever the command was typed."""
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        self._windows("scad", "orglens")
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+        record = launch("claude", tmp_path, binary=binary, split="orglens")
+        panes = self._panes_in("box:orglens")
+        assert len(panes) == 2 and record["pane_id"] in panes
+        assert len(self._panes_in("box:scad")) == 1
+
+    def test_split_into_a_window_by_target(self, tmp_path, monkeypatch):
+        from scad.launch import launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        self._windows("scad", "orglens")
+        monkeypatch.delenv("TMUX_PANE", raising=False)
+        record = launch("claude", tmp_path, binary=binary, split="box:scad")
+        assert record["pane_id"] in self._panes_in("box:scad")
+
+    def test_two_windows_with_the_name_are_refused_naming_both(self, tmp_path):
+        from scad.launch import LaunchError, launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        self._windows("docs", "docs")
+        with pytest.raises(LaunchError) as exc:
+            launch("claude", tmp_path, binary=binary, split="docs")
+        assert "box:0" in str(exc.value) and "box:1" in str(exc.value)
+
+    def test_no_window_with_the_name_is_refused(self, tmp_path):
+        from scad.launch import LaunchError, launch
+
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        self._windows("scad")
+        with pytest.raises(LaunchError, match="no tmux window named 'nope'"):
+            launch("claude", tmp_path, binary=binary, split="nope")
+
     def test_split_without_a_caller_pane_falls_back(self, tmp_path, monkeypatch):
         from scad.launch import launch
 

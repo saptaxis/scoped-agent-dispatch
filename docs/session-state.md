@@ -226,6 +226,7 @@ scad session launch --agent claude --cwd . --json    # the launch record, for sc
 scad session launch --agent claude --cwd . --add-dir ../docs   # more directories it may work in
 scad session launch --agent claude --window triage --name "triage loop"   # a window here, named
 scad session launch --agent claude --split                     # a pane beside this one
+scad session launch --agent claude --split orglens             # a pane in the window named orglens
 scad session resume <id>                             # attach if open, resume if closed
 scad session send <id> "next turn"                  # into the open pane; --file for a long one
 scad session resume <id> --print                     # just the command
@@ -254,6 +255,9 @@ typed in, in the window you already have arranged. The pane comes from
 `$TMUX_PANE`, which tmux exports into every pane, so it is exact rather than
 matched. Taking the caller's pane over instead was considered and not built: the
 process in it is the shell running scad, so scad would be killing its own parent.
+`--split NAME` splits another window's active pane instead: a window name, matched
+across every tmux session, or a target such as `main:4`. Two windows with that
+name are refused, naming both.
 
 `--name NAME` sets the session's display name. It goes into the index row at
 launch, so a listing can tell several sessions apart before any of them has

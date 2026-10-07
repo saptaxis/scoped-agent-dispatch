@@ -286,6 +286,31 @@ def split_pane(caller: str, cwd: Path, command: str) -> str:
     return result.stdout.strip()
 
 
+def window_pane(spec: str) -> str:
+    """The active pane of the window `spec` names, as a pane id.
+
+    `spec` is a target (`main:4`, anything with a colon), passed to tmux as
+    written, or a window name matched exactly across every tmux session. Two
+    windows with that name are refused, naming both: picking the first would
+    put an agent somewhere the human did not mean, and they can say `main:4`.
+    """
+    if ":" in spec:
+        pane = pane_id_of(spec)
+        if not pane:
+            raise LaunchError(f"tmux has no window {spec!r} to split.")
+        return pane
+    listed = _tmux(["list-windows", "-a", "-F",
+                    "#{session_name}:#{window_index}\t#{window_name}\t#{pane_id}"])
+    hits = [line.split("\t") for line in listed.stdout.splitlines()
+            if line.count("\t") == 2 and line.split("\t")[1] == spec]
+    if not hits:
+        raise LaunchError(f"There is no tmux window named {spec!r} to split.")
+    if len(hits) > 1:
+        raise LaunchError(f"{len(hits)} tmux windows are named {spec!r} "
+                          f"({', '.join(h[0] for h in hits)}); say which, as one of those.")
+    return hits[0][2]
+
+
 def pane_id_of(target: str) -> str | None:
     """The pane id behind an index path, or None if it does not resolve."""
     result = _tmux(["display-message", "-p", "-t", target, "#{pane_id}"])
@@ -804,7 +829,7 @@ def _resolve_codex(target, before, prompt, say) -> tuple:
 
 def launch(agent: str, cwd, *, prompt: str | None = None,
            binary: str | None = None, say=None, add_dirs=(),
-           name: str | None = None, window=None, split: bool = False) -> dict:
+           name: str | None = None, window=None, split: bool | str = False) -> dict:
     """Start an interactive agent in tmux and record which session it became.
 
     Detached: the pane is left running and the caller keeps its terminal.
@@ -861,7 +886,13 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
     if name and agent == "claude":
         command += f" -n {shlex.quote(name)}"
     wanted = window_name_for(window, cwd)
-    here = caller_pane() if split else None
+    # `split` is True for the caller's own pane, or names a window to split;
+    # a named window is resolved before anything starts, so a bad name costs
+    # nothing.
+    if isinstance(split, str) and split:
+        here = window_pane(split)
+    else:
+        here = caller_pane() if split else None
     pane = None
     if here:
         pane = split_pane(here, cwd, command)
