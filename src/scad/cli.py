@@ -3263,6 +3263,20 @@ def project_show(name, limit):
                    f"{(r['title'] or '')[:52]}")
 
 
+def _epoch_ms_arg(value: str, flag: str) -> int:
+    """An ISO 8601 time or epoch milliseconds, as epoch ms. A usage error otherwise."""
+    if value.isdigit():
+        return int(value)
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        raise click.BadParameter(f"{value!r} is neither ISO 8601 nor epoch milliseconds.",
+                                 param_hint=flag) from None
+    if parsed.tzinfo is None:
+        parsed = parsed.astimezone()
+    return int(parsed.timestamp() * 1000)
+
+
 @session.command("read")
 @click.argument("session_id", shell_complete=_complete_sessions)
 @click.option("--kind", default=None,
@@ -3270,12 +3284,16 @@ def project_show(name, limit):
               help="Only this kind of turn — e.g. --kind text to skip tool noise.")
 @click.option("--role", default=None, help="Only this role (user, assistant, tool).")
 @click.option("--limit", default=None, type=int, help="Stop after N turns.")
-def session_read(session_id, kind, role, limit):
+@click.option("--last", default=None, type=int, help="Only the last N turns (after other filters).")
+@click.option("--since", default=None,
+              help="Only turns at or after this time: ISO 8601, or epoch milliseconds.")
+def session_read(session_id, kind, role, limit, last, since):
     """Print a session's turns in order."""
     conn = index_connect()
     if session_row(conn, session_id) is None:
         raise click.ClickException(f"No session {session_id} in the index.")
-    rows = session_turns(conn, session_id, kind=kind, role=role, limit=limit)
+    rows = session_turns(conn, session_id, kind=kind, role=role, limit=limit, last=last,
+                         since=_epoch_ms_arg(since, "--since") if since else None)
     if not rows:
         click.echo("[scad] No turns — this session may be a skeleton (no transcript).")
         return

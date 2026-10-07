@@ -4730,3 +4730,36 @@ class TestSessionRestore:
         monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
         result = runner.invoke(main, ["session", "restore"])
         assert result.exit_code == 1 and "scad session snapshot" in result.output
+
+
+class TestSessionReadTail:
+    def _conn(self, tmp_path, monkeypatch):
+        from scad.index import append_turns, connect, upsert_session
+        from scad.records import SessionRecord, TurnRecord
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        conn = connect(tmp_path / ".scad" / "index.sqlite")
+        upsert_session(conn, SessionRecord(id="S1", kind="main", agent="claude",
+                                           source="claude-transcript"),
+                       machine="m", project="p", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        append_turns(conn, "S1", [TurnRecord(ts=1_791_000_000_000 + 1000 * i, role="user",
+                                             kind="text", text=f"turn-{i}") for i in range(5)])
+
+    def test_last(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "read", "S1", "--last", "2"]).output
+        assert "turn-3" in out and "turn-4" in out and "turn-2" not in out
+
+    def test_since_takes_an_iso_time_or_epoch_ms(self, runner, tmp_path, monkeypatch):
+        from datetime import datetime, timezone
+        self._conn(tmp_path, monkeypatch)
+        iso = datetime.fromtimestamp(1_791_000_003, timezone.utc).isoformat()
+        out = runner.invoke(main, ["session", "read", "S1", "--since", iso]).output
+        assert "turn-3" in out and "turn-2" not in out
+        out = runner.invoke(main, ["session", "read", "S1", "--since", "1791000004000"]).output
+        assert "turn-4" in out and "turn-3" not in out
+
+    def test_a_bad_since_is_a_usage_error(self, runner, tmp_path, monkeypatch):
+        self._conn(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "read", "S1", "--since", "yesterday"])
+        assert result.exit_code == 2

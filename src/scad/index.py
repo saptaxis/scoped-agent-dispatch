@@ -1084,9 +1084,18 @@ def search_turns(conn, query: str, *, project=None, kind=None, limit: int = 20):
     ).fetchall()
 
 
-def session_turns(conn, session_id: str, *, kind=None, role=None, limit=None):
-    """Read a session's turns in order."""
+def session_turns(conn, session_id: str, *, kind=None, role=None, limit=None,
+                  last=None, since=None):
+    """Read a session's turns in order.
+
+    `limit` counts from the start; `last` takes the final N, still in order,
+    which is the end a long session stopped at. `since` (epoch ms, inclusive)
+    is how a handoff is followed by every turn written after it.
+    """
     where, params = ["session_id = ?"], [session_id]
+    if since is not None:
+        where.append("ts >= ?")
+        params.append(int(since))
     if kind:
         where.append("kind = ?")
         params.append(kind)
@@ -1095,7 +1104,10 @@ def session_turns(conn, session_id: str, *, kind=None, role=None, limit=None):
         params.append(role)
     sql = (f"SELECT idx, ts, role, kind, tool_name, text, truncated FROM turns "
            f"WHERE {' AND '.join(where)} ORDER BY idx")
-    if limit:
+    if last:
+        sql = f"SELECT * FROM ({sql} DESC LIMIT ?) ORDER BY idx"
+        params.append(last)
+    elif limit:
         sql += " LIMIT ?"
         params.append(limit)
     return conn.execute(sql, params).fetchall()
