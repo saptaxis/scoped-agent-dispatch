@@ -79,18 +79,16 @@ class TestInstallScript:
         )
         assert str(custom_home) in result.stdout
 
-    def test_no_zshrc_skips_completions(self, tmp_path):
-        """When no .zshrc exists, completions are skipped."""
+    def test_dry_run_says_completion_goes_to_a_file(self, tmp_path):
+        """No rc file is edited any more: the completion scripts are written to
+        SCAD_HOME and the line to source them is printed."""
         script = Path(__file__).parent.parent / "install.sh"
         env = os.environ.copy()
         env["HOME"] = str(tmp_path)
         env["SCAD_INSTALL_VENV"] = str(tmp_path / "venv")
-        # Don't create .zshrc
-        result = subprocess.run(
-            [str(script), "--dry-run"],
-            capture_output=True, text=True, env=env, timeout=30
-        )
-        assert "skipping" in result.stdout.lower() or "no .zshrc" in result.stdout.lower()
+        result = subprocess.run([str(script), "--dry-run"], capture_output=True, text=True,
+                                env=env, timeout=30)
+        assert "would write completion scripts" in result.stdout.lower()
 
     def test_no_plugin_flag_still_works_as_an_alias_for_no_skills(self, tmp_path):
         """`--no-plugin` named the mechanism that used to ship scad's skills.
@@ -969,3 +967,50 @@ class TestUninstallSkillRemoval:
         assert result.returncode == 0, result.stdout + result.stderr
         assert (target / "memo-write").is_symlink()
         assert "Skipped skill removal" in result.stdout
+
+
+class TestStaticCompletion:
+    """Completion is written to a file once, at install, and the rc sources it.
+
+    Evaluating `_SCAD_COMPLETE=zsh_source scad` in the rc started Python and
+    imported scad in every new shell: 0.21 to 0.33s measured on 2026-09-29,
+    against 0.00s for sourcing a file. The file never goes stale: it only
+    defines a function that calls scad when Tab is pressed. The rc file is the
+    person's, so install.sh writes nothing into it and prints the line to add."""
+
+    def _stub(self, home: Path) -> Path:
+        stub = home / "bin" / "scad"
+        stub.parent.mkdir(parents=True, exist_ok=True)
+        stub.write_text('#!/bin/sh\necho "# completion for $_SCAD_COMPLETE"\n')
+        stub.chmod(0o755)
+        return stub
+
+    def test_the_scripts_are_written_and_the_rc_is_not_touched(self, tmp_path):
+        rc = tmp_path / ".zshrc"
+        rc.write_text("# mine\n")
+        result = _run_helper(tmp_path, f'setup_completions "{self._stub(tmp_path)}"',
+                             env_extra={"SCAD_HOME": str(tmp_path / ".scad")})
+        assert result.returncode == 0, result.stdout + result.stderr
+        done = tmp_path / ".scad" / "completion"
+        assert (done / "scad.zsh").read_text() == "# completion for zsh_source\n"
+        assert (done / "scad.bash").read_text() == "# completion for bash_source\n"
+        assert rc.read_text() == "# mine\n"
+        assert f'source "{done}/scad.zsh"' in result.stdout
+
+    def test_an_old_eval_line_is_named_with_its_replacement(self, tmp_path):
+        rc = tmp_path / ".zshrc"
+        rc.write_text('eval "$(_SCAD_COMPLETE=zsh_source scad)"\n')
+        result = _run_helper(tmp_path, f'setup_completions "{self._stub(tmp_path)}"')
+        assert "Replace the line" in result.stdout and "scad.zsh" in result.stdout
+        assert rc.read_text() == 'eval "$(_SCAD_COMPLETE=zsh_source scad)"\n'
+
+    def test_a_custom_home_prints_its_export_too(self, tmp_path):
+        (tmp_path / ".zshrc").write_text("")
+        result = _run_helper(tmp_path, f'setup_completions "{self._stub(tmp_path)}"',
+                             env_extra={"SCAD_HOME": str(tmp_path / "elsewhere")})
+        assert f'export SCAD_HOME="{tmp_path / "elsewhere"}"' in result.stdout
+
+    def test_a_failing_scad_warns_and_carries_on(self, tmp_path):
+        (tmp_path / ".zshrc").write_text("")
+        result = _run_helper(tmp_path, 'setup_completions /nonexistent/scad')
+        assert result.returncode == 0 and "could not generate" in result.stdout.lower()

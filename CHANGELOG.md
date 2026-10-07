@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `install.sh` no longer edits `~/.zshrc` or `~/.bashrc`. It writes the completion scripts to `$SCAD_HOME/completion/` and prints the line to add that sources them. Sourcing a file takes no measurable time; the old `eval "$(_SCAD_COMPLETE=zsh_source scad)"` started scad in every new shell (0.21 to 0.33 s). On a machine with the old line, install prints its replacement.
+
 ### Fixed
 
 - `scad view` showed some open Claude sessions without their tmux pane: those whose pane tmux reports as the shell rather than Claude. A session's pane now comes from the pane id Claude records in its own registry, then from the process tree.

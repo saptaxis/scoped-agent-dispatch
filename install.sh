@@ -228,6 +228,41 @@ remove_installed_skills() {
     echo "[scad] Removed $removed installed skill(s)"
 }
 
+# setup_completions SCAD_BIN -- write the completion scripts once, and print
+# the line that sources them. The rc file is the person's: nothing here writes
+# into it. Evaluating `_SCAD_COMPLETE=zsh_source scad` in the rc instead started
+# Python in every new shell (0.21-0.33s, measured 2026-09-29). The script never
+# goes stale: it only defines a function that calls scad when Tab is pressed.
+setup_completions() {
+    local bin="$1" home="${SCAD_HOME:-$HOME/.scad}" dir shell rc line
+    dir="$home/completion"
+    mkdir -p "$dir"
+    for shell in zsh bash; do
+        if ! _SCAD_COMPLETE="${shell}_source" "$bin" > "$dir/scad.$shell" 2>/dev/null \
+                || [[ ! -s "$dir/scad.$shell" ]]; then
+            rm -f "$dir/scad.$shell"
+            echo "[scad] Warning: could not generate $shell completion from $bin"
+        fi
+    done
+    if [[ -f "$HOME/.zshrc" ]]; then rc="$HOME/.zshrc"; shell=zsh
+    else rc="$HOME/.bashrc"; shell=bash; fi
+    line="[ -f \"$dir/scad.$shell\" ] && source \"$dir/scad.$shell\""
+    if [[ -f "$rc" ]] && grep -qF "_SCAD_COMPLETE=${shell}_source scad" "$rc"; then
+        echo "[scad] $rc starts scad in every new shell for completion. Replace the line"
+        echo "         eval \"\$(_SCAD_COMPLETE=${shell}_source scad)\""
+        echo "       with:"
+        echo "         $line"
+    elif [[ -f "$rc" ]] && grep -qF "$dir/scad.$shell" "$rc"; then
+        echo "[scad] Completion is already set up in $rc"
+    else
+        echo "[scad] To enable completion, add to $rc:"
+        if [[ "$home" != "$HOME/.scad" ]]; then
+            echo "         export SCAD_HOME=\"$home\""
+        fi
+        echo "         $line"
+    fi
+}
+
 # --- Uninstall flow ---
 if $UNINSTALL; then
     echo "[scad] Uninstaller"
@@ -351,12 +386,8 @@ if $DRY_RUN; then
     fi
     if $SKIP_COMPLETIONS; then
         echo "[scad] Skipping shell completions (--no-completions)"
-    elif [[ -f "$HOME/.zshrc" ]]; then
-        echo "[scad] Would add to ~/.zshrc: SCAD_HOME export + completion eval"
-    elif [[ -f "$HOME/.bashrc" ]]; then
-        echo "[scad] Would add to ~/.bashrc: SCAD_HOME export + completion eval"
     else
-        echo "[scad] No .zshrc or .bashrc found — would skip shell completions"
+        echo "[scad] Would write completion scripts to $SCAD_HOME/completion and print the line to source them"
     fi
     if $SKIP_SKILLS; then
         echo "[scad] Skipping skill installation (--no-skills)"
@@ -497,42 +528,11 @@ echo "[scad] Symlinked: $LOCAL_BIN/scad"
 mkdir -p "$SCAD_HOME/configs"
 echo "[scad] Created: $SCAD_HOME/configs/"
 
-# --- Step 4: Shell config (auto-detect shell, respect --no-completions) ---
+# --- Step 4: Shell completion (respect --no-completions) ---
 if $SKIP_COMPLETIONS; then
     echo "[scad] Skipping shell completions (--no-completions)"
 else
-    ZSHRC="$HOME/.zshrc"
-    BASHRC="$HOME/.bashrc"
-    MARKER="# scad — managed by install.sh"
-
-    if [[ -f "$ZSHRC" ]]; then
-        if grep -qF "$MARKER" "$ZSHRC"; then
-            echo "[scad] Shell config already in ~/.zshrc (skipped)"
-        else
-            {
-                echo ""
-                echo "$MARKER"
-                echo "export SCAD_HOME=\"$SCAD_HOME\""
-                echo 'eval "$(_SCAD_COMPLETE=zsh_source scad)"'
-            } >> "$ZSHRC"
-            echo "[scad] Added SCAD_HOME + completions to ~/.zshrc"
-        fi
-    elif [[ -f "$BASHRC" ]]; then
-        if grep -qF "$MARKER" "$BASHRC"; then
-            echo "[scad] Shell config already in ~/.bashrc (skipped)"
-        else
-            {
-                echo ""
-                echo "$MARKER"
-                echo "export SCAD_HOME=\"$SCAD_HOME\""
-                echo 'eval "$(_SCAD_COMPLETE=bash_source scad)"'
-            } >> "$BASHRC"
-            echo "[scad] Added SCAD_HOME + completions to ~/.bashrc"
-        fi
-    else
-        echo "[scad] No .zshrc or .bashrc found — skipping shell completions"
-        echo "[scad] Add manually: export SCAD_HOME=\"$SCAD_HOME\""
-    fi
+    setup_completions "$VENV_DIR/bin/scad"
 fi
 
 # --- Step 5: Install skills into every agent (respect --no-skills) ---
