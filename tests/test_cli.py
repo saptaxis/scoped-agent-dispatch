@@ -1963,7 +1963,7 @@ class TestRunSessionSplit:
     # a session uuid, not a run id, and a note can outlive every container that
     # ever existed.
     TRACE_VERBS = ("ls", "show", "read", "launch", "resume", "send", "memo", "memos",
-                   "snapshot")
+                   "snapshot", "restore")
 
     def test_container_verbs_live_under_run(self, runner):
         result = runner.invoke(main, ["run", "--help"])
@@ -4635,3 +4635,98 @@ class TestSessionSnapshot:
         assert "1 session: 1 claude" in result.output
         path = next((tmp_path / ".scad" / "snapshots").glob("open-*.json"))
         assert str(path) in result.output
+
+
+class TestSessionRestore:
+    """`scad session restore`: show the plan, ask once, place each session in
+    tmux order, report. Placement is mocked here; test_launch drives it in
+    real tmux."""
+
+    SESSIONS = [
+        {"name": "zeta-work", "project": "zeta", "agent": "claude", "id": "Z1",
+         "cwd": "/tmp", "tmux_session": "main", "window": "z", "pane": "main:1.0",
+         "context_tokens": 524_490, "context_window": 1_000_000, "last_active": 1},
+        {"name": "alpha-work", "project": "alpha", "agent": "codex", "id": "A1",
+         "cwd": "/tmp", "tmux_session": "main", "window": "a", "pane": "main:2.0",
+         "context_tokens": None, "context_window": None, "last_active": 1},
+        {"name": "open-one", "project": "alpha", "agent": "claude", "id": "O1",
+         "cwd": "/tmp", "tmux_session": "main", "window": "a", "pane": "main:2.1",
+         "context_tokens": None, "context_window": None, "last_active": 1},
+    ]
+
+    def _setup(self, tmp_path, monkeypatch, *, open_ids=("O1",), fail=()):
+        from scad.live import ClaudeSession
+        home = tmp_path / ".scad"
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        snaps = home / "snapshots"
+        snaps.mkdir(parents=True)
+        (snaps / "open-20261007-164521.json").write_text(json.dumps(
+            {"format": 1, "taken": "2026-10-07T16:45:21+05:30", "machine": "m",
+             "sessions": self.SESSIONS, "not_restorable": [
+                 {"pane": "main:5.1", "window": "w", "command": "codex", "cwd": "/x"}]}))
+        monkeypatch.setattr("scad.live.claude_live_sessions",
+                            lambda *a, **k: [ClaudeSession(i, 9) for i in open_ids])
+        monkeypatch.setattr("scad.live.tmux_panes", lambda: [])
+        monkeypatch.setattr("scad.launch.launch_records", lambda: [])
+        placed, tiled = [], []
+
+        def place(session, **kw):
+            if session["id"] in fail:
+                from scad.launch import LaunchError
+                raise LaunchError("tmux said no")
+            placed.append(session["id"])
+            return {"pane_id": f"%{len(placed)}", "tmux": "main:9.0",
+                    "window": session["window"], "created_window": session["id"] == "A1"}
+        monkeypatch.setattr("scad.launch.place_resume", place)
+        monkeypatch.setattr("scad.launch.tile", lambda s, w: tiled.append((s, w)))
+        return placed, tiled
+
+    def test_the_plan_is_grouped_by_project_and_marks_what_is_open(self, runner, tmp_path,
+                                                                   monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "restore"], input="n\n").output
+        assert out.index("alpha") < out.index("zeta")
+        assert "already open" in next(l for l in out.splitlines() if "open-one" in l)
+        assert "52%" in next(l for l in out.splitlines() if "zeta-work" in l)
+        assert "not restorable" in out and "main:5.1" in out
+        assert "Restore these 2?" in out
+
+    def test_yes_places_each_in_tmux_order_and_tiles_new_windows(self, runner, tmp_path,
+                                                                 monkeypatch):
+        placed, tiled = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "restore"], input="y\n")
+        assert result.exit_code == 0, result.output
+        assert placed == ["Z1", "A1"]            # main:1.0 before main:2.0, not file order
+        assert tiled == [("main", "a")]
+        assert "restored" in result.output
+
+    def test_declining_starts_nothing(self, runner, tmp_path, monkeypatch):
+        placed, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "restore"], input="n\n")
+        assert placed == []
+
+    def test_skip_and_only_take_prefixes(self, runner, tmp_path, monkeypatch):
+        placed, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "restore", "-y", "--skip", "Z"])
+        assert placed == ["A1"]
+        placed.clear()
+        runner.invoke(main, ["session", "restore", "-y", "--only", "Z"])
+        assert placed == ["Z1"]
+
+    def test_one_failure_does_not_stop_the_rest_and_fails_the_exit(self, runner, tmp_path,
+                                                                   monkeypatch):
+        placed, _ = self._setup(tmp_path, monkeypatch, fail=("Z1",))
+        result = runner.invoke(main, ["session", "restore", "-y"])
+        assert placed == ["A1"]
+        assert result.exit_code == 1
+        assert "tmux said no" in result.output
+
+    def test_list_shows_the_snapshots(self, runner, tmp_path, monkeypatch):
+        self._setup(tmp_path, monkeypatch)
+        out = runner.invoke(main, ["session", "restore", "--list"]).output
+        assert "open-20261007-164521.json" in out and "3 sessions" in out
+
+    def test_no_snapshot_says_how_to_take_one(self, runner, tmp_path, monkeypatch):
+        monkeypatch.setenv("SCAD_HOME", str(tmp_path / ".scad"))
+        result = runner.invoke(main, ["session", "restore"])
+        assert result.exit_code == 1 and "scad session snapshot" in result.output

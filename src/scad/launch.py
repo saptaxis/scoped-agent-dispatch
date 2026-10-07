@@ -376,10 +376,17 @@ def new_session(name: str, cwd: Path, command: str) -> str:
 # --- putting a session from a snapshot back into a pane (`session restore`) ---
 
 def resume_for(session: dict) -> str:
-    """The command `session resume` would run for this session: `cd DIR && <resume>`."""
+    """The command `session resume` would run for this session: `cd DIR && <resume>`.
+
+    Without the `cd` when the directory is gone, as `session resume` does: the
+    cd would fail and `&&` would stop the resume with it.
+    """
     from scad.view import resume_command
+    cwd = session.get("cwd")
+    if cwd and not Path(cwd).is_dir():
+        cwd = None
     return resume_command({"id": session["id"], "agent": session.get("agent") or "claude",
-                           "cwd": session.get("cwd"), "kind": "main"})
+                           "cwd": cwd, "kind": "main"})
 
 
 def _window_active_pane(tmux_session: str, window: str) -> str | None:

@@ -2324,6 +2324,122 @@ def session_snapshot():
     click.echo(f"[scad] {path}")
 
 
+def _pane_order(session: dict) -> tuple:
+    """`main:3.2` as (main, 3, 2), so windows come back in tmux order."""
+    pane = session.get("pane") or ""
+    tsess, _, rest = pane.partition(":")
+    window, _, index = rest.partition(".")
+    num = lambda x: int(x) if x.isdigit() else 1_000_000
+    return (tsess or "~", num(window), num(index))
+
+
+@session.command("restore")
+@click.argument("snapshot_file", required=False, type=click.Path(exists=True, dir_okay=False))
+@click.option("--list", "list_only", is_flag=True, help="List recent snapshots and exit.")
+@click.option("--skip", "skips", multiple=True, help="Leave out this session (id prefix; repeatable).")
+@click.option("--only", "onlys", multiple=True, help="Restore only this session (id prefix; repeatable).")
+@click.option("-y", "--yes", is_flag=True, help="Do not ask before restoring.")
+def session_restore(snapshot_file, list_only, skips, onlys, yes):
+    """Bring back the sessions a snapshot recorded, each in the window it came from.
+
+    Reads the newest snapshot unless one is named. Shows the plan, asks once,
+    then resumes each session in its own directory: as a split of its window
+    when that window exists, otherwise in a new window of that name. A session
+    that is open right now is never started a second time.
+    """
+    from scad import launch as launch_mod
+    from scad import snapshot
+    from scad.view import context_short, _ago
+
+    if list_only:
+        paths = snapshot.snapshot_paths()
+        if not paths:
+            click.echo("[scad] No snapshots. Take one with: scad session snapshot")
+            return
+        for p in paths[:20]:
+            try:
+                data = snapshot.read(p)
+                click.echo(f"{p.name}  {data.get('taken', '?')}  {snapshot.summary(data)}")
+            except (OSError, ValueError):
+                click.echo(f"{p.name}  (unreadable)")
+        return
+
+    path = Path(snapshot_file) if snapshot_file else snapshot.latest()
+    if path is None:
+        raise click.ClickException(
+            "No snapshot to restore. Take one before a restart with: scad session snapshot")
+    data = snapshot.read(path)
+    sessions = data.get("sessions") or []
+    open_ids = {s["id"] for s in snapshot.gather(
+        index_connect(), _live_sessions_now(),
+        _tmux_panes_now(), launch_mod.launch_records())["sessions"]}
+
+    def chosen(s) -> bool:
+        if onlys and not any(s["id"].startswith(o) for o in onlys):
+            return False
+        return not any(s["id"].startswith(k) for k in skips)
+
+    click.echo(f"[scad] {path.name}, taken {data.get('taken', '?')}: {snapshot.summary(data)}")
+    todo = []
+    project = object()
+    # Grouped for reading whatever the file's order; placement uses tmux order.
+    for s in sorted(sessions, key=lambda x: ((x.get("project") or "").lower(),
+                                             (x.get("name") or "").lower())):
+        if s.get("project") != project:
+            project = s.get("project")
+            click.echo(f"  {project or '(no project)'}")
+        if s["id"] in open_ids:
+            note = "already open"
+        elif not chosen(s):
+            note = "skipped"
+        else:
+            note = ""
+            todo.append(s)
+        ctx = context_short(s.get("context_tokens"), s.get("context_window"))
+        click.echo(f"    {(s.get('name') or s['id'][:12])[:30]:<30} {s.get('agent', ''):<7} "
+                   f"{(s.get('window') or '-'):<12} {ctx:>5}  "
+                   f"{_ago(s.get('last_active')) or '':<9} {note}".rstrip())
+    for p in data.get("not_restorable") or []:
+        click.echo(f"  not restorable: {p.get('pane')} ({p.get('command')}, window "
+                   f"{p.get('window')}): started outside scad")
+    if not todo:
+        click.echo("[scad] Nothing to restore.")
+        return
+    if not yes and not click.confirm(f"Restore these {len(todo)}?", default=True):
+        return
+
+    failed = 0
+    created = []
+    for s in sorted(todo, key=_pane_order):
+        if s.get("cwd") and not Path(s["cwd"]).is_dir():
+            click.echo(f"[scad] warning: {s['cwd']} no longer exists; "
+                       f"{s['id'][:12]} resumes without changing directory.", err=True)
+        try:
+            record = launch_mod.place_resume(s)
+        except Exception as exc:            # one failure must not stop the rest
+            failed += 1
+            click.echo(f"[scad] failed   {(s.get('name') or s['id'][:12])}: {exc}")
+            continue
+        if record.get("created_window"):
+            created.append((record.get("tmux", "").split(":")[0] or s.get("tmux_session"),
+                            record.get("window")))
+        click.echo(f"[scad] restored {(s.get('name') or s['id'][:12])} in {record.get('tmux')}")
+    for tsess, window in dict.fromkeys(created):
+        launch_mod.tile(tsess, window)
+    if failed:
+        raise SystemExit(1)
+
+
+def _live_sessions_now():
+    from scad.live import claude_live_sessions
+    return claude_live_sessions()
+
+
+def _tmux_panes_now():
+    from scad.live import tmux_panes
+    return tmux_panes()
+
+
 @session.command("show")
 @click.argument("session_id", shell_complete=_complete_sessions)
 def session_show(session_id):

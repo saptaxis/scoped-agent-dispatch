@@ -720,6 +720,13 @@ class TestLaunching:
                               command="sleep 30", default_session="box")
         assert record["pane_id"] in self._panes_in("box:backlog")
 
+    def test_a_gone_directory_resumes_without_the_cd(self, tmp_path):
+        """`cd GONE && claude --resume` would stop at the cd and resume nothing.
+        Same rule as `session resume`: resume anyway, somewhere else."""
+        from scad.launch import resume_for
+        cmd = resume_for(self._snap(cwd=str(tmp_path / "gone")))
+        assert cmd == "claude --resume S1"
+
     def test_the_resume_command_is_the_agents_own(self, tmp_path):
         """No stub given: the pane runs the same command `session resume` uses."""
         from scad.launch import resume_for
