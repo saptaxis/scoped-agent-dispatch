@@ -4820,3 +4820,68 @@ class TestSessionHandoff:
         result = runner.invoke(main, ["session", "handoff", "S1", "--timeout", "0.05"])
         assert result.exit_code == 1
         assert "sent" in result.output and "scad memos ls --session S1" in result.output
+
+
+class TestLaunchFrom:
+    """`scad session launch --from ID`: a fresh session picks up ID's work, from
+    its handoff memo and the turns after it, or from its last turns when it has
+    no handoff. The source does not have to write anything."""
+
+    def _setup(self, tmp_path, monkeypatch, *, handoff=True):
+        from scad.index import connect, upsert_session
+        from scad.memos import append_memo
+        from scad.records import SessionRecord
+        home = tmp_path / ".scad"
+        monkeypatch.setenv("SCAD_HOME", str(home))
+        src = tmp_path / "repo"
+        src.mkdir()
+        conn = connect(home / "index.sqlite")
+        upsert_session(conn, SessionRecord(id="SRC1", kind="main", agent="claude",
+                                           source="claude-transcript", cwd=str(src), ended=1),
+                       machine="m", project="proj", archive_path="/a", source_size=1,
+                       source_mtime=1, parsed_offset=1)
+        append_memo({"kind": "info", "title": "a finding"}, session_id="SRC1")
+        if handoff:
+            append_memo({"kind": "handoff", "title": "where it stands",
+                         "ts": "2026-10-07T12:00:00+05:30"}, session_id="SRC1")
+            append_memo({"kind": "info", "title": "later note"}, session_id="SRC1")
+        calls = []
+        monkeypatch.setattr("scad.cli.launch_agent", lambda agent, cwd, **kw: calls.append(
+            (agent, cwd, kw)) or {"session_id": "NEW", "tmux": "main:1.1", "agent": agent})
+        return calls, src
+
+    def test_with_a_handoff_it_names_that_memo_and_the_turns_after_it(self, runner, tmp_path,
+                                                                     monkeypatch):
+        calls, src = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "SRC1"])
+        assert result.exit_code == 0, result.output
+        (agent, cwd, kw), = calls
+        prompt = kw["prompt"]
+        assert cwd == src
+        assert "scad memos read SRC1 --idx 1" in prompt
+        assert "scad session read SRC1 --kind text --since 2026-10-07T12:00:00+05:30" in prompt
+        assert "/memo-handoff" in prompt and "continue the work" in prompt
+
+    def test_without_a_handoff_it_reads_the_last_200_turns(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch, handoff=False)
+        runner.invoke(main, ["session", "launch", "--agent", "codex", "--from", "SRC1"])
+        prompt = calls[0][2]["prompt"]
+        assert "scad session read SRC1 --kind text --last 200" in prompt
+        assert "scad memos ls --session SRC1" in prompt
+
+    def test_the_prompt_says_where_to_take_it(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "SRC1",
+                             "--prompt", "prepare the orglens side"])
+        assert calls[0][2]["prompt"].rstrip().endswith("Then: prepare the orglens side")
+
+    def test_cwd_overrides_the_sources_directory(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch)
+        runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "SRC1",
+                             "--cwd", str(tmp_path)])
+        assert calls[0][1] == tmp_path
+
+    def test_an_unknown_source_starts_nothing(self, runner, tmp_path, monkeypatch):
+        calls, _ = self._setup(tmp_path, monkeypatch)
+        result = runner.invoke(main, ["session", "launch", "--agent", "claude", "--from", "NOPE"])
+        assert result.exit_code == 1 and calls == []

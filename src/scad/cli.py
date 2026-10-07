@@ -2565,6 +2565,37 @@ def _exec(argv: list[str]) -> None:
     os.execvp(argv[0], argv)
 
 
+def _from_prompt(source, where_next: str | None) -> str:
+    """The first turn of a session started `--from` another one.
+
+    It names exact commands, looked up now: the newest handoff memo by its index
+    and every turn written after it, or, with no handoff, the last 200 text
+    turns. Reading the turns after a handoff means a stale one costs nothing
+    extra and misses nothing; there is no "recent enough" rule to tune.
+    """
+    from scad.view import _ago
+    sid, agent = source["id"], source["agent"] or "claude"
+    handoffs = [(i, m) for i, m in enumerate(hydrate_memos(read_memo_file(
+        _resolve_memo_path(sid, agent)))) if m.get("kind") == "handoff"]
+    when = _ago(source["ended"]) or "unknown"
+    lines = [f"Pick up the work of session {sid} ({agent}, {source['project'] or 'no project'}, "
+             f"last active {when}). It may be too full to write its own handoff, so you read "
+             f"what it did instead."]
+    if handoffs:
+        idx, memo = handoffs[-1]
+        lines.append(f"1. Run /memo-recall for it: read its newest handoff memo "
+                     f"(scad memos read {sid} --idx {idx}), then every turn written after it "
+                     f"(scad session read {sid} --kind text --since {memo.get('ts')}).")
+    else:
+        lines.append(f"1. Run /memo-recall for it. It has no handoff memo: read its last 200 "
+                     f"text turns (scad session read {sid} --kind text --last 200), its memos "
+                     f"(scad memos ls --session {sid}), and git in its directory.")
+    lines.append("2. Write a handoff memo with /memo-handoff, filed against this session, "
+                 "from what you found.")
+    lines.append(f"3. Then: {where_next}" if where_next else "3. Then continue the work.")
+    return "\n".join(lines)
+
+
 @session.command("launch")
 @click.option("--agent", required=True, type=click.Choice(AGENTS),
               help="Which family to launch.")
@@ -2584,10 +2615,15 @@ def _exec(argv: list[str]) -> None:
                    "window's active pane instead: a window name (review) or a target "
                    "(main:4).")
 @click.option("--attach", is_flag=True, help="Attach to the pane afterwards.")
+@click.option("--from", "from_id", default=None, shell_complete=_complete_sessions,
+              help="Pick up this session's work: the new session reads its handoff memo, or "
+                   "its last turns, writes a handoff, then follows --prompt. Works on a "
+                   "session too full to write its own. The directory defaults to its.")
 @click.option("--json", "as_json", is_flag=True,
               help="Emit the launch record as JSON. The session id is a contract; "
                    "do not scrape it from the human-facing lines.")
-def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as_json):
+def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, from_id,
+                   as_json):
     """Start an interactive agent in tmux, and record which session it became.
 
     Detached: it prints the pane and the way back in, and leaves your
@@ -2604,6 +2640,14 @@ def session_launch(agent, cwd, prompt, add_dirs, name, window, split, attach, as
     """
     # Bare --split arrives as "" (the caller's pane); a value names a window.
     split = True if split == "" else split
+    if from_id:
+        source = session_row(index_connect(), from_id)
+        if source is None:
+            raise click.ClickException(f"No session {from_id} in the index.")
+        if not cwd:
+            here = aliases.current_cwd(source["cwd"])
+            cwd = here if here and Path(here).is_dir() else None
+        prompt = _from_prompt(source, prompt)
     target_cwd = Path(cwd) if cwd else Path.cwd()
 
     # Under --json, stdout is a data channel and nothing else may be on it.
