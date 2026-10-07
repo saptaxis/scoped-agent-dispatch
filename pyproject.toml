@@ -51,3 +51,6 @@ scad = ["templates/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "vm: uses the real scad VM and Docker daemon; skipped unless pytest --run-vm",
+]

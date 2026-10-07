@@ -16,6 +16,16 @@ pip install -e ".[dev]"
 pytest
 ```
 
+The suite never touches the machine it runs on: `SCAD_HOME` and `SCAD_ARCHIVE` point
+at a temporary directory, and any test that runs `colima` or reaches the Docker
+daemon fails. A test that needs the real scad VM is marked `@pytest.mark.vm` and is
+skipped unless asked for. It restarts the VM and stops every container in it, so run
+it on purpose:
+
+```bash
+pytest --run-vm -m vm
+```
+
 ## Code style
 
 - Python 3.11+, type hints
