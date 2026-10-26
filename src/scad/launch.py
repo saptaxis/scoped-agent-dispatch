@@ -955,14 +955,16 @@ def launch(agent: str, cwd, *, prompt: str | None = None,
 
     if agent not in AGENTS:
         raise LaunchError(f"Unknown agent {agent!r}. One of: {', '.join(AGENTS)}.")
-    add_dirs = [str(Path(d).expanduser()) for d in add_dirs]
+    add_dirs = [os.path.abspath(Path(d).expanduser()) for d in add_dirs]
     if add_dirs and agent != "claude":
         # Refused, not dropped: a session told about directories it cannot
         # reach would look launched and be wrong. codex and kimi have no
         # equivalent flag; their sandboxes are set elsewhere.
         raise LaunchError(f"--add-dir is Claude-only; {agent} has no equivalent flag.")
 
-    cwd = Path(cwd).expanduser()
+    # Absolute before anything records it: a relative path in a launch record
+    # is read later against whatever directory the reader happens to run in.
+    cwd = Path(os.path.abspath(Path(cwd).expanduser()))
     if not cwd.is_dir():
         raise LaunchError(f"{cwd} is not a directory.")
 
