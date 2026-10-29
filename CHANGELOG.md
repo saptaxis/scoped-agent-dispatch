@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-29
+
+### Added
+
+- Snapshot sessions include `last_active_at`, the last activity as a local ISO 8601 time with its offset. `last_active` (epoch milliseconds) is unchanged.
+
+### Fixed
+
+- `scad session launch` stores `--cwd` and `--add-dir` as absolute paths. A relative value such as `.` was stored unchanged, so the index, `session resume`, `session restore` and orglens each resolved it against their own working directory.
+
+### Upgrading
+
+- Launch records written before 0.10.1 keep their relative directory.
+
 ## [0.10.0] - 2026-10-07
 
 ### Added

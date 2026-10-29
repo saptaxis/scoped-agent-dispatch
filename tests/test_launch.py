@@ -549,6 +549,23 @@ class TestLaunching:
 
         assert record["tmux"] in self._panes()
 
+    def test_a_relative_cwd_is_recorded_as_an_absolute_path(self, tmp_path,
+                                                            monkeypatch):
+        """`--cwd .` stored as `.` is read later against whatever directory
+        the reader runs in: the index, restore and orglens each put the session
+        somewhere else."""
+        from scad.launch import launch
+
+        work = tmp_path / "work"
+        (work / "docs").mkdir(parents=True)
+        monkeypatch.chdir(work)
+        binary, _ = self._stub(tmp_path, [{"print": CLAUDE_READY}])
+        record = launch("claude", ".", binary=binary, add_dirs=["docs"])
+
+        assert record["cwd"] == str(work.resolve())
+        assert record["add_dirs"] == [str(work.resolve() / "docs")]
+        assert record["resume"].startswith(f"cd {work.resolve()} && ")
+
     # --- claude: the id is minted --------------------------------------------
 
     def test_claude_is_launched_with_the_id_scad_chose(self, tmp_path):
