@@ -12,7 +12,7 @@ from scad.resolve import (
     resolve,
 )
 
-__version__ = "0.10.0"
+__version__ = "0.10.1"
 
 __all__ = [
     "ASK",
