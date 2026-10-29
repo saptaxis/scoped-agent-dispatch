@@ -86,6 +86,18 @@ class TestTheFile:
         (s,) = _gather(conn, [ClaudeSession("S1", 200)], [])["sessions"]
         assert list(s)[:4] == ["name", "project", "agent", "id"]
 
+    def test_last_active_is_also_written_as_a_local_time(self, tmp_path):
+        from datetime import datetime
+        conn = _index(tmp_path, ("S1", "scad", "n", "claude", None, None))
+        data = _gather(conn, [ClaudeSession("S1", 200), ClaudeSession("S2", 201)], [])
+        by_id = {s["id"]: s for s in data["sessions"]}
+        assert by_id["S1"]["last_active"] == 1_000
+        assert by_id["S1"]["last_active_at"] == \
+            datetime.fromtimestamp(1).astimezone().isoformat(timespec="seconds")
+        assert by_id["S2"]["last_active_at"] is None      # not indexed, no registry time
+        keys = list(by_id["S1"])
+        assert keys.index("last_active_at") == keys.index("last_active") + 1
+
     def test_take_writes_an_indented_file_and_says_what_it_holds(self, tmp_path, monkeypatch):
         from scad.snapshot import snapshots_root, take
         conn = _index(tmp_path, ("S1", "scad", "n", "claude", None, None))

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Each session in a snapshot also has `last_active_at`, its last activity as a local time, next to `last_active` in epoch milliseconds.
+
 ### Fixed
 
 - `scad session launch` records the session's directory as an absolute path. A relative `--cwd`, such as `.`, was stored as given, so the index, `session resume`, `session restore` and orglens each read it against their own working directory.

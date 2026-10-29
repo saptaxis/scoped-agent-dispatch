@@ -108,6 +108,7 @@ def gather(conn, sessions: list, panes: list, records: list) -> dict:
             found_by = "launch-record"
         pane = by_target.get(target) if target else None
         base = indexed.get(sid, {})
+        last_active = base.get("ended") or (claude.updated_at if claude else None)
         out.append({
             "name": row.get("name") or base.get("name") or "",
             "project": row.get("project") or base.get("project"),
@@ -117,7 +118,8 @@ def gather(conn, sessions: list, panes: list, records: list) -> dict:
             "cwd_recorded": base.get("cwd") or (claude.cwd if claude else None),
             "context_tokens": base.get("context_tokens"),
             "context_window": base.get("context_window"),
-            "last_active": base.get("ended") or (claude.updated_at if claude else None),
+            "last_active": last_active,
+            "last_active_at": _local_time(last_active),
             "tmux_session": pane.session if pane else None,
             "window": pane.window if pane else None,
             "pane": target if pane else None,
@@ -135,6 +137,13 @@ def gather(conn, sessions: list, panes: list, records: list) -> dict:
         "sessions": out,
         "not_restorable": not_restorable,
     }
+
+
+def _local_time(epoch_ms) -> str | None:
+    """Epoch ms as a local ISO time, for the person reading the file."""
+    if not epoch_ms:
+        return None
+    return datetime.fromtimestamp(epoch_ms / 1000).astimezone().isoformat(timespec="seconds")
 
 
 def summary(data: dict) -> str:
